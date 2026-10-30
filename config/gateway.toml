@@ -1,0 +1,21 @@
+# Runtime configuration for the Market Data Gateway.
+# Instrument Reference Data lives separately under config/instruments/*.yaml.
+
+[server]
+host = "127.0.0.1"
+http_port = 8080
+ws_path = "/ws"
+
+[bus]
+# v1 single-process walking skeleton uses the in-process ZMQ transport.
+transport = "inproc"
+zmq_hwm = 10000
+
+[storage]
+root = "./data"
+schema_version = 1
+format_version = "2.6"
+compression = "zstd"
+row_group_size = 1000000
+flush_max_bytes = 67108864
+flush_max_age_s = 3600

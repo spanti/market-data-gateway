@@ -1,0 +1,11 @@
+name: nautilus
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  - pyarrow
+  - pyzmq
+  - aiohttp
+  - pyyaml
+  - pytest
+  - pip
