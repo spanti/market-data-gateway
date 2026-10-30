@@ -12,6 +12,9 @@ FORBIDDEN_ROOTS = {
     "backtesting",
     "zipline",
     "vectorbt",
+    "rqalpha",
+    "quantaxis",
+    "pyalgotrade",
 }
 
 
