@@ -14,10 +14,12 @@ import pyarrow.dataset as pds
 import pyarrow.parquet as pq
 
 from mdgw.core.bar import Bar
+from mdgw.core.errors import SchemaVersionMismatch
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import (
+    BAR_SCHEMA,
     PARTITION_COLUMNS,
-    PHYSICAL_SCHEMA,
+    UTC_TS,
     bars_to_physical_table,
     empty_logical_table,
     schema_json,
@@ -29,6 +31,7 @@ DATASET_SCHEMA_VERSION = 1
 MANIFEST_NAME = "_manifest.json"
 DATASET_DESCRIPTOR_NAME = "_dataset.json"
 FILE_NAMING = "data-<start_ns>-<end_ns>-<uuid>.parquet"
+DEFAULT_BATCH_SIZE = 65_536
 
 
 class ParquetBarStore:
@@ -139,29 +142,143 @@ class ParquetBarStore:
         manifest["files"].extend(files)
         _write_json(path, manifest)
 
+    def validate_schema_version(self) -> None:
+        """Reject a Dataset written under a different Data Contract version."""
+        descriptor_path = self.dataset_root / DATASET_DESCRIPTOR_NAME
+        if not descriptor_path.exists():
+            return
+        try:
+            descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SchemaVersionMismatch(
+                f"cannot read Dataset descriptor {descriptor_path}: {exc}"
+            ) from exc
+
+        found = descriptor.get("schema_version")
+        if found != self.schema_version:
+            raise SchemaVersionMismatch(
+                f"Dataset schema_version {found!r} does not match "
+                f"the expected {self.schema_version}"
+            )
+
+    def iter_batches(
+        self,
+        *,
+        instrument_id: str | None = None,
+        interval: str | None = None,
+        start_ns: int | None = None,
+        end_ns: int | None = None,
+        limit: int | None = None,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+    ):
+        """Yield Bar RecordBatches without materializing the whole Dataset.
+
+        `start_ns` is inclusive and `end_ns` is exclusive, both applied to
+        `open_ts`. `limit` caps the total number of rows yielded.
+        """
+        self.validate_schema_version()
+        if not self._has_data_files():
+            return
+
+        dataset = pds.dataset(
+            self.dataset_root, format="parquet", partitioning="hive"
+        )
+        scanner = dataset.scanner(
+            columns=list(BAR_SCHEMA.names),
+            filter=self._filter_expression(
+                instrument_id=instrument_id,
+                interval=interval,
+                start_ns=start_ns,
+                end_ns=end_ns,
+            ),
+            batch_size=batch_size,
+        )
+
+        remaining = limit
+        for batch in scanner.to_batches():
+            if remaining is not None:
+                if remaining <= 0:
+                    break
+                if batch.num_rows > remaining:
+                    batch = batch.slice(0, remaining)
+                remaining -= batch.num_rows
+            yield pa.RecordBatch.from_arrays(
+                [batch.column(name) for name in BAR_SCHEMA.names],
+                schema=BAR_SCHEMA,
+            )
+
+    def count_bars(
+        self,
+        *,
+        instrument_id: str | None = None,
+        interval: str | None = None,
+        start_ns: int | None = None,
+        end_ns: int | None = None,
+    ) -> int:
+        """Count matching Bars, used to enforce the JSON row ceiling."""
+        self.validate_schema_version()
+        if not self._has_data_files():
+            return 0
+
+        dataset = pds.dataset(
+            self.dataset_root, format="parquet", partitioning="hive"
+        )
+        return int(
+            dataset.count_rows(
+                filter=self._filter_expression(
+                    instrument_id=instrument_id,
+                    interval=interval,
+                    start_ns=start_ns,
+                    end_ns=end_ns,
+                )
+            )
+        )
+
     def read_bars(
         self,
         *,
         instrument_id: str | None = None,
         interval: str | None = None,
+        start_ns: int | None = None,
+        end_ns: int | None = None,
+        limit: int | None = None,
     ) -> pa.Table:
-        if not self._has_data_files():
-            return empty_logical_table()
-
-        dataset = pds.dataset(self.dataset_root, format="parquet", partitioning="hive")
-        expression = None
-        if instrument_id is not None:
-            expression = pds.field("instrument_id") == instrument_id
-        if interval is not None:
-            interval_expression = pds.field("interval") == interval
-            expression = (
-                interval_expression
-                if expression is None
-                else expression & interval_expression
+        batches = list(
+            self.iter_batches(
+                instrument_id=instrument_id,
+                interval=interval,
+                start_ns=start_ns,
+                end_ns=end_ns,
+                limit=limit,
             )
+        )
+        if not batches:
+            return empty_logical_table()
+        return pa.Table.from_batches(batches, schema=BAR_SCHEMA)
 
-        columns = list(PHYSICAL_SCHEMA.names) + ["interval"]
-        return dataset.to_table(columns=columns, filter=expression)
+    @staticmethod
+    def _filter_expression(
+        *,
+        instrument_id: str | None,
+        interval: str | None,
+        start_ns: int | None,
+        end_ns: int | None,
+    ):
+        expression = None
+
+        def combine(clause):
+            nonlocal expression
+            expression = clause if expression is None else expression & clause
+
+        if instrument_id is not None:
+            combine(pds.field("instrument_id") == instrument_id)
+        if interval is not None:
+            combine(pds.field("interval") == interval)
+        if start_ns is not None:
+            combine(pds.field("open_ts") >= pa.scalar(start_ns, type=UTC_TS))
+        if end_ns is not None:
+            combine(pds.field("open_ts") < pa.scalar(end_ns, type=UTC_TS))
+        return expression
 
     def _has_data_files(self) -> bool:
         manifest_path = self.dataset_root / MANIFEST_NAME

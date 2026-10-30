@@ -1,0 +1,17 @@
+{
+  "fields": [
+    {"name": "instrument_id", "type": "string", "nullable": false},
+    {"name": "venue", "type": "string", "nullable": false},
+    {"name": "symbol", "type": "string", "nullable": false},
+    {"name": "asset_class", "type": "string", "nullable": false},
+    {"name": "instrument_type", "type": "string", "nullable": false},
+    {"name": "base", "type": "string", "nullable": false},
+    {"name": "quote", "type": "string", "nullable": false},
+    {"name": "tick_size", "type": "decimal128(38, 18)", "nullable": false},
+    {"name": "lot_size", "type": "decimal128(38, 18)", "nullable": false},
+    {"name": "multiplier", "type": "decimal128(38, 18)", "nullable": false},
+    {"name": "timezone", "type": "string", "nullable": false},
+    {"name": "listing_ts", "type": "timestamp[ns, tz=UTC]", "nullable": false},
+    {"name": "delisted_ts", "type": "timestamp[ns, tz=UTC]", "nullable": true}
+  ]
+}

@@ -1,4 +1,4 @@
-"""Arrow representation of the Bar Data Contract (v1)."""
+"""Arrow representation of the Data Contract (v1): Bar, Instrument, Envelope."""
 
 from __future__ import annotations
 
@@ -24,7 +24,40 @@ INTERVALS: dict[str, timedelta] = {
     "1d": timedelta(days=1),
 }
 
-# Logical schema: envelope columns plus Bar payload columns.
+# Message Envelope columns (DESIGN §3.1). Every streaming message carries these
+# alongside its payload columns, so they are also present in BAR_SCHEMA below.
+MESSAGE_ENVELOPE_SCHEMA = pa.schema(
+    [
+        pa.field("schema_version", pa.uint16(), nullable=False),
+        pa.field("data_type", pa.string(), nullable=False),
+        pa.field("instrument_id", pa.string(), nullable=False),
+        pa.field("event_ts", UTC_TS, nullable=False),
+        pa.field("ingest_ts", UTC_TS, nullable=False),
+        pa.field("feed", pa.string(), nullable=False),
+        pa.field("seq", pa.int64(), nullable=True),
+    ]
+)
+
+# Bar payload columns (DESIGN §3.1). Instrument identity, event/ingestion time and
+# feed live in the Message Envelope, so they are not repeated here.
+BAR_PAYLOAD_SCHEMA = pa.schema(
+    [
+        pa.field("interval", pa.string(), nullable=False),
+        pa.field("open_ts", UTC_TS, nullable=False),
+        pa.field("close_ts", UTC_TS, nullable=False),
+        pa.field("aggregation_source", pa.string(), nullable=False),
+        pa.field("open", PRICE, nullable=False),
+        pa.field("high", PRICE, nullable=False),
+        pa.field("low", PRICE, nullable=False),
+        pa.field("close", PRICE, nullable=False),
+        pa.field("volume", QUANTITY, nullable=False),
+        pa.field("trade_count", pa.uint32(), nullable=True),
+        pa.field("revision", pa.uint32(), nullable=False),
+    ]
+)
+
+# Logical schema: envelope columns plus Bar payload columns. This is the Arrow
+# schema used on ZMQ, in Arrow IPC responses and as the read-side Bar contract.
 BAR_SCHEMA = pa.schema(
     [
         pa.field("schema_version", pa.uint16(), nullable=False),
@@ -45,6 +78,26 @@ BAR_SCHEMA = pa.schema(
         pa.field("volume", QUANTITY, nullable=False),
         pa.field("trade_count", pa.uint32(), nullable=True),
         pa.field("revision", pa.uint32(), nullable=False),
+    ]
+)
+
+# Instrument Reference Data contract (DESIGN §3.1). Ticket 02 only defines the
+# schema; YAML loading and the Instrument Snapshot belong to a later ticket.
+INSTRUMENT_SCHEMA = pa.schema(
+    [
+        pa.field("instrument_id", pa.string(), nullable=False),
+        pa.field("venue", pa.string(), nullable=False),
+        pa.field("symbol", pa.string(), nullable=False),
+        pa.field("asset_class", pa.string(), nullable=False),
+        pa.field("instrument_type", pa.string(), nullable=False),
+        pa.field("base", pa.string(), nullable=False),
+        pa.field("quote", pa.string(), nullable=False),
+        pa.field("tick_size", PRICE, nullable=False),
+        pa.field("lot_size", QUANTITY, nullable=False),
+        pa.field("multiplier", QUANTITY, nullable=False),
+        pa.field("timezone", pa.string(), nullable=False),
+        pa.field("listing_ts", UTC_TS, nullable=False),
+        pa.field("delisted_ts", UTC_TS, nullable=True),
     ]
 )
 
@@ -121,8 +174,8 @@ def arrow_type_name(dtype: pa.DataType) -> str:
     return str(dtype)
 
 
-def schema_json() -> dict[str, list[dict[str, Any]]]:
-    """生成 JSON 数据契约定义。"""
+def schema_to_json(schema: pa.Schema) -> dict[str, list[dict[str, Any]]]:
+    """Render an Arrow schema as the JSON form stored in `_dataset.json`."""
     return {
         "fields": [
             {
@@ -130,6 +183,21 @@ def schema_json() -> dict[str, list[dict[str, Any]]]:
                 "type": arrow_type_name(field.type),
                 "nullable": field.nullable,
             }
-            for field in BAR_SCHEMA
+            for field in schema
         ]
     }
+
+
+def schema_json() -> dict[str, list[dict[str, Any]]]:
+    """JSON representation of the Bar Data Contract."""
+    return schema_to_json(BAR_SCHEMA)
+
+
+def instrument_schema_json() -> dict[str, list[dict[str, Any]]]:
+    """JSON representation of the Instrument Data Contract."""
+    return schema_to_json(INSTRUMENT_SCHEMA)
+
+
+def message_envelope_schema_json() -> dict[str, list[dict[str, Any]]]:
+    """JSON representation of the Message Envelope contract."""
+    return schema_to_json(MESSAGE_ENVELOPE_SCHEMA)
