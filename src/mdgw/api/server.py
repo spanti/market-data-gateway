@@ -4,38 +4,54 @@ from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
+from typing import Any
 
 import pyarrow as pa
 from aiohttp import web
+import logging
 
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import ns_to_iso
 from mdgw.store.parquet_dataset import ParquetBarStore
 
+logger = logging.getLogger(__name__)
 TIMESTAMP_COLUMNS = ("open_ts", "close_ts", "event_ts", "ingest_ts")
 
 
 def create_app(store: ParquetBarStore) -> web.Application:
+    """Create an aiohttp web application for the Bar history API."""
     app = web.Application()
     app.router.add_get("/api/v1/bars", _make_bars_handler(store))
     return app
 
+def _validate_request(request: web.Request) -> tuple[str, str | None] | web.Response:
+    """Validate the request query parameters for the Bar history API.
+
+    Returns a tuple of (interval, instrument) if valid, or a web.Response with an error if invalid.
+    """
+    interval = request.query.get("interval")
+    if not interval or interval not in INTERVALS:
+        return _error(
+            code="invalid_interval",
+            message="query parameter 'interval' is required and must be a Bar Interval",
+        )
+
+    instrument = request.query.get("instrument")
+    if instrument is not None and ":" not in instrument:
+        return _error(
+            code="invalid_instrument",
+            message="query parameter 'instrument' must be an InstrumentId",
+        )
+
+    return interval, instrument
 
 def _make_bars_handler(store: ParquetBarStore):
+    """Create a request handler for the Bar history API."""
     async def handle_bars(request: web.Request) -> web.Response:
-        interval = request.query.get("interval")
-        if not interval or interval not in INTERVALS:
-            return _error(
-                "invalid_interval",
-                "query parameter 'interval' is required and must be a Bar Interval",
-            )
-
-        instrument = request.query.get("instrument")
-        if instrument is not None and ":" not in instrument:
-            return _error(
-                "invalid_instrument",
-                "query parameter 'instrument' must be an InstrumentId",
-            )
+        validation_result = _validate_request(request)
+        if isinstance(validation_result, web.Response):
+            return validation_result
+        interval, instrument = validation_result
 
         try:
             table = await asyncio.to_thread(
@@ -50,40 +66,43 @@ def _make_bars_handler(store: ParquetBarStore):
 
 
 def table_to_messages(table: pa.Table) -> list[dict]:
+    """Convert an Arrow Table of Bars into a list of JSON-serializable messages."""
     if table.num_rows == 0:
         return []
 
-    columns = {
-        name: table.column(name).to_pylist() for name in table.column_names
-    }
-    timestamps = {
-        name: table.column(name).cast(pa.int64()).to_pylist()
-        for name in TIMESTAMP_COLUMNS
-    }
+    for col in TIMESTAMP_COLUMNS:
+        if col in table.column_names:
+            table = table.set_column(
+                table.column_names.index(col),
+                col,
+                table.column(col).cast(pa.int64())
+            )
 
-    messages: list[dict] = []
-    for index in range(table.num_rows):
+    raw_rows = table.to_pylist()
+    messages: list[dict[str, Any]] = []
+
+    for row in raw_rows:
         messages.append(
             {
-                "schema_version": columns["schema_version"][index],
-                "data_type": columns["data_type"][index],
-                "instrument_id": columns["instrument_id"][index],
-                "event_ts": ns_to_iso(timestamps["event_ts"][index]),
-                "ingest_ts": ns_to_iso(timestamps["ingest_ts"][index]),
-                "feed": columns["feed"][index],
-                "seq": columns["seq"][index],
+                "schema_version": row["schema_version"],
+                "data_type": row["data_type"],
+                "instrument_id": row["instrument_id"],
+                "event_ts": ns_to_iso(row["event_ts"]),
+                "ingest_ts": ns_to_iso(row["ingest_ts"]),
+                "feed": row["feed"],
+                "seq": row["seq"],
                 "payload": {
-                    "interval": columns["interval"][index],
-                    "open_ts": ns_to_iso(timestamps["open_ts"][index]),
-                    "close_ts": ns_to_iso(timestamps["close_ts"][index]),
-                    "aggregation_source": columns["aggregation_source"][index],
-                    "open": decimal_to_str(columns["open"][index]),
-                    "high": decimal_to_str(columns["high"][index]),
-                    "low": decimal_to_str(columns["low"][index]),
-                    "close": decimal_to_str(columns["close"][index]),
-                    "volume": decimal_to_str(columns["volume"][index]),
-                    "trade_count": columns["trade_count"][index],
-                    "revision": columns["revision"][index],
+                    "interval": row["interval"],
+                    "open_ts": ns_to_iso(row["open_ts"]),
+                    "close_ts": ns_to_iso(row["close_ts"]),
+                    "aggregation_source": row["aggregation_source"],
+                    "open": decimal_to_str(row["open"]),
+                    "high": decimal_to_str(row["high"]),
+                    "low": decimal_to_str(row["low"]),
+                    "close": decimal_to_str(row["close"]),
+                    "volume": decimal_to_str(row["volume"]),
+                    "trade_count": row["trade_count"],
+                    "revision": row["revision"],
                 },
             }
         )
@@ -92,15 +111,8 @@ def table_to_messages(table: pa.Table) -> list[dict]:
 
 def decimal_to_str(value: Decimal) -> str:
     """Exact decimal text with at least one fractional digit, never a float."""
-    text = format(value, "f")
-    if "." in text:
-        text = text.rstrip("0")
-        if text.endswith("."):
-            text += "0"
-    else:
-        text += ".0"
-    return text
-
+    text = format(value.normalize(), "f")
+    return text if "." in text else f"{text}.0"
 
 def _error(code: str, message: str, *, status: int = 400) -> web.Response:
     return web.json_response(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import timedelta
+from typing import Any
 
 import pyarrow as pa
 
@@ -56,67 +57,63 @@ PARTITION_COLUMNS: tuple[str, ...] = (
     "year",
     "month",
 )
-FILE_PARTITION_COLUMNS: tuple[str, ...] = ("interval",)
+FILE_PARTITION_COLUMNS: set[str] = {"interval"}
+
 PHYSICAL_SCHEMA = pa.schema(
     [field for field in BAR_SCHEMA if field.name not in FILE_PARTITION_COLUMNS]
 )
 
 
-def _timestamp_array(values: Iterable) -> pa.Array:
-    return pa.array([datetime_to_ns(value) for value in values], type=UTC_TS)
-
-
-def _decimal_array(values: Iterable) -> pa.Array:
-    return pa.array(list(values), type=PRICE)
-
-
-def _quantity_array(values: Iterable) -> pa.Array:
-    return pa.array(list(values), type=QUANTITY)
+def _bar_to_dict(bar: Bar) -> dict[str, Any]:
+    """将单个 Bar 对象高效转换为符合 Schema 格式的字典。"""
+    return {
+        "schema_version": bar.schema_version,
+        "data_type": bar.data_type,
+        "instrument_id": bar.instrument_id,
+        "interval": bar.interval,
+        # 在 Python 层仅对时间戳做必要的纳秒转换
+        "open_ts": datetime_to_ns(bar.open_ts),
+        "close_ts": datetime_to_ns(bar.close_ts),
+        "event_ts": datetime_to_ns(bar.event_ts),
+        "ingest_ts": datetime_to_ns(bar.ingest_ts),
+        "feed": bar.feed,
+        "seq": bar.seq,
+        "aggregation_source": bar.aggregation_source,
+        "open": bar.open,
+        "high": bar.high,
+        "low": bar.low,
+        "close": bar.close,
+        "volume": bar.volume,
+        "trade_count": bar.trade_count,
+        "revision": bar.revision,
+    }
 
 
 def bars_to_logical_table(bars: Iterable[Bar]) -> pa.Table:
-    rows = list(bars)
-    columns = {
-        "schema_version": pa.array([bar.schema_version for bar in rows], type=pa.uint16()),
-        "data_type": pa.array([bar.data_type for bar in rows], type=pa.string()),
-        "instrument_id": pa.array([bar.instrument_id for bar in rows], type=pa.string()),
-        "interval": pa.array([bar.interval for bar in rows], type=pa.string()),
-        "open_ts": _timestamp_array(bar.open_ts for bar in rows),
-        "close_ts": _timestamp_array(bar.close_ts for bar in rows),
-        "event_ts": _timestamp_array(bar.event_ts for bar in rows),
-        "ingest_ts": _timestamp_array(bar.ingest_ts for bar in rows),
-        "feed": pa.array([bar.feed for bar in rows], type=pa.string()),
-        "seq": pa.array([bar.seq for bar in rows], type=pa.int64()),
-        "aggregation_source": pa.array(
-            [bar.aggregation_source for bar in rows], type=pa.string()
-        ),
-        "open": _decimal_array(bar.open for bar in rows),
-        "high": _decimal_array(bar.high for bar in rows),
-        "low": _decimal_array(bar.low for bar in rows),
-        "close": _decimal_array(bar.close for bar in rows),
-        "volume": _quantity_array(bar.volume for bar in rows),
-        "trade_count": pa.array([bar.trade_count for bar in rows], type=pa.uint32()),
-        "revision": pa.array([bar.revision for bar in rows], type=pa.uint32()),
-    }
-    return pa.table(columns, schema=BAR_SCHEMA)
+    """通过 PyArrow 的 C++ 批量序列化能力，高效将 Bar 集合转为逻辑表。"""
+    # 单次遍历生成字典列表
+    pylist = [_bar_to_dict(bar) for bar in bars]
+    
+    if not pylist:
+        return empty_logical_table()
+        
+    # 利用 PyArrow 核心的 from_pylist 批量构造，避开了 18 次列循环
+    return pa.Table.from_pylist(pylist, schema=BAR_SCHEMA)
 
 
 def bars_to_physical_table(bars: Iterable[Bar]) -> pa.Table:
+    """生成物理表（剔除了物理存储分区列）。"""
     logical = bars_to_logical_table(bars)
     return logical.select(PHYSICAL_SCHEMA.names)
 
 
 def empty_logical_table() -> pa.Table:
-    return pa.table(
-        {
-            field.name: pa.array([], type=field.type)
-            for field in BAR_SCHEMA
-        },
-        schema=BAR_SCHEMA,
-    )
+    """创建一个符合 BAR_SCHEMA 结构的空 Arrow 表。"""
+    return pa.Table.from_pylist([], schema=BAR_SCHEMA)
 
 
 def arrow_type_name(dtype: pa.DataType) -> str:
+    """将 Arrow 类型对象转换为可读的契约文本字符串。"""
     if pa.types.is_timestamp(dtype):
         return f"timestamp[{dtype.unit}, tz={dtype.tz}]"
     if pa.types.is_decimal(dtype):
@@ -124,7 +121,8 @@ def arrow_type_name(dtype: pa.DataType) -> str:
     return str(dtype)
 
 
-def schema_json() -> dict:
+def schema_json() -> dict[str, list[dict[str, Any]]]:
+    """生成 JSON 数据契约定义。"""
     return {
         "fields": [
             {

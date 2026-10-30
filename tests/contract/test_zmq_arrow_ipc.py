@@ -41,14 +41,14 @@ def test_zmq_inproc_carries_arrow_ipc_bars() -> None:
     endpoint = f"inproc://mdgw-test-{uuid4().hex}"
     try:
         bus.bind_publisher(endpoint)
-        bus.subscribe(
+        ready = bus.subscribe(
             endpoint,
             topic_prefix="market.bar.",
             handler=lambda topic, payload: received.append(
                 (topic, ipc_to_table(payload))
             ),
         )
-        bus.wait_for_subscriber()
+        bus.wait_for_subscriber(ready)
         bus.publish(
             "market.bar.1m.binance:BTC/USDT",
             table_to_ipc(bars_to_logical_table([bar])),

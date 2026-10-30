@@ -70,12 +70,12 @@ class GatewayRuntime:
         try:
             endpoint = f"inproc://mdgw-{uuid4().hex}"
             bus.bind_publisher(endpoint)
-            bus.subscribe(
+            ready = bus.subscribe(
                 endpoint,
                 topic_prefix=MARKET_BAR_TOPIC_PREFIX,
                 handler=self._on_bar_message,
             )
-            bus.wait_for_subscriber()
+            bus.wait_for_subscriber(ready)
             self._start_http()
         except Exception:
             bus.close()

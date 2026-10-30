@@ -16,6 +16,9 @@ import zmq
 
 READY_TOPIC = "_internal.ready"
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 def table_to_ipc(table: pa.Table) -> bytes:
     sink = pa.BufferOutputStream()
@@ -34,16 +37,26 @@ class ZMQBus:
     def __init__(self, *, zmq_hwm: int = 10_000) -> None:
         self._context = zmq.Context()
         self._zmq_hwm = zmq_hwm
+
         self._publisher: zmq.Socket | None = None
-        self._subscribers: list[tuple[threading.Thread, threading.Event]] = []
-        self._subscriber_ready = threading.Event()
+        self._pub_lock = threading.Lock()
+
+        self._subscribers: list[tuple[threading.Thread, threading.Event, threading.Event]] = []
+        self._sub_lock = threading.Lock()
+
         self._closed = False
 
     def bind_publisher(self, endpoint: str) -> None:
-        publisher = self._context.socket(zmq.PUB)
-        publisher.setsockopt(zmq.SNDHWM, self._zmq_hwm)
-        publisher.bind(endpoint)
-        self._publisher = publisher
+        with self._pub_lock:
+            if self._publisher is not None:
+                raise RuntimeError("Publisher is already bound")
+            
+            publisher = self._context.socket(zmq.PUB)
+            publisher.setsockopt(zmq.SNDHWM, self._zmq_hwm)
+            # 进程内通信时，设置 Linger=0 确保关闭时不阻塞
+            publisher.setsockopt(zmq.LINGER, 0)
+            publisher.bind(endpoint)
+            self._publisher = publisher
 
     def subscribe(
         self,
@@ -51,66 +64,104 @@ class ZMQBus:
         *,
         topic_prefix: str,
         handler: Callable[[str, bytes], None],
-    ) -> None:
-        stop = threading.Event()
+    ) -> threading.Event:
+        ready_event = threading.Event()
+        stop_event = threading.Event()
+
+        sub_id = f"{endpoint}-{topic_prefix}"
+
         thread = threading.Thread(
             target=self._run_subscriber,
-            args=(endpoint, topic_prefix, handler, stop),
+            args=(endpoint, topic_prefix, handler, stop_event, ready_event, sub_id),
             name="mdgw-zmq-subscriber",
             daemon=True,
         )
-        self._subscribers.append((thread, stop))
-        thread.start()
+
+        with self._sub_lock:
+            if self._closed:
+                raise RuntimeError("Bus is closed")
+            self._subscribers.append((thread, stop_event, ready_event))
+            thread.start()
+        return ready_event
 
     def publish(self, topic: str, payload: bytes) -> None:
-        if self._publisher is None:
-            raise RuntimeError("publisher is not bound")
-        self._publisher.send_multipart([topic.encode("utf-8"), payload])
+        with self._pub_lock:
+            if self._publisher is None:
+                raise RuntimeError("Publisher is not bound")
+            if self._closed:
+                return
+            self._publisher.send_multipart([topic.encode("utf-8"), payload])
 
-    def wait_for_subscriber(self, timeout: float = 2.0) -> None:
-        """Publish readiness pings until a SUB socket is actually receiving."""
+    def wait_for_subscriber(self, ready_events: list[threading.Event] | threading.Event, timeout: float = 2.0) -> None:
+        """Publish readiness pings until specified SUB socket(s) are actually receiving."""
+        events = [ready_events] if isinstance(ready_events, threading.Event) else ready_events
+        if not events:
+            return
         deadline = time.monotonic() + timeout
-        while not self._subscriber_ready.wait(0.01):
+
+        while not all(event.is_set() for event in events):
             if time.monotonic() >= deadline:
                 raise TimeoutError("no ZMQ subscriber became ready")
-            self.publish(READY_TOPIC, b"")
+            try:
+                self.publish(READY_TOPIC, b"")
+            except RuntimeError:
+                break
+            time.sleep(0.01)
 
     def _run_subscriber(
         self,
         endpoint: str,
         topic_prefix: str,
         handler: Callable[[str, bytes], None],
-        stop: threading.Event,
+        stop_event: threading.Event,
+        ready_event: threading.Event,
+        sub_id: str,
     ) -> None:
         socket = self._context.socket(zmq.SUB)
         socket.setsockopt(zmq.SUBSCRIBE, topic_prefix.encode("utf-8"))
         socket.setsockopt(zmq.SUBSCRIBE, READY_TOPIC.encode("utf-8"))
         socket.setsockopt(zmq.RCVHWM, self._zmq_hwm)
+        socket.setsockopt(zmq.LINGER, 0)
         socket.connect(endpoint)
         try:
             poller = zmq.Poller()
             poller.register(socket, zmq.POLLIN)
-            while not stop.is_set():
-                if not poller.poll(50):
+            while not stop_event.is_set():
+                socks = dict(poller.poll(20))
+                if socket not in socks or socks[socket] != zmq.POLLIN:
                     continue
+
                 topic_bytes, payload = socket.recv_multipart()
                 topic = topic_bytes.decode("utf-8")
                 if topic == READY_TOPIC:
                     # Receiving a ping proves subscription forwarding finished.
-                    self._subscriber_ready.set()
+                    ready_event.set()
                     continue
-                handler(topic, payload)
+                try:
+                    handler(topic, payload)
+                except Exception as e:
+                    logger.error(f"[Sub-{sub_id}] Error in message handler: {e}", exc_info=True)
         finally:
-            socket.close(linger=0)
+            poller.unregister(socket)
+            socket.close()
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        for thread, stop in self._subscribers:
-            stop.set()
-        for thread, _ in self._subscribers:
+        with self._sub_lock, self._pub_lock:
+            if self._closed:
+                return
+            self._closed = True
+            
+            for _, stop_event, _ in self._subscribers:
+                stop_event.set()
+                
+            subscribers_to_join = list(self._subscribers)
+            self._subscribers.clear()
+
+            if self._publisher is not None:
+                self._publisher.close()
+                self._publisher = None
+
+        for thread, _, _ in subscribers_to_join:
             thread.join(timeout=2.0)
-        if self._publisher is not None:
-            self._publisher.close(linger=0)
+
         self._context.term()
