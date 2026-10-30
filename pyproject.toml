@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "market-data-gateway"
+version = "0.1.0"
+description = "Market Data Gateway: framework-neutral market data contract and services"
+requires-python = ">=3.13"
+dependencies = [
+    "pyarrow>=18",
+    "pyzmq>=26",
+    "aiohttp>=3.10",
+    "PyYAML>=6",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "network: tests that reach a real Venue (skipped by default)",
+]
