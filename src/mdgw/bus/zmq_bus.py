@@ -122,10 +122,10 @@ class ZMQBus:
         socket.setsockopt(zmq.SUBSCRIBE, READY_TOPIC.encode("utf-8"))
         socket.setsockopt(zmq.RCVHWM, self._zmq_hwm)
         socket.setsockopt(zmq.LINGER, 0)
-        socket.connect(endpoint)
+        poller = zmq.Poller()
+        poller.register(socket, zmq.POLLIN)
         try:
-            poller = zmq.Poller()
-            poller.register(socket, zmq.POLLIN)
+            socket.connect(endpoint)
             while not stop_event.is_set():
                 socks = dict(poller.poll(20))
                 if socket not in socks or socks[socket] != zmq.POLLIN:
