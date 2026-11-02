@@ -46,9 +46,36 @@ class HealthTracker:
 
     def __init__(self, *, stale_after_s: float = 120.0) -> None:
         self.stale_after_s = float(stale_after_s)
-        self._last_event: dict[tuple[str, str, str], datetime] = {}
+        self._last_event: dict[tuple[str, str, str], datetime | None] = {}
         self._gaps: list[GapEvent] = []
         self._lock = threading.Lock()
+
+    def register(
+        self,
+        feed: str,
+        instrument_id: str,
+        interval: str,
+        last_event_ts: datetime | None,
+    ) -> None:
+        """Register an expected key with its starting freshness baseline.
+
+        `last_event_ts=None` means no Bar has ever arrived for this key. It
+        initialises an absent key only; it never clears a known event. A
+        non-None value updates only when it is later than the existing one, so
+        registering the same key again can never move the baseline backwards.
+        """
+        key = (feed, instrument_id, interval)
+        normalized = None if last_event_ts is None else to_utc(last_event_ts)
+        with self._lock:
+            if key not in self._last_event:
+                self._last_event[key] = normalized
+                return
+            previous = self._last_event[key]
+            if (
+                normalized is not None
+                and (previous is None or normalized > previous)
+            ):
+                self._last_event[key] = normalized
 
     def record_bar(self, bar: Bar) -> None:
         """Track a persisted Bar's `event_ts` (its `close_ts`)."""
@@ -107,8 +134,22 @@ class HealthTracker:
 
         entries: list[dict] = []
         for (feed, instrument_id, interval), last_event in sorted(rows):
-            age_s = (now - last_event).total_seconds()
             threshold_s = stale_threshold_s(interval, self.stale_after_s)
+            if last_event is None:
+                # Registered but never received: stale with no measurable age.
+                entries.append(
+                    {
+                        "feed": feed,
+                        "instrument_id": instrument_id,
+                        "interval": interval,
+                        "last_event_ts": None,
+                        "age_s": None,
+                        "threshold_s": threshold_s,
+                        "stale": True,
+                    }
+                )
+                continue
+            age_s = (now - last_event).total_seconds()
             entries.append(
                 {
                     "feed": feed,
