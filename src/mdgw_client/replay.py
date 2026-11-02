@@ -342,16 +342,28 @@ class _ReplayReceiver:
                     frames = socket.recv_multipart()
                     if len(frames) < 2:
                         continue
-                    topic = frames[0].decode("utf-8")
-                    if topic == READY_TOPIC:
-                        # The Replay PUB repeats this every 50 ms, so it is a
-                        # reliable proof the subscription was forwarded.
-                        self._ready.set()
+                    # One malformed frame must not kill the shared receiver
+                    # thread: record it, skip it, and keep using this socket.
+                    try:
+                        topic = frames[0].decode("utf-8")
+                        if topic == READY_TOPIC:
+                            # The Replay PUB repeats this every 50 ms, so it
+                            # proves the subscription was forwarded.
+                            self._ready.set()
+                            attempt = 0
+                            continue
+                        if not topic.startswith(REPLAY_PREFIX):
+                            continue
+                        self._route(topic, frames[1])
+                        # A routed message proves the socket is healthy again.
+                        attempt = 0
+                    except Exception as exc:  # noqa: BLE001 - bad frame
+                        if self._stop.is_set():
+                            break
+                        with self._state_lock:
+                            self._last_error = exc
                         continue
-                    if not topic.startswith(REPLAY_PREFIX):
-                        continue
-                    self._route(topic, frames[1])
-            except zmq.ZMQError as exc:
+            except Exception as exc:  # noqa: BLE001 - reconnection boundary
                 if self._stop.is_set():
                     break
                 with self._state_lock:

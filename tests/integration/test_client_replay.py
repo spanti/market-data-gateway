@@ -702,3 +702,41 @@ def test_full_session_queue_drops_oldest_but_never_the_eos() -> None:
         receiver.close()
         publisher.close()
         context.term()
+
+
+def test_replay_receiver_survives_a_malformed_topic_frame() -> None:
+    """A bad UTF-8 topic must not kill the shared replay receiver thread."""
+    context, publisher, receiver, _endpoint = _raw_receiver()
+    channel = None
+    try:
+        _wait_for_replay_ready(publisher, receiver)
+        channel = receiver.register_session("rpl-badframe")
+
+        # Matches the "replay." SUB prefix yet cannot be decoded as UTF-8.
+        publisher.send_multipart(
+            [b"replay.rpl-badframe.market.\xff", b"bad-frame"]
+        )
+        topic = b"replay.rpl-badframe.market.bar.1m.binance:BTC/USDT"
+        publisher.send_multipart([topic, b"good-1"])
+
+        assert channel.next_message(timeout=2.0) == (
+            topic.decode("utf-8"),
+            b"good-1",
+        )
+        assert receiver.last_error is not None
+        assert receiver._thread is not None
+        assert receiver._thread.is_alive()
+        assert receiver.closed is False
+
+        # A second legal frame proves delivery did not depend on a reconnect.
+        publisher.send_multipart([topic, b"good-2"])
+        assert channel.next_message(timeout=2.0) == (
+            topic.decode("utf-8"),
+            b"good-2",
+        )
+    finally:
+        if channel is not None:
+            channel.close()
+        receiver.close()
+        publisher.close()
+        context.term()
