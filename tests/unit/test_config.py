@@ -220,3 +220,42 @@ def test_feed_config_rejects_negative_batch_values() -> None:
             batch_max_events=0,
         )
 
+
+def test_replay_config_defaults() -> None:
+    replay = GatewayConfig().replay
+    assert replay.control_bind_host == "127.0.0.1"
+    assert replay.control_port == 0
+    assert replay.publish_bind_host == "127.0.0.1"
+    assert replay.publish_port == 0
+    assert replay.max_sessions == 4
+    assert replay.heartbeat_s == 1.0
+
+
+def test_repository_toml_declares_replay() -> None:
+    with (PROJECT_ROOT / "config" / "gateway.toml").open("rb") as handle:
+        raw = tomllib.load(handle)
+
+    assert raw["replay"]["control_bind_host"] == "127.0.0.1"
+    assert raw["replay"]["control_port"] == 0
+    assert raw["replay"]["publish_bind_host"] == "127.0.0.1"
+    assert raw["replay"]["publish_port"] == 0
+    assert raw["replay"]["max_sessions"] == 4
+    assert raw["replay"]["heartbeat_s"] == 1.0
+
+    config = load_config(PROJECT_ROOT / "config" / "gateway.toml")
+    assert config.replay.max_sessions == 4
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"replay": {"control_port": 70_000}},
+        {"replay": {"publish_port": -1}},
+        {"replay": {"max_sessions": 0}},
+        {"replay": {"heartbeat_s": 0}},
+    ],
+)
+def test_replay_config_rejects_invalid_values(payload: dict) -> None:
+    with pytest.raises(ValidationError):
+        GatewayConfig.model_validate(payload)
+
