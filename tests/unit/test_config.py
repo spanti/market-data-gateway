@@ -23,6 +23,7 @@ def test_repository_toml_declares_aggregation() -> None:
         raw = tomllib.load(handle)
     assert raw["aggregation"]["base_interval"] == "1m"
     assert raw["aggregation"]["intervals"] == ["1m", "5m", "15m", "1h", "1d"]
+    assert raw["aggregation"]["retention_parent_periods"] == 2
 
 
 def test_aggregation_config_defaults() -> None:
@@ -84,3 +85,10 @@ def test_aggregation_rejects_non_positive_retention_window() -> None:
         GatewayConfig.model_validate(
             {"aggregation": {"retention_parent_periods": 0}}
         )
+
+
+def test_aggregation_accepts_positive_retention_window() -> None:
+    config = GatewayConfig.model_validate(
+        {"aggregation": {"retention_parent_periods": 1}}
+    )
+    assert config.aggregation.retention_parent_periods == 1

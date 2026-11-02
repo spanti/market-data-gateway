@@ -147,16 +147,18 @@ class BarAggregator:
         existing = window.children.get(index)
         if existing is not None and bar.revision <= existing.revision:
             # Duplicate or stale input: same-revision repeats must not produce
-            # the parent again.
-            self._advance_retention(key, parent_ns, interval_ns)
+            # the parent again, nor move the retention water mark.
             return None
 
         window.children[index] = bar
-        self._advance_retention(key, parent_ns, interval_ns)
 
         expected = interval_ns // self._base_ns
         if len(window.children) != expected:
+            # A partial period cannot be the reference for retention: a lone
+            # future Bar must not trim still-open earlier periods.
             return None
+
+        self._advance_retention(key, parent_ns, interval_ns)
 
         parent = _build_parent(bar, interval, parent_ns, window, expected)
         if window.last_emitted is not None:

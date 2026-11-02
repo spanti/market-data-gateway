@@ -297,6 +297,69 @@ def test_inconsistent_feed_within_one_parent_is_rejected() -> None:
         aggregator.add(_minute(1, feed="venue_b"))
 
 
+def test_incomplete_future_period_does_not_trim_an_earlier_completed_period() -> None:
+    aggregator = _aggregator("1m", "5m")
+    noon = DAY + timedelta(hours=12)
+
+    # A single future Bar belongs to an incomplete 5m period. It must not move
+    # the retention water mark past the still-open 12:00 period.
+    assert aggregator.add(_minute(30, day=noon)) == []
+
+    produced = aggregator.add_many([_minute(index, day=noon) for index in range(5)])
+
+    assert [bar.open_ts for bar in produced] == [noon]
+    assert produced[0].interval == "5m"
+
+
+def test_duplicate_future_bar_does_not_trim_an_earlier_completed_period() -> None:
+    aggregator = _aggregator("1m", "5m")
+    noon = DAY + timedelta(hours=12)
+    future = _minute(30, day=noon)
+
+    assert aggregator.add(future) == []
+    assert aggregator.add(future) == []
+
+    produced = aggregator.add_many([_minute(index, day=noon) for index in range(5)])
+
+    assert [bar.open_ts for bar in produced] == [noon]
+
+
+def test_later_completed_period_does_not_hide_an_earlier_period_in_the_window() -> None:
+    # 12:00 is exactly retention_parent_periods=6 periods before 12:30, so it
+    # stays inside the window when the later period completes first.
+    aggregator = _aggregator("1m", "5m", retention_parent_periods=6)
+    noon = DAY + timedelta(hours=12)
+
+    later = aggregator.add_many([_minute(index, day=noon) for index in range(30, 35)])
+    earlier = aggregator.add_many([_minute(index, day=noon) for index in range(5)])
+
+    assert [bar.open_ts for bar in later] == [noon + timedelta(minutes=30)]
+    assert [bar.open_ts for bar in earlier] == [noon]
+
+
+def test_late_input_for_a_trimmed_period_is_ignored() -> None:
+    aggregator = _aggregator("1m", "5m", retention_parent_periods=1)
+    noon = DAY + timedelta(hours=12)
+    produced = aggregator.add_many([_minute(index, day=noon) for index in range(15)])
+
+    assert [bar.open_ts for bar in produced] == [
+        noon,
+        noon + timedelta(minutes=5),
+        noon + timedelta(minutes=10),
+    ]
+
+    # Completing 12:10 trims the 12:00 window: fresh or revised 12:00 Bars are
+    # ignored instead of resurrecting the pruned period.
+    late = aggregator.add_many([_minute(index, day=noon) for index in range(5)])
+    assert late == []
+    late_correction = aggregator.add(_minute(0, day=noon, high="999", revision=1))
+    assert late_correction == []
+
+    # Periods still inside the window continue to accept corrections.
+    correction = aggregator.add(_minute(14, day=noon, high="999", revision=1))
+    assert [bar.open_ts for bar in correction] == [noon + timedelta(minutes=10)]
+
+
 def test_retention_window_ignores_revisions_for_trimmed_periods() -> None:
     aggregator = _aggregator("1m", "5m", retention_parent_periods=1)
     produced: list[Bar] = []
