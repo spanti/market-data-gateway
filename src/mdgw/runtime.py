@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -17,12 +18,13 @@ from aiohttp import web
 
 from mdgw.aggregate import BarAggregator
 from mdgw.api.server import create_app
+from mdgw.backfill import BackfillReport, run_backfill
 from mdgw.bus.zmq_bus import ZMQBus, ipc_to_table, table_to_ipc
 from mdgw.config import GatewayConfig
 from mdgw.core.bar import Bar
 from mdgw.core.errors import UnknownInstrumentError
 from mdgw.core.schema import bars_to_logical_table
-from mdgw.core.time import utc_now
+from mdgw.core.time import datetime_to_ns, utc_now
 from mdgw.ingest.feed_handler import FeedHandler
 from mdgw.normalize.bar import normalize_bar
 from mdgw.reference import (
@@ -30,6 +32,8 @@ from mdgw.reference import (
     export_instrument_snapshot,
     load_instrument_reference,
 )
+from mdgw.state.health import GapEvent, HealthTracker
+from mdgw.state.high_water_mark import HighWaterMarkStore
 from mdgw.store.parquet_dataset import ParquetBarStore
 
 MARKET_BAR_TOPIC_PREFIX = "market.bar."
@@ -59,6 +63,8 @@ class GatewayRuntime:
             base_interval=config.aggregation.base_interval,
             retention_parent_periods=config.aggregation.retention_parent_periods,
         )
+        self._hwm: HighWaterMarkStore | None = None
+        self._health = HealthTracker(stale_after_s=config.collector.stale_after_s)
 
         self._bus: ZMQBus | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -84,8 +90,17 @@ class GatewayRuntime:
         )
         self.instrument_store = InstrumentStore(export.path)
 
-        bus = ZMQBus(zmq_hwm=self.config.bus.zmq_hwm)
+        # Data HWM state is opened before the first write; the backfill runs
+        # before the Streaming Interface comes up so historical Bars are never
+        # published as live messages.
+        self._hwm = HighWaterMarkStore(
+            self.store.root / self.config.collector.state_db_name
+        )
+        bus: ZMQBus | None = None
         try:
+            self._run_backfill(utc_now())
+
+            bus = ZMQBus(zmq_hwm=self.config.bus.zmq_hwm)
             endpoint = f"inproc://mdgw-{uuid4().hex}"
             bus.bind_publisher(endpoint)
             ready = bus.subscribe(
@@ -96,8 +111,10 @@ class GatewayRuntime:
             bus.wait_for_subscriber(ready)
             self._start_http()
         except Exception:
-            bus.close()
+            if bus is not None:
+                bus.close()
             self._stop_http()
+            self._close_state()
             raise
         self._bus = bus
         self._started = True
@@ -109,7 +126,13 @@ class GatewayRuntime:
         if self._bus is not None:
             self._bus.close()
             self._bus = None
+        self._close_state()
         self._started = False
+
+    def _close_state(self) -> None:
+        if self._hwm is not None:
+            self._hwm.close()
+            self._hwm = None
 
     def _stop_http(self) -> None:
         if self._runner is not None and self._loop is not None:
@@ -173,9 +196,81 @@ class GatewayRuntime:
         for asset_class, group in sorted(by_asset_class.items()):
             self.store.write_bars(group, asset_class=asset_class)
 
+        # HWM and freshness are updated only after the write succeeded, so a
+        # failed flush cannot make a Bar look persisted.
+        self._advance_hwm(bars)
+        for bar in bars:
+            self._health.record_bar(bar)
+
         target = self._publish_bars(bars)
         self._wait_for_received(target)
         return len(base_bars)
+
+    # -- collector state ---------------------------------------------------
+
+    def _advance_hwm(self, bars: list[Bar]) -> None:
+        if self._hwm is None:
+            return
+        grouped: dict[tuple[str, str], list[Bar]] = defaultdict(list)
+        for bar in bars:
+            grouped[(bar.instrument_id, bar.interval)].append(bar)
+        for (instrument_id, interval), group in grouped.items():
+            self._hwm.set(
+                instrument_id,
+                interval,
+                max(datetime_to_ns(bar.open_ts) for bar in group),
+            )
+
+    def _run_backfill(self, now: datetime) -> BackfillReport:
+        if self._hwm is None:
+            raise RuntimeError("GatewayRuntime state is not open")
+        return run_backfill(
+            feed_handler=self.feed_handler,
+            store=self.store,
+            hwm=self._hwm,
+            aggregator=self.aggregator,
+            health=self._health,
+            asset_class_for=self._asset_class_for,
+            now=now,
+            backfill_hours=self.config.collector.backfill_hours,
+        )
+
+    def backfill(self, now: datetime | None = None) -> BackfillReport:
+        """Backfill closed 1m Bars from the HWM (or the configured window).
+
+        Historical Bars are written and aggregated but never published.
+        """
+        if self._hwm is None:
+            raise RuntimeError(
+                "GatewayRuntime.start() must be called before backfill()"
+            )
+        return self._run_backfill(now if now is not None else utc_now())
+
+    def high_water_mark(self, instrument_id: str, interval: str) -> int | None:
+        """Return the persisted data HWM in UTC nanoseconds, if any."""
+        if self._hwm is None:
+            raise RuntimeError(
+                "GatewayRuntime.start() must be called before high_water_mark()"
+            )
+        return self._hwm.get(instrument_id, interval)
+
+    def high_water_marks(self) -> dict[tuple[str, str], int]:
+        if self._hwm is None:
+            raise RuntimeError(
+                "GatewayRuntime.start() must be called before high_water_marks()"
+            )
+        return self._hwm.all()
+
+    def stale_instruments(self, now: datetime | None = None) -> list[dict]:
+        """Return stale `(feed, instrument, interval)` entries only."""
+        return self._health.stale(now)
+
+    def health(self, now: datetime | None = None) -> dict:
+        """Assertable collector health snapshot (stale + gap_unrecoverable)."""
+        return self._health.snapshot(now)
+
+    def gap_events(self) -> tuple[GapEvent, ...]:
+        return self._health.gap_events()
 
     def _asset_class_for(self, instrument_id: str) -> str:
         """Resolve the asset class from the Instrument Snapshot only.
