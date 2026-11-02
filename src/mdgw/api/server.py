@@ -28,6 +28,7 @@ from mdgw.core.errors import (
     INVALID_FORMAT,
     INVALID_INSTRUMENT,
     INVALID_INTERVAL,
+    INVALID_PARAMETER,
     INVALID_RANGE,
     RANGE_TOO_LARGE,
     GatewayError,
@@ -158,7 +159,7 @@ def _parse_include_delisted(request: web.Request) -> bool | web.Response:
         return False
     return _error(
         request,
-        code=INVALID_RANGE,
+        code=INVALID_PARAMETER,
         message="query parameter 'include_delisted' must be a boolean",
     )
 

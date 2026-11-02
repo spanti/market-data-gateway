@@ -234,7 +234,7 @@ GET /metrics
 {"error": {"code": "invalid_instrument", "message": "...", "details": {}, "request_id": "..."}}
 ```
 
-稳定错误码：`invalid_instrument`、`invalid_interval`、`invalid_range`、`range_too_large`、`schema_version_mismatch`、`dataset_not_found`、`session_not_found`、`feed_unavailable`、`internal_error`。
+稳定错误码：`invalid_instrument`、`invalid_interval`、`invalid_parameter`、`invalid_range`、`range_too_large`、`schema_version_mismatch`、`dataset_not_found`、`session_not_found`、`feed_unavailable`、`internal_error`。
 HTTP 状态码只做粗分类（400/404/409/429/500）。
 
 ## 5. 运行规则
@@ -244,6 +244,7 @@ HTTP 状态码只做粗分类（400/404/409/429/500）。
 - 真相源：`config/instruments/*.yaml`（人工维护、可 review、可 diff）。
 - 启动时校验并导出 Instrument Snapshot：`data/instruments/snapshot-<config_hash>.parquet`。
 - 所有进程（含 replay）只读 Instrument Snapshot；REST `/instruments` 也读它。
+- Bar 的 `instrument_id` 不在 Instrument Snapshot 中时一律拒绝（`instrument_not_found`），不回退到任何默认 asset_class，也不写入任何 Bar。
 - 被历史数据引用过的 Instrument 永不物理删除，只设 `delisted_ts`。
 
 ### 5.2 采集、HWM 与补采
