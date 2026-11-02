@@ -21,6 +21,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from aiohttp import web
 
+from mdgw.api.ws_hub import WebSocketHub
 from mdgw.core.envelope import decimal_to_str, table_to_messages
 from mdgw.core.errors import (
     INTERNAL_ERROR,
@@ -78,11 +79,14 @@ def create_app(
     store: ParquetBarStore,
     *,
     instrument_store: InstrumentStore | None = None,
+    ws_hub: WebSocketHub | None = None,
+    ws_path: str = "/ws",
 ) -> web.Application:
     """Create an aiohttp web application for the Bar history API.
 
     Instrument endpoints read only the `InstrumentStore` snapshot; they never
-    parse the YAML truth source at request time.
+    parse the YAML truth source at request time. The WebSocket route is enabled
+    only when the runtime supplies a hub, so REST-only tests stay unchanged.
     """
     app = web.Application(middlewares=[_request_id_middleware])
     app.router.add_get(
@@ -95,7 +99,33 @@ def create_app(
     app.router.add_get("/api/v1/bars", _make_bars_handler(store))
     app.router.add_get("/api/v1/bars/export", _make_export_handler(store))
     app.router.add_get("/api/v1/status", _make_status_handler(store))
+    if ws_hub is not None:
+        app.router.add_get(ws_path, _make_websocket_handler(ws_hub))
     return app
+
+
+def _make_websocket_handler(hub: WebSocketHub):
+    """Create the Streaming Interface WebSocket handler."""
+
+    async def handle_websocket(request: web.Request) -> web.StreamResponse:
+        ws = web.WebSocketResponse(heartbeat=30)
+        await ws.prepare(request)
+        try:
+            session = hub.register(ws)
+        except RuntimeError:
+            await ws.close()
+            return ws
+        try:
+            async for message in ws:
+                if message.type == web.WSMsgType.TEXT:
+                    await hub.handle_client_message(session, message.data)
+                elif message.type == web.WSMsgType.ERROR:
+                    break
+        finally:
+            await hub.unregister(session)
+        return ws
+
+    return handle_websocket
 
 
 def _make_instruments_handler(instrument_store: InstrumentStore | None):

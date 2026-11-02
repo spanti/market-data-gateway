@@ -10,6 +10,14 @@ ws_path = "/ws"
 # v1 single-process walking skeleton uses the in-process ZMQ transport.
 transport = "inproc"
 zmq_hwm = 10000
+# External Streaming Interface PUB endpoint (port 0 = ephemeral).
+stream_bind_host = "127.0.0.1"
+stream_pub_port = 0
+
+[streaming]
+# Per-session WebSocket queue; overflow drops the oldest and sends lag_notice.
+queue_size = 1000
+lag_notice_interval_ms = 1000
 
 [storage]
 root = "./data"
