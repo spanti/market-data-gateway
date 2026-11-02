@@ -7,8 +7,10 @@ http_port = 8080
 ws_path = "/ws"
 
 [bus]
-# v1 single-process walking skeleton uses the in-process ZMQ transport.
-transport = "inproc"
+# `transport` only describes the single-process `GatewayRuntime` internal
+# transport. Multi-process Service Roles always use the explicit `tcp://`
+# endpoints below, regardless of this value.
+transport = "tcp"
 zmq_hwm = 10000
 # External Streaming Interface PUB endpoint (port 0 = ephemeral).
 stream_bind_host = "127.0.0.1"
@@ -20,6 +22,8 @@ stream_pub_port = 0
 collector_pub_bind = "tcp://127.0.0.1:5555"
 collector_pub_connect = "tcp://127.0.0.1:5555"
 api_pub_bind = "tcp://127.0.0.1:5556"
+# The collector connects to the api PUB here to observe its READY handshake.
+api_pub_connect = "tcp://127.0.0.1:5556"
 
 [service]
 # Health/metrics listeners for collector and replay; the api uses http_port.
@@ -30,6 +34,10 @@ log_level = "INFO"
 startup_delay_s = 1.0
 collector_required = false
 collector_ready_timeout_s = 30.0
+# Ask the collector to wait for the api READY handshake before ingesting.
+# Standalone collectors default off; `mdgw up` and Docker enable it.
+wait_for_api_ready = false
+api_ready_timeout_s = 30.0
 
 [streaming]
 # Per-session WebSocket queue; overflow drops the oldest and sends lag_notice.

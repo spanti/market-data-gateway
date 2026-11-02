@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,8 @@ from mdgw.core.bar import Bar
 from mdgw.store.parquet_dataset import ParquetBarStore
 
 UTC = timezone.utc
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SRC = PROJECT_ROOT / "src"
 
 
 def _bar(open_ts: datetime, *, instrument_id: str = "binance:BTC/USDT") -> Bar:
@@ -47,11 +50,20 @@ def _active_count(dataset_root: Path) -> int:
 
 
 def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+    # Run this checkout's `src/`, not whatever `mdgw` is installed in the
+    # environment (a worktree checkout must test its own code).
+    env = os.environ.copy()
+    previous = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        str(SRC) if not previous else str(SRC) + os.pathsep + previous
+    )
     return subprocess.run(
         [sys.executable, "-m", "mdgw", *args],
         capture_output=True,
         text=True,
         timeout=60,
+        cwd=str(PROJECT_ROOT),
+        env=env,
     )
 
 

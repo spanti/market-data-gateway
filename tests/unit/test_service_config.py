@@ -18,6 +18,8 @@ def test_service_config_defaults() -> None:
     assert service.replay_health_port == 8082
     assert service.log_level == "INFO"
     assert service.collector_required is False
+    assert service.wait_for_api_ready is False
+    assert service.api_ready_timeout_s == 30.0
 
 
 def test_bus_multi_process_endpoint_defaults() -> None:
@@ -25,11 +27,12 @@ def test_bus_multi_process_endpoint_defaults() -> None:
     assert bus.collector_pub_bind == "tcp://127.0.0.1:5555"
     assert bus.collector_pub_connect == "tcp://127.0.0.1:5555"
     assert bus.api_pub_bind == "tcp://127.0.0.1:5556"
+    assert bus.api_pub_connect == "tcp://127.0.0.1:5556"
 
 
 @pytest.mark.parametrize(
     "field",
-    ["collector_pub_bind", "collector_pub_connect", "api_pub_bind"],
+    ["collector_pub_bind", "collector_pub_connect", "api_pub_bind", "api_pub_connect"],
 )
 def test_bus_endpoints_reject_ipc(field: str) -> None:
     with pytest.raises(ValidationError, match="tcp://"):
@@ -52,10 +55,12 @@ def test_bus_endpoints_accept_docker_service_names() -> None:
                 "collector_pub_bind": "tcp://0.0.0.0:5555",
                 "collector_pub_connect": "tcp://collector:5555",
                 "api_pub_bind": "tcp://0.0.0.0:5556",
+                "api_pub_connect": "tcp://api:5556",
             }
         }
     )
     assert config.bus.collector_pub_connect == "tcp://collector:5555"
+    assert config.bus.api_pub_connect == "tcp://api:5556"
 
 
 def test_fake_feed_config_defaults() -> None:

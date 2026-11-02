@@ -15,7 +15,7 @@ def test_load_config_reads_repository_toml() -> None:
     config = load_config(PROJECT_ROOT / "config" / "gateway.toml")
     assert config.server.http_port == 8080
     assert config.storage.root == Path("./data")
-    assert config.bus.transport == "inproc"
+    assert config.bus.transport == "tcp"
 
 
 def test_repository_toml_declares_aggregation() -> None:
@@ -64,7 +64,12 @@ def test_negative_retention_days_rejected() -> None:
 
 def test_unsupported_transport_rejected() -> None:
     with pytest.raises(ValidationError, match="unsupported bus transport"):
-        GatewayConfig.model_validate({"bus": {"transport": "tcp"}})
+        GatewayConfig.model_validate({"bus": {"transport": "ipc"}})
+
+
+def test_tcp_transport_accepted() -> None:
+    config = GatewayConfig.model_validate({"bus": {"transport": "tcp"}})
+    assert config.bus.transport == "tcp"
 
 
 def test_aggregation_rejects_unknown_interval() -> None:

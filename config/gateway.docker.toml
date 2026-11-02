@@ -9,15 +9,19 @@ http_port = 8080
 ws_path = "/ws"
 
 [bus]
-transport = "inproc"
+# `transport` only describes the single-process `GatewayRuntime` internal
+# transport; Service Roles use the explicit tcp:// endpoints below.
+transport = "tcp"
 zmq_hwm = 10000
 stream_bind_host = "0.0.0.0"
 stream_pub_port = 0
 # collector binds 5555 everywhere; api connects to the collector service name
-# and exposes its own PUB for external consumers.
+# and exposes its own PUB for external consumers. The collector observes that
+# PUB for the api READY handshake.
 collector_pub_bind = "tcp://0.0.0.0:5555"
 collector_pub_connect = "tcp://collector:5555"
 api_pub_bind = "tcp://0.0.0.0:5556"
+api_pub_connect = "tcp://api:5556"
 
 [service]
 health_host = "0.0.0.0"
@@ -27,6 +31,8 @@ log_level = "INFO"
 startup_delay_s = 2.0
 collector_required = true
 collector_ready_timeout_s = 60.0
+wait_for_api_ready = true
+api_ready_timeout_s = 60.0
 
 [streaming]
 queue_size = 1000

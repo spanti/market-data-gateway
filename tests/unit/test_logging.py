@@ -74,3 +74,25 @@ def test_explicit_service_field_overrides_the_default() -> None:
     payload = json.loads(JsonFormatter(service="supervisor").format(record))
 
     assert payload["service"] == "api"
+
+
+def test_optional_endpoint_and_request_fields_are_emitted() -> None:
+    record = logging.LogRecord(
+        "mdgw.replay", logging.INFO, __file__, 1, "started", None, None
+    )
+    record.event = "replay.started"
+    record.control_endpoint = "tcp://127.0.0.1:5557"
+    record.publish_endpoint = "tcp://127.0.0.1:5558"
+    record.method = "GET"
+    record.path = "/api/v1/bars"
+    record.topics = ["market.bar.1m.binance:BTC/USDT"]
+    record.http = "http://127.0.0.1:8080"
+
+    payload = json.loads(JsonFormatter(service="replay").format(record))
+
+    assert payload["control_endpoint"] == "tcp://127.0.0.1:5557"
+    assert payload["publish_endpoint"] == "tcp://127.0.0.1:5558"
+    assert payload["method"] == "GET"
+    assert payload["path"] == "/api/v1/bars"
+    assert payload["topics"] == ["market.bar.1m.binance:BTC/USDT"]
+    assert payload["http"] == "http://127.0.0.1:8080"

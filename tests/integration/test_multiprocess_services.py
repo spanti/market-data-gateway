@@ -60,6 +60,18 @@ INSTRUMENT_YAML = """\
   multiplier: "1"
   timezone: UTC
   listing_ts: "2017-08-17T04:00:00Z"
+- instrument_id: "binance:SOL/USDT"
+  venue: binance
+  symbol: "SOL/USDT"
+  asset_class: crypto
+  instrument_type: spot
+  base: SOL
+  quote: USDT
+  tick_size: "0.01"
+  lot_size: "0.001"
+  multiplier: "1"
+  timezone: UTC
+  listing_ts: "2020-08-11T00:00:00Z"
 """
 
 
@@ -93,19 +105,29 @@ def _write_config(
     fake_bars: int = 0,
     startup_delay_s: float = 0.5,
     collector_required: bool = False,
+    wait_for_api_ready: bool = False,
+    api_ready_timeout_s: float = 20.0,
+    api_pub_connect: str | None = None,
+    symbols: tuple[str, ...] = ("BTC/USDT",),
 ) -> Path:
     feed = ""
     if fake_bars:
+        rendered_symbols = ", ".join(f'"{symbol}"' for symbol in symbols)
         feed = f"""
 [[feeds]]
 name = "fake_spot"
 kind = "fake"
 venue = "binance"
-symbols = ["BTC/USDT"]
+symbols = [{rendered_symbols}]
 data_types = ["bar"]
 fake_bars = {fake_bars}
 fake_price = "100"
 """
+    resolved_api_pub_connect = (
+        api_pub_connect
+        if api_pub_connect is not None
+        else f"tcp://127.0.0.1:{api_pub_port}"
+    )
     path.write_text(
         f"""
 [server]
@@ -118,6 +140,7 @@ zmq_hwm = 10000
 collector_pub_bind = "tcp://127.0.0.1:{collector_port}"
 collector_pub_connect = "tcp://127.0.0.1:{collector_port}"
 api_pub_bind = "tcp://127.0.0.1:{api_pub_port}"
+api_pub_connect = "{resolved_api_pub_connect}"
 
 [service]
 health_host = "127.0.0.1"
@@ -127,6 +150,8 @@ log_level = "INFO"
 startup_delay_s = {startup_delay_s}
 collector_required = {"true" if collector_required else "false"}
 collector_ready_timeout_s = 20.0
+wait_for_api_ready = {"true" if wait_for_api_ready else "false"}
+api_ready_timeout_s = {api_ready_timeout_s}
 
 [replay]
 control_bind_host = "127.0.0.1"
@@ -292,6 +317,25 @@ def _wait_bars(base_url: str, minimum: int, timeout: float = 30.0) -> dict:
             return payload
         time.sleep(0.1)
     raise AssertionError(f"fewer than {minimum} Bars became visible")
+
+
+def _wait_metric(
+    url: str, name: str, minimum: float, timeout: float = 30.0
+) -> float:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            text = _get(url, timeout=2).decode("utf-8")
+        except AssertionError:
+            time.sleep(0.1)
+            continue
+        for line in text.splitlines():
+            if line.startswith(f"{name} "):
+                value = float(line.split()[1])
+                if value >= minimum:
+                    return value
+        time.sleep(0.1)
+    raise AssertionError(f"metric {name} never reached {minimum}")
 
 
 def _wait_zmq_ready(subscriber: zmq.Socket, timeout: float = 10.0) -> None:
@@ -502,10 +546,10 @@ def test_collector_and_api_forward_fake_bars(tmp_path: Path) -> None:
     subscriber.setsockopt(zmq.SUBSCRIBE, READY_TOPIC.encode("utf-8"))
     try:
         # The api starts first so its SUB is connected before the collector
-        # binds, and the external SUB handshake proves forwarding is live.
+        # binds. The api only advertises READY after it observed the collector
+        # handshake, so the external READY proves forwarding is live.
         _wait_ready(f"http://127.0.0.1:{http_port}/readyz")
         subscriber.connect(f"tcp://127.0.0.1:{api_pub_port}")
-        _wait_zmq_ready(subscriber)
 
         collector = _ServiceProcess(
             [
@@ -520,6 +564,7 @@ def test_collector_and_api_forward_fake_bars(tmp_path: Path) -> None:
             tmp_path / "collector.log",
         )
         _wait_ready(f"http://127.0.0.1:{collector_health_port}/readyz")
+        _wait_zmq_ready(subscriber)
 
         payload = _wait_bars(f"http://127.0.0.1:{http_port}", minimum=3)
         assert len(payload["bars"]) >= 3
@@ -538,7 +583,96 @@ def test_collector_and_api_forward_fake_bars(tmp_path: Path) -> None:
         context.term()
 
 
-# -- test 4: `mdgw up` smoke ------------------------------------------------
+# -- test 4: collector waits for the api handshake --------------------------
+
+
+def test_collector_waits_for_api_before_publishing_bars(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "data"
+    instruments = _write_instruments(tmp_path / "instruments")
+    reference = load_instrument_reference(instruments)
+    export_instrument_snapshot(reference, root / "instruments")
+
+    http_port = _free_port()
+    collector_port = _free_port()
+    api_pub_port = _free_port()
+    collector_health_port = _free_port()
+    # One Bar per symbol -> one ZMQ group per symbol -> three api messages.
+    symbols = ("BTC/USDT", "ETH/USDT", "SOL/USDT")
+    config = _write_config(
+        tmp_path / "gateway.toml",
+        root=root,
+        instruments=instruments,
+        http_port=http_port,
+        collector_port=collector_port,
+        api_pub_port=api_pub_port,
+        collector_health_port=collector_health_port,
+        fake_bars=1,
+        symbols=symbols,
+        startup_delay_s=0.1,
+        collector_required=True,
+        wait_for_api_ready=True,
+        api_pub_connect=f"tcp://127.0.0.1:{api_pub_port}",
+    )
+    base_url = f"http://127.0.0.1:{http_port}"
+
+    collector = _ServiceProcess(
+        [
+            "run",
+            "--service",
+            "collector",
+            "--config",
+            str(config),
+            "--root",
+            str(root),
+            "--wait-for-api",
+        ],
+        tmp_path / "collector.log",
+    )
+    api = None
+    try:
+        # The collector is up but must not ingest until the api handshake.
+        _wait_ready(f"http://127.0.0.1:{collector_health_port}/readyz")
+
+        api = _ServiceProcess(
+            [
+                "run",
+                "--service",
+                "api",
+                "--config",
+                str(config),
+                "--root",
+                str(root),
+            ],
+            tmp_path / "api.log",
+        )
+        # `collector_required = true` keeps /readyz at 503 until this api's SUB
+        # received the collector READY, so the order proves the handshake.
+        _wait_ready(f"{base_url}/readyz", timeout=40)
+
+        received = _wait_metric(
+            f"{base_url}/metrics",
+            "mdgw_api_messages_received_total",
+            3,
+            timeout=30,
+        )
+        assert received >= 3
+
+        payload = _wait_bars(base_url, minimum=3)
+        assert len(payload["bars"]) == 3
+        assert {bar["instrument_id"] for bar in payload["bars"]} == {
+            f"binance:{symbol}" for symbol in symbols
+        }
+    finally:
+        if api is not None:
+            api.stop()
+        collector.stop()
+
+    assert "collector.api_ready_timeout" not in collector.logs()
+
+
+# -- test 5: `mdgw up` smoke ------------------------------------------------
 
 
 def test_up_supervisor_starts_and_stops_the_stack(tmp_path: Path) -> None:

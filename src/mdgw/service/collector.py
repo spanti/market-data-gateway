@@ -39,6 +39,7 @@ class CollectorService:
         *,
         data_root: Path | None = None,
         feed_handler: FeedHandler | None = None,
+        wait_for_api: bool | None = None,
     ) -> None:
         self.config = config
         self._feed_handler = feed_handler or build_configured_feed_handler(
@@ -54,6 +55,18 @@ class CollectorService:
         self._bus: ZMQBus | None = None
         self._health_server: ServiceHealthServer | None = None
         self._publish_endpoint: str | None = None
+
+        # `None` means "use [service].wait_for_api_ready". The CLI overrides it
+        # with --wait-for-api/--no-wait-for-api.
+        self._wait_for_api = (
+            config.service.wait_for_api_ready
+            if wait_for_api is None
+            else wait_for_api
+        )
+        self._api_ready = threading.Event()
+        # `ZMQBus` consumes `READY_TOPIC` itself and exposes the observation as
+        # this event; the handler is kept for any non-READY traffic.
+        self._api_ready_signal: threading.Event | None = None
 
         self._stop = threading.Event()
         self._ready = threading.Event()
@@ -77,6 +90,15 @@ class CollectorService:
                 self.config.bus.collector_pub_bind
             )
             self._publish_endpoint = resolved[0]
+
+            # Observe the api READY handshake on the api PUB. This must not
+            # block startup: the api may not exist yet (standalone collector).
+            self._api_ready.clear()
+            self._api_ready_signal = self._bus.subscribe(
+                self.config.bus.api_pub_connect,
+                topic_prefix=READY_TOPIC,
+                handler=self._on_api_ready,
+            )
 
             self._health_server = ServiceHealthServer(
                 service="collector",
@@ -127,12 +149,21 @@ class CollectorService:
             self._ready_thread.start()
             self._status_thread.start()
             self._ingest_thread.start()
+            logger.info(
+                "collector service started",
+                extra={
+                    "event": "collector.started",
+                    "publish_endpoint": self._publish_endpoint,
+                },
+            )
         except Exception:
             self.stop()
             raise
 
     def stop(self) -> None:
         self._ready.clear()
+        self._api_ready.clear()
+        self._api_ready_signal = None
         self._stop.set()
 
         for thread in (
@@ -181,8 +212,13 @@ class CollectorService:
     # -- ingest loop -------------------------------------------------------
 
     def _run_ingest_loop(self) -> None:
-        # Give the api SUB time to finish subscription forwarding before the
-        # first Bar is published (PUB/SUB slow-joiner, DESIGN §2.2).
+        # When enabled, wait for the api to prove its SUB forwarding is live
+        # before the first Bar is published (PUB/SUB slow-joiner, DESIGN §2.2).
+        # A timeout only warns: standalone collectors and split deployments
+        # must still ingest.
+        self._wait_for_api_ready()
+        # Keep the configured settle delay as an extra cushion after the
+        # handshake (and as the only delay when not waiting for the api).
         if self._stop.wait(self.config.service.startup_delay_s):
             return
         while not self._stop.is_set():
@@ -227,6 +263,49 @@ class CollectorService:
         self._last_bar_ts = last
 
     # -- readiness / status ------------------------------------------------
+
+    def _on_api_ready(self, topic: str, payload: bytes) -> None:
+        """ZMQ subscriber callback: the api PUB forwarded our READY."""
+        self._api_ready.set()
+
+    def _api_ready_observed(self) -> bool:
+        if self._api_ready.is_set():
+            return True
+        signal = self._api_ready_signal
+        return signal is not None and signal.is_set()
+
+    def _wait_for_api_ready(self) -> bool:
+        """Wait for the api READY handshake when configured.
+
+        Returns ``True`` immediately when waiting is disabled or the event was
+        already observed. Returns ``False`` after `api_ready_timeout_s` and
+        logs `collector.api_ready_timeout` so a split deployment can proceed.
+        """
+        if not self._wait_for_api:
+            return True
+        if self._api_ready_observed():
+            return True
+
+        timeout = self.config.service.api_ready_timeout_s
+        deadline = time.monotonic() + timeout
+        while not self._api_ready_observed():
+            if self._stop.is_set():
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._api_ready.wait(min(remaining, 0.1))
+
+        if self._api_ready_observed():
+            return True
+        logger.warning(
+            "api did not signal readiness before the ingest deadline",
+            extra={
+                "event": "collector.api_ready_timeout",
+                "timeout_s": timeout,
+            },
+        )
+        return False
 
     def _run_ready_loop(self) -> None:
         while not self._stop.is_set():

@@ -6,11 +6,30 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from mdgw.config import load_config
 from mdgw.ingest.fake import BarInput, FakeFeedHandler
 from mdgw.runtime import GatewayRuntime
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+class _ClosingFeedHandler(FakeFeedHandler):
+    """Fake Feed Handler that records whether `close()` was called."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _config():
+    config = load_config(PROJECT_ROOT / "config" / "gateway.toml")
+    server = config.server.model_copy(update={"http_port": 0})
+    return config.model_copy(update={"server": server})
 
 
 def test_closed_fake_bar_roundtrips_to_rest(tmp_path: Path) -> None:
@@ -63,3 +82,35 @@ def test_closed_fake_bar_roundtrips_to_rest(tmp_path: Path) -> None:
     assert Decimal(payload["volume"]) == Decimal("12.34")
     assert payload["trade_count"] == 128
     assert payload["revision"] == 0
+
+
+def test_runtime_stop_closes_the_feed_handler(tmp_path: Path) -> None:
+    feed = _ClosingFeedHandler(instrument_id="binance:BTC/USDT", bars=())
+    runtime = GatewayRuntime(
+        feed_handler=feed, config=_config(), data_root=tmp_path
+    )
+
+    runtime.start()
+    runtime.stop()
+
+    assert feed.closed is True
+
+
+def test_runtime_start_failure_closes_the_feed_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    feed = _ClosingFeedHandler(instrument_id="binance:BTC/USDT", bars=())
+    runtime = GatewayRuntime(
+        feed_handler=feed, config=_config(), data_root=tmp_path
+    )
+
+    def _fail_start_http() -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(runtime, "_start_http", _fail_start_http)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        runtime.start()
+
+    assert feed.closed is True
+    assert runtime._started is False

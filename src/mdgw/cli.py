@@ -78,6 +78,15 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="LEVEL",
         help="override [service].log_level",
     )
+    run.add_argument(
+        "--wait-for-api",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "collector: wait for the api READY handshake before ingesting "
+            "(overrides [service].wait_for_api_ready)"
+        ),
+    )
 
     up = subcommands.add_parser(
         "up",
@@ -172,7 +181,12 @@ def _run_service(args: argparse.Namespace) -> int:
     root = getattr(args, "root", None) or config.storage.root
 
     try:
-        service = _build_service(args.service, config, root)
+        service = _build_service(
+            args.service,
+            config,
+            root,
+            wait_for_api=getattr(args, "wait_for_api", None),
+        )
     except Exception:
         logger.exception(
             "failed to build Service Role",
@@ -214,11 +228,19 @@ def _run_service(args: argparse.Namespace) -> int:
     return 0
 
 
-def _build_service(role: str, config: GatewayConfig, root: Path):
+def _build_service(
+    role: str,
+    config: GatewayConfig,
+    root: Path,
+    *,
+    wait_for_api: bool | None = None,
+):
     if role == "collector":
         from mdgw.service.collector import CollectorService
 
-        return CollectorService(config, data_root=root)
+        return CollectorService(
+            config, data_root=root, wait_for_api=wait_for_api
+        )
     if role == "api":
         from mdgw.service.api import ApiService
 
@@ -281,6 +303,7 @@ def _build_up_specs(
     collector = ChildSpec(
         role="collector",
         command=[sys.executable, "-m", "mdgw", "run", "--service", "collector"]
+        + ["--wait-for-api"]
         + common,
         health_url=_local_url(
             config.service.health_host,

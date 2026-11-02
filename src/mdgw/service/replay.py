@@ -78,6 +78,8 @@ class ReplayServiceRole:
                 extra={
                     "event": "replay.started",
                     "status": "ready",
+                    "control_endpoint": self.server.control_endpoint,
+                    "publish_endpoint": self.server.publish_endpoint,
                 },
             )
         except Exception:
