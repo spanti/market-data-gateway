@@ -20,6 +20,7 @@ from mdgw.api.server import create_app
 from mdgw.bus.zmq_bus import ZMQBus, ipc_to_table, table_to_ipc
 from mdgw.config import GatewayConfig
 from mdgw.core.bar import Bar
+from mdgw.core.errors import UnknownInstrumentError
 from mdgw.core.schema import bars_to_logical_table
 from mdgw.core.time import utc_now
 from mdgw.ingest.feed_handler import FeedHandler
@@ -42,12 +43,9 @@ class GatewayRuntime:
         feed_handler: FeedHandler,
         config: GatewayConfig,
         data_root: Path | None = None,
-        asset_class: str = "crypto",
     ) -> None:
         self.feed_handler = feed_handler
         self.config = config
-        # Fallback for Instruments that are not present in the snapshot.
-        self.asset_class = asset_class
         self.store = ParquetBarStore(
             data_root if data_root is not None else config.storage.root,
             compression=config.storage.compression,
@@ -167,12 +165,21 @@ class GatewayRuntime:
         return len(base_bars)
 
     def _asset_class_for(self, instrument_id: str) -> str:
-        """Prefer Instrument Reference Data; fall back for unknown Instruments."""
-        if self.instrument_store is not None:
-            instrument = self.instrument_store.get(instrument_id)
-            if instrument is not None:
-                return instrument.asset_class
-        return self.asset_class
+        """Resolve the asset class from the Instrument Snapshot only.
+
+        Unknown Instruments are rejected; there is no constructor fallback.
+        """
+        instrument = (
+            None
+            if self.instrument_store is None
+            else self.instrument_store.get(instrument_id)
+        )
+        if instrument is None:
+            raise UnknownInstrumentError(
+                f"unknown Instrument {instrument_id!r}",
+                details={"instrument_id": instrument_id},
+            )
+        return instrument.asset_class
 
     def _publish_bars(self, bars: list[Bar]) -> int:
         groups: dict[tuple[str, str], list[Bar]] = defaultdict(list)

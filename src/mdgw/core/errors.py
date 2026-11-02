@@ -12,6 +12,7 @@ from typing import Any
 INVALID_INSTRUMENT = "invalid_instrument"
 INSTRUMENT_NOT_FOUND = "instrument_not_found"
 INVALID_INTERVAL = "invalid_interval"
+INVALID_PARAMETER = "invalid_parameter"
 INVALID_FORMAT = "invalid_format"
 INVALID_RANGE = "invalid_range"
 RANGE_TOO_LARGE = "range_too_large"
@@ -36,3 +37,10 @@ class SchemaVersionMismatch(GatewayError):
 
     code = SCHEMA_VERSION_MISMATCH
     status = 409
+
+
+class UnknownInstrumentError(GatewayError):
+    """A Bar referenced an Instrument absent from the Instrument Snapshot."""
+
+    code = INSTRUMENT_NOT_FOUND
+    status = 404

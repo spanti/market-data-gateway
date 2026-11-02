@@ -14,6 +14,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from mdgw.api.server import create_app
 from mdgw.config import load_config
+from mdgw.core.errors import INSTRUMENT_NOT_FOUND, UnknownInstrumentError
 from mdgw.ingest.fake import BarInput, FakeFeedHandler
 from mdgw.reference import (
     InstrumentReferenceError,
@@ -210,7 +211,7 @@ def test_instruments_list_rejects_an_invalid_boolean(tmp_path: Path) -> None:
 
     error = json.loads(body)["error"]
     assert status == 400
-    assert error["code"] == "invalid_range"
+    assert error["code"] == "invalid_parameter"
     assert error["request_id"]
 
 
@@ -338,26 +339,24 @@ def test_runtime_uses_asset_class_from_the_snapshot(tmp_path: Path) -> None:
     }
 
 
-def test_runtime_falls_back_to_the_constructor_asset_class_for_unknown_instruments(
-    tmp_path: Path,
-) -> None:
+def test_runtime_rejects_bars_for_unknown_instruments(tmp_path: Path) -> None:
     instruments = _write_instruments(tmp_path / "config")
 
     with _runtime(
         tmp_path / "data",
         instruments,
         feed_instrument_id="binance:UNKNOWN/USDT",
-        asset_class="equity",
     ) as runtime:
         runtime.start()
-        runtime.ingest()
+        with pytest.raises(UnknownInstrumentError) as excinfo:
+            runtime.ingest()
 
-    manifest = json.loads(
-        (tmp_path / "data" / "bars" / "_manifest.json").read_text(encoding="utf-8")
-    )
-    assert {entry["partition"]["asset_class"] for entry in manifest["files"]} == {
-        "equity"
-    }
+    assert "binance:UNKNOWN/USDT" in str(excinfo.value)
+    assert excinfo.value.code == INSTRUMENT_NOT_FOUND
+    assert excinfo.value.details == {"instrument_id": "binance:UNKNOWN/USDT"}
+    bars_root = tmp_path / "data" / "bars"
+    assert not (bars_root / "_manifest.json").exists()
+    assert list(bars_root.rglob("data-*.parquet")) == []
 
 
 async def _request(app, path: str) -> tuple[int, dict]:
