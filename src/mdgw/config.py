@@ -195,10 +195,22 @@ class AggregationConfig(_ConfigModel):
         return self
 
 
+class ReplayConfig(_ConfigModel):
+    """Replay Service Role endpoints and concurrency limits (DESIGN §6)."""
+
+    control_bind_host: str = "127.0.0.1"
+    control_port: int = Field(default=0, ge=0, le=65535)
+    publish_bind_host: str = "127.0.0.1"
+    publish_port: int = Field(default=0, ge=0, le=65535)
+    max_sessions: int = Field(default=4, ge=1)
+    heartbeat_s: float = Field(default=1.0, gt=0)
+
+
 class GatewayConfig(_ConfigModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     bus: BusConfig = Field(default_factory=BusConfig)
     streaming: StreamingConfig = Field(default_factory=StreamingConfig)
+    replay: ReplayConfig = Field(default_factory=ReplayConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     aggregation: AggregationConfig = Field(default_factory=AggregationConfig)

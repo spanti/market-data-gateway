@@ -27,6 +27,8 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Import `mdgw` from this checkout's `src/`, not from another editable install.
+pythonpath = ["src"]
 addopts = "-ra -m 'not network'"
 markers = [
     "network: tests that reach a real Venue (skipped by default)",

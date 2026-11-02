@@ -19,6 +19,17 @@ stream_pub_port = 0
 queue_size = 1000
 lag_notice_interval_ms = 1000
 
+[replay]
+# Replay Service Role: ZMQ control REP + market PUB endpoints.
+# Port 0 picks an ephemeral port; the resolved endpoint is advertised on
+# create_session.
+control_bind_host = "127.0.0.1"
+control_port = 0
+publish_bind_host = "127.0.0.1"
+publish_port = 0
+max_sessions = 4
+heartbeat_s = 1.0
+
 [storage]
 root = "./data"
 schema_version = 1
