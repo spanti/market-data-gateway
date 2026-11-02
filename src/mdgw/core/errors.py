@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 INVALID_INSTRUMENT = "invalid_instrument"
+INSTRUMENT_NOT_FOUND = "instrument_not_found"
 INVALID_INTERVAL = "invalid_interval"
 INVALID_FORMAT = "invalid_format"
 INVALID_RANGE = "invalid_range"

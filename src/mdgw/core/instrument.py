@@ -3,7 +3,35 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from urllib.parse import quote
+
+
+@dataclass(frozen=True, slots=True)
+class Instrument:
+    """An Instrument Reference Data record as stored in an Instrument Snapshot.
+
+    Timestamps are UTC nanoseconds so the value never has to pass through a
+    float or lose precision on the way to the Arrow contract.
+    """
+
+    instrument_id: str
+    venue: str
+    symbol: str
+    asset_class: str
+    instrument_type: str
+    base: str
+    quote: str
+    tick_size: Decimal
+    lot_size: Decimal
+    multiplier: Decimal
+    timezone: str
+    listing_ts_ns: int
+    delisted_ts_ns: int | None = None
+
+    @property
+    def is_delisted(self) -> bool:
+        return self.delisted_ts_ns is not None
 
 
 @dataclass(frozen=True, slots=True)

@@ -24,6 +24,11 @@ from mdgw.core.schema import bars_to_logical_table
 from mdgw.core.time import utc_now
 from mdgw.ingest.feed_handler import FeedHandler
 from mdgw.normalize.bar import normalize_bar
+from mdgw.reference import (
+    InstrumentStore,
+    export_instrument_snapshot,
+    load_instrument_reference,
+)
 from mdgw.store.parquet_dataset import ParquetBarStore
 
 MARKET_BAR_TOPIC_PREFIX = "market.bar."
@@ -41,7 +46,7 @@ class GatewayRuntime:
     ) -> None:
         self.feed_handler = feed_handler
         self.config = config
-        # Placeholder until Instrument Reference Data provides asset_class.
+        # Fallback for Instruments that are not present in the snapshot.
         self.asset_class = asset_class
         self.store = ParquetBarStore(
             data_root if data_root is not None else config.storage.root,
@@ -50,6 +55,7 @@ class GatewayRuntime:
             format_version=config.storage.format_version,
             schema_version=config.storage.schema_version,
         )
+        self.instrument_store: InstrumentStore | None = None
         self.aggregator = BarAggregator(
             intervals=config.aggregation.intervals,
             base_interval=config.aggregation.base_interval,
@@ -72,6 +78,14 @@ class GatewayRuntime:
     def start(self) -> None:
         if self._started:
             return
+        # Instrument Reference Data is validated and exported once at startup;
+        # the API and all later reads use only the Instrument Snapshot.
+        reference = load_instrument_reference(Path(self.config.instruments.path))
+        export = export_instrument_snapshot(
+            reference, self.store.root / "instruments"
+        )
+        self.instrument_store = InstrumentStore(export.path)
+
         bus = ZMQBus(zmq_hwm=self.config.bus.zmq_hwm)
         try:
             endpoint = f"inproc://mdgw-{uuid4().hex}"
@@ -142,10 +156,23 @@ class GatewayRuntime:
         aggregated = self.aggregator.add_many(base_bars)
         bars = base_bars + aggregated
 
-        self.store.write_bars(bars, asset_class=self.asset_class)
+        by_asset_class: dict[str, list[Bar]] = defaultdict(list)
+        for bar in bars:
+            by_asset_class[self._asset_class_for(bar.instrument_id)].append(bar)
+        for asset_class, group in sorted(by_asset_class.items()):
+            self.store.write_bars(group, asset_class=asset_class)
+
         target = self._publish_bars(bars)
         self._wait_for_received(target)
         return len(base_bars)
+
+    def _asset_class_for(self, instrument_id: str) -> str:
+        """Prefer Instrument Reference Data; fall back for unknown Instruments."""
+        if self.instrument_store is not None:
+            instrument = self.instrument_store.get(instrument_id)
+            if instrument is not None:
+                return instrument.asset_class
+        return self.asset_class
 
     def _publish_bars(self, bars: list[Bar]) -> int:
         groups: dict[tuple[str, str], list[Bar]] = defaultdict(list)
@@ -205,7 +232,7 @@ class GatewayRuntime:
         self._loop.run_forever()
 
     async def _start_http_on_loop(self) -> web.AppRunner:
-        app = create_app(self.store)
+        app = create_app(self.store, instrument_store=self.instrument_store)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(
