@@ -17,6 +17,7 @@ import json
 import logging
 from contextlib import suppress
 from typing import Any
+from uuid import uuid4
 
 from aiohttp import web
 
@@ -48,6 +49,7 @@ class WebSocketSession:
         queue_size: int,
         lag_notice_interval_s: float,
     ) -> None:
+        self.session_id = uuid4().hex
         self._ws = ws
         self._queue: asyncio.Queue[EventMessage] = asyncio.Queue(maxsize=queue_size)
         self._subscriptions: set[str] = set()
@@ -55,6 +57,7 @@ class WebSocketSession:
         self._lag_notice_interval_s = lag_notice_interval_s
 
         self._dropped = 0
+        self.dropped_total = 0
         self._lag_pending = False
         self._lag_since: str | None = None
         self._last_notice_at = 0.0
@@ -94,6 +97,7 @@ class WebSocketSession:
             with suppress(asyncio.QueueEmpty):
                 self._queue.get_nowait()  # drop the oldest message
             self._dropped += 1
+            self.dropped_total += 1
             self._note_lag()
         self._queue.put_nowait((topic, data))
 
@@ -198,6 +202,11 @@ class WebSocketHub:
     def session_count(self) -> int:
         return len(self._sessions)
 
+    @property
+    def dropped_total(self) -> int:
+        """Total messages dropped by all sessions for backpressure."""
+        return sum(session.dropped_total for session in self._sessions)
+
     def register(self, ws: web.WebSocketResponse) -> WebSocketSession:
         if self._closed:
             raise RuntimeError("WebSocketHub is closed")
@@ -207,10 +216,24 @@ class WebSocketHub:
             lag_notice_interval_s=self._lag_notice_interval_s,
         )
         self._sessions.add(session)
+        logger.info(
+            "websocket session opened",
+            extra={
+                "event": "api.ws_session_opened",
+                "session_id": session.session_id,
+            },
+        )
         return session
 
     async def unregister(self, session: WebSocketSession) -> None:
         self._sessions.discard(session)
+        logger.info(
+            "websocket session closed",
+            extra={
+                "event": "api.ws_session_closed",
+                "session_id": session.session_id,
+            },
+        )
         await session.close()
 
     def publish(self, topic: str, messages: list[dict[str, Any]]) -> None:
@@ -235,9 +258,27 @@ class WebSocketHub:
 
         op = payload.get("op")
         if op == "subscribe":
-            session.subscribe(valid_topics(payload.get("topics")))
+            topics = valid_topics(payload.get("topics"))
+            session.subscribe(topics)
+            logger.info(
+                "websocket subscribe",
+                extra={
+                    "event": "api.ws_subscribe",
+                    "session_id": session.session_id,
+                    "topics": topics,
+                },
+            )
         elif op == "unsubscribe":
-            session.unsubscribe(valid_topics(payload.get("topics")))
+            topics = valid_topics(payload.get("topics"))
+            session.unsubscribe(topics)
+            logger.info(
+                "websocket unsubscribe",
+                extra={
+                    "event": "api.ws_unsubscribe",
+                    "session_id": session.session_id,
+                    "topics": topics,
+                },
+            )
         elif op == "ping":
             await session.send({"op": "pong"})
 

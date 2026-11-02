@@ -93,15 +93,24 @@ class ZMQBus:
         *,
         topic_prefix: str,
         handler: Callable[[str, bytes], None],
+        extra_prefixes: Iterable[str] = (),
     ) -> threading.Event:
         ready_event = threading.Event()
         stop_event = threading.Event()
 
-        sub_id = f"{endpoint}-{topic_prefix}"
+        prefixes = (topic_prefix, *tuple(extra_prefixes))
+        sub_id = f"{endpoint}-{','.join(prefixes)}"
 
         thread = threading.Thread(
             target=self._run_subscriber,
-            args=(endpoint, topic_prefix, handler, stop_event, ready_event, sub_id),
+            args=(
+                endpoint,
+                prefixes,
+                handler,
+                stop_event,
+                ready_event,
+                sub_id,
+            ),
             name="mdgw-zmq-subscriber",
             daemon=True,
         )
@@ -140,14 +149,15 @@ class ZMQBus:
     def _run_subscriber(
         self,
         endpoint: str,
-        topic_prefix: str,
+        topic_prefixes: Iterable[str],
         handler: Callable[[str, bytes], None],
         stop_event: threading.Event,
         ready_event: threading.Event,
         sub_id: str,
     ) -> None:
         socket = self._context.socket(zmq.SUB)
-        socket.setsockopt(zmq.SUBSCRIBE, topic_prefix.encode("utf-8"))
+        for prefix in topic_prefixes:
+            socket.setsockopt(zmq.SUBSCRIBE, prefix.encode("utf-8"))
         socket.setsockopt(zmq.SUBSCRIBE, READY_TOPIC.encode("utf-8"))
         socket.setsockopt(zmq.RCVHWM, self._zmq_hwm)
         socket.setsockopt(zmq.LINGER, 0)

@@ -16,7 +16,11 @@ from pydantic import (
 
 from mdgw.core.schema import INTERVALS
 
+# `bus.transport` only selects the single-process walking skeleton's internal
+# transport. Multi-process Service Roles use the explicit `tcp://` endpoints
+# below, because Windows pyzmq builds cannot bind `ipc://`.
 SUPPORTED_BUS_TRANSPORTS = frozenset({"inproc"})
+SUPPORTED_FEED_KINDS = frozenset({"ccxt", "fake"})
 
 
 class _ConfigModel(BaseModel):
@@ -31,6 +35,25 @@ class ServerConfig(_ConfigModel):
     ws_path: str = "/ws"
 
 
+def _tcp_endpoint(value: str) -> str:
+    """Validate one multi-process ZeroMQ endpoint.
+
+    Windows pyzmq wheels disable `ipc://`, so every cross-process endpoint is
+    deliberately restricted to TCP.
+    """
+    value = value.strip()
+    if not value.startswith("tcp://"):
+        raise ValueError(
+            f"bus endpoint must use tcp:// (ipc:// is not supported): {value!r}"
+        )
+    host, separator, port = value[len("tcp://") :].rpartition(":")
+    if not separator or not host:
+        raise ValueError(f"bus endpoint must be tcp://HOST:PORT: {value!r}")
+    if not port.isdigit() or not 0 <= int(port) <= 65_535:
+        raise ValueError(f"bus endpoint has an invalid port: {value!r}")
+    return value
+
+
 class BusConfig(_ConfigModel):
     transport: str = "inproc"
     zmq_hwm: int = 10_000
@@ -38,6 +61,12 @@ class BusConfig(_ConfigModel):
     # port; the resolved endpoint is exposed as `runtime.stream_endpoint`.
     stream_bind_host: str = "127.0.0.1"
     stream_pub_port: int = Field(default=0, ge=0, le=65_535)
+    # Multi-process Service Role endpoints. The collector publishes market
+    # Bars here; the api connects to it and re-publishes on its own PUB so
+    # external consumers never depend on the collector's address.
+    collector_pub_bind: str = "tcp://127.0.0.1:5555"
+    collector_pub_connect: str = "tcp://127.0.0.1:5555"
+    api_pub_bind: str = "tcp://127.0.0.1:5556"
 
     @field_validator("transport")
     @classmethod
@@ -48,6 +77,28 @@ class BusConfig(_ConfigModel):
                 f"{value!r} (supported: {sorted(SUPPORTED_BUS_TRANSPORTS)})"
             )
         return value
+
+    @field_validator("collector_pub_bind", "collector_pub_connect", "api_pub_bind")
+    @classmethod
+    def _tcp_bus_endpoint(cls, value: str) -> str:
+        return _tcp_endpoint(value)
+
+
+class ServiceConfig(_ConfigModel):
+    """Per-Service-Role observability and supervisor settings."""
+
+    health_host: str = "127.0.0.1"
+    collector_health_port: int = Field(default=8081, ge=0, le=65_535)
+    replay_health_port: int = Field(default=8082, ge=0, le=65_535)
+    log_level: str = "INFO"
+    # How long to wait after binding the collector PUB before the first
+    # ingest, so the api SUB can finish its subscription handshake.
+    startup_delay_s: float = Field(default=1.0, ge=0)
+    # The api can serve historical REST without a live collector. In
+    # deployments where the live stream is mandatory, set this true so
+    # `/readyz` returns 503 until the collector handshake is observed.
+    collector_required: bool = False
+    collector_ready_timeout_s: float = Field(default=30.0, gt=0)
 
 
 class StreamingConfig(_ConfigModel):
@@ -97,6 +148,12 @@ class FeedConfig(_ConfigModel):
     # Feed Handler does not consume these yet.
     batch_window_ms: int = Field(default=100, ge=0)
     batch_max_events: int = Field(default=500, ge=1)
+    # Development/test Feed Handler (`kind = "fake"`). It emits a deterministic
+    # run of closed 1m Bars and never reaches the network. `fake_bars = 0`
+    # disables the generator.
+    fake_bars: int = Field(default=0, ge=0)
+    fake_start_ts: str | None = None
+    fake_price: str = "100"
 
     @field_validator("name", "venue", "market_type")
     @classmethod
@@ -108,9 +165,22 @@ class FeedConfig(_ConfigModel):
     @field_validator("kind")
     @classmethod
     def _supported_kind(cls, value: str) -> str:
-        if value != "ccxt":
-            raise ValueError(f"unsupported Feed Handler kind: {value!r}")
+        if value not in SUPPORTED_FEED_KINDS:
+            raise ValueError(
+                f"unsupported Feed Handler kind: {value!r} "
+                f"(supported: {sorted(SUPPORTED_FEED_KINDS)})"
+            )
         return value
+
+    @field_validator("fake_start_ts")
+    @classmethod
+    def _fake_start_ts(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("fake_start_ts must be an ISO-8601 string")
+        return cleaned
 
     @field_validator("symbols")
     @classmethod
@@ -209,6 +279,7 @@ class ReplayConfig(_ConfigModel):
 class GatewayConfig(_ConfigModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     bus: BusConfig = Field(default_factory=BusConfig)
+    service: ServiceConfig = Field(default_factory=ServiceConfig)
     streaming: StreamingConfig = Field(default_factory=StreamingConfig)
     replay: ReplayConfig = Field(default_factory=ReplayConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)

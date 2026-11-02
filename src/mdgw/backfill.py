@@ -78,6 +78,7 @@ def run_backfill(
             from_ts = ns_to_datetime(hwm_ns) if hwm_ns is not None else window_start
             _record_gap(
                 health,
+                feed=feed_handler.name,
                 instrument_id=instrument_id,
                 from_ts=from_ts,
                 to_ts=now,
@@ -98,6 +99,7 @@ def run_backfill(
             start_ns = window_start_ns
             _record_gap(
                 health,
+                feed=feed_handler.name,
                 instrument_id=instrument_id,
                 from_ts=ns_to_datetime(hwm_ns),
                 to_ts=window_start,
@@ -194,6 +196,11 @@ def run_backfill(
             len(bars_to_write),
             instrument_id,
             ns_to_datetime(start_ns).isoformat(),
+            extra={
+                "event": "collector.backfill_written",
+                "feed": feed_handler.name,
+                "instrument_id": instrument_id,
+            },
         )
 
     return report
@@ -202,6 +209,7 @@ def run_backfill(
 def _record_gap(
     health: HealthTracker,
     *,
+    feed: str,
     instrument_id: str,
     from_ts: datetime | None,
     to_ts: datetime | None,
@@ -221,6 +229,11 @@ def _record_gap(
         None if from_ts is None else from_ts.isoformat(),
         None if to_ts is None else to_ts.isoformat(),
         reason,
+        extra={
+            "event": "collector.gap_unrecoverable",
+            "feed": feed,
+            "instrument_id": instrument_id,
+        },
     )
 
 

@@ -11,3 +11,15 @@
   multiplier: "1"
   timezone: UTC
   listing_ts: "2017-08-17T04:00:00Z"
+- instrument_id: "binance:ETH/USDT"
+  venue: binance
+  symbol: "ETH/USDT"
+  asset_class: crypto
+  instrument_type: spot
+  base: ETH
+  quote: USDT
+  tick_size: "0.01"
+  lot_size: "0.0001"
+  multiplier: "1"
+  timezone: UTC
+  listing_ts: "2017-08-17T04:00:00Z"
