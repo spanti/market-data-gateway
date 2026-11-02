@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from aiohttp import web
 
+from mdgw.aggregate import BarAggregator
 from mdgw.api.server import create_app
 from mdgw.bus.zmq_bus import ZMQBus, ipc_to_table, table_to_ipc
 from mdgw.config import GatewayConfig
@@ -48,6 +49,11 @@ class GatewayRuntime:
             row_group_size=config.storage.row_group_size,
             format_version=config.storage.format_version,
             schema_version=config.storage.schema_version,
+        )
+        self.aggregator = BarAggregator(
+            intervals=config.aggregation.intervals,
+            base_interval=config.aggregation.base_interval,
+            retention_parent_periods=config.aggregation.retention_parent_periods,
         )
 
         self._bus: ZMQBus | None = None
@@ -117,22 +123,29 @@ class GatewayRuntime:
     # -- collector behavior ------------------------------------------------
 
     def ingest(self) -> int:
-        """Drain the Feed Handler once, persist Bars, and publish them."""
+        """Drain the Feed Handler once, aggregate, persist, and publish Bars.
+
+        Returns the number of base-interval (1m) Bars ingested this call;
+        aggregated parents are written and published alongside them.
+        """
         if not self._started:
             raise RuntimeError("GatewayRuntime.start() must be called before ingest()")
 
         ingest_ts = utc_now()
-        bars = [
+        base_bars = [
             normalize_bar(raw, feed=self.feed_handler.name, ingest_ts=ingest_ts)
             for raw in self.feed_handler.iter_bars()
         ]
-        if not bars:
+        if not base_bars:
             return 0
+
+        aggregated = self.aggregator.add_many(base_bars)
+        bars = base_bars + aggregated
 
         self.store.write_bars(bars, asset_class=self.asset_class)
         target = self._publish_bars(bars)
         self._wait_for_received(target)
-        return len(bars)
+        return len(base_bars)
 
     def _publish_bars(self, bars: list[Bar]) -> int:
         groups: dict[tuple[str, str], list[Bar]] = defaultdict(list)
