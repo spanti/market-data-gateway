@@ -23,8 +23,8 @@ from mdgw.bus.zmq_bus import ZMQBus, ipc_to_table, table_to_ipc
 from mdgw.config import GatewayConfig
 from mdgw.core.bar import Bar
 from mdgw.core.errors import UnknownInstrumentError
-from mdgw.core.schema import bars_to_logical_table
-from mdgw.core.time import datetime_to_ns, utc_now
+from mdgw.core.schema import INTERVALS, bars_to_logical_table
+from mdgw.core.time import datetime_to_ns, ns_to_datetime, utc_now
 from mdgw.ingest.feed_handler import FeedHandler
 from mdgw.normalize.bar import normalize_bar
 from mdgw.reference import (
@@ -99,6 +99,10 @@ class GatewayRuntime:
         bus: ZMQBus | None = None
         try:
             self._run_backfill(utc_now())
+            # Register every expected freshness key before Streaming/HTTP come
+            # up, so a feed that never delivers its first Bar is still visible
+            # as stale instead of being absent from the health view.
+            self._register_expected_keys()
 
             bus = ZMQBus(zmq_hwm=self.config.bus.zmq_hwm)
             endpoint = f"inproc://mdgw-{uuid4().hex}"
@@ -201,12 +205,43 @@ class GatewayRuntime:
         self._advance_hwm(bars)
         for bar in bars:
             self._health.record_bar(bar)
+        # A newly persisted 1m Bar is also the conservative baseline for parent
+        # intervals that have not closed yet.
+        self._register_expected_keys()
 
         target = self._publish_bars(bars)
         self._wait_for_received(target)
         return len(base_bars)
 
     # -- collector state ---------------------------------------------------
+
+    def _register_expected_keys(self) -> None:
+        """Register one freshness key per expected `(instrument, interval)`.
+
+        The starting event timestamp comes from the interval's own data HWM
+        (`open_ts + interval`, i.e. its close/event timestamp). An interval
+        with no HWM of its own falls back to the base-interval (1m) HWM close as
+        a conservative baseline, so a parent period is not reported stale just
+        because it has not closed since startup. With no 1m HWM either the key
+        is registered as "never received" and is stale until a Bar arrives.
+        Forward-only registration means a later recorded event is never lost.
+        """
+        if self._hwm is None:
+            return
+        feed = self.feed_handler.name
+        base_interval = self.config.aggregation.base_interval
+        base_interval_delta = INTERVALS[base_interval]
+        for instrument_id in self.feed_handler.instrument_ids:
+            base_hwm_ns = self._hwm.get(instrument_id, base_interval)
+            for interval in self.config.aggregation.intervals:
+                own_hwm_ns = self._hwm.get(instrument_id, interval)
+                if own_hwm_ns is not None:
+                    event_ts = ns_to_datetime(own_hwm_ns) + INTERVALS[interval]
+                elif base_hwm_ns is not None:
+                    event_ts = ns_to_datetime(base_hwm_ns) + base_interval_delta
+                else:
+                    event_ts = None
+                self._health.register(feed, instrument_id, interval, event_ts)
 
     def _advance_hwm(self, bars: list[Bar]) -> None:
         if self._hwm is None:

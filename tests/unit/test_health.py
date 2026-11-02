@@ -45,6 +45,47 @@ def test_new_event_makes_instrument_fresh_again() -> None:
     assert tracker.stale(BASE + timedelta(seconds=501)) == []
 
 
+def test_register_without_an_event_is_stale_and_has_no_age() -> None:
+    tracker = HealthTracker(stale_after_s=120)
+    tracker.register(FEED, INSTRUMENT, "5m", None)
+
+    entry = tracker.tracked(BASE)[0]
+    assert entry == {
+        "feed": FEED,
+        "instrument_id": INSTRUMENT,
+        "interval": "5m",
+        "last_event_ts": None,
+        "age_s": None,
+        "threshold_s": 600.0,
+        "stale": True,
+    }
+    assert tracker.stale(BASE) == [entry]
+    assert tracker.snapshot(BASE)["stale_count"] == 1
+
+
+def test_register_never_moves_backwards_and_none_does_not_clear_an_event() -> None:
+    tracker = HealthTracker(stale_after_s=120)
+    tracker.register(FEED, INSTRUMENT, "1m", BASE)
+    tracker.register(FEED, INSTRUMENT, "1m", BASE - timedelta(minutes=1))
+    tracker.register(FEED, INSTRUMENT, "1m", None)
+
+    assert tracker.tracked(BASE)[0]["last_event_ts"] == "2024-01-01T00:05:00.000000000Z"
+
+    tracker.register(FEED, INSTRUMENT, "1m", BASE + timedelta(minutes=1))
+    assert tracker.tracked(BASE)[0]["last_event_ts"] == "2024-01-01T00:06:00.000000000Z"
+
+
+def test_register_none_then_record_event_becomes_fresh() -> None:
+    tracker = HealthTracker(stale_after_s=120)
+    tracker.register(FEED, INSTRUMENT, "1m", None)
+    tracker.record_event(FEED, INSTRUMENT, "1m", BASE)
+
+    entry = tracker.tracked(BASE)[0]
+    assert entry["last_event_ts"] == "2024-01-01T00:05:00.000000000Z"
+    assert entry["age_s"] == 0.0
+    assert entry["stale"] is False
+
+
 def test_gap_events_are_recorded_with_reason_and_range() -> None:
     tracker = HealthTracker(stale_after_s=120)
     recorded_at = datetime(2024, 1, 2, tzinfo=UTC)

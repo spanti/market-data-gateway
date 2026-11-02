@@ -314,3 +314,83 @@ def test_new_history_bar_keeps_the_source_revision(tmp_path: Path) -> None:
         rows = _rows(runtime, "1m")
         assert len(rows) == 1
         assert rows[0]["revision"] == 3
+
+
+def test_start_registers_expected_keys_even_without_any_bars(tmp_path: Path) -> None:
+    with GatewayRuntime(
+        feed_handler=FakeFeedHandler(instrument_id=INSTRUMENT, bars=[]),
+        config=_config(),
+        data_root=tmp_path,
+    ) as runtime:
+        runtime.start()
+
+        stale = runtime.stale_instruments(now=_at())
+        expected = {
+            ("fake", INSTRUMENT, interval)
+            for interval in runtime.config.aggregation.intervals
+        }
+        assert {
+            (entry["feed"], entry["instrument_id"], entry["interval"])
+            for entry in stale
+        } == expected
+        assert all(entry["last_event_ts"] is None for entry in stale)
+        assert all(entry["age_s"] is None for entry in stale)
+
+
+def test_a_1m_bar_makes_base_fresh_and_seeds_higher_interval_baseline(
+    tmp_path: Path,
+) -> None:
+    close_ts = _at(minute=1)
+    with GatewayRuntime(
+        feed_handler=FakeFeedHandler(instrument_id=INSTRUMENT, bars=_bars(0)),
+        config=_config(stale_after_s=120),
+        data_root=tmp_path,
+    ) as runtime:
+        runtime.start()
+        runtime.ingest()
+
+        assert runtime.stale_instruments(now=close_ts) == []
+
+        tracked = {
+            entry["interval"]: entry
+            for entry in runtime.health(now=close_ts)["tracked"]
+        }
+        expected_iso = ns_to_iso(datetime_to_ns(close_ts))
+        assert tracked["1m"]["last_event_ts"] == expected_iso
+        for interval in ("5m", "15m", "1h", "1d"):
+            assert tracked[interval]["last_event_ts"] == expected_iso
+            assert tracked[interval]["stale"] is False
+
+
+def test_restart_registers_keys_from_hwm_close_ts(tmp_path: Path) -> None:
+    with GatewayRuntime(
+        feed_handler=FakeFeedHandler(instrument_id=INSTRUMENT, bars=_bars(0, 1, 2, 3, 4)),
+        config=_config(stale_after_s=120),
+        data_root=tmp_path,
+    ) as first:
+        first.start()
+        first.ingest()
+
+    # 1m HWM is open 00:04 -> close 00:05; 5m HWM is open 00:00 -> close 00:05.
+    with GatewayRuntime(
+        feed_handler=FakeFeedHandler(instrument_id=INSTRUMENT, bars=[]),
+        config=_config(stale_after_s=120),
+        data_root=tmp_path,
+    ) as second:
+        second.start()
+
+        assert second.stale_instruments(now=_at(minute=5)) == []
+        tracked = {
+            entry["interval"]: entry
+            for entry in second.health(now=_at(minute=5))["tracked"]
+        }
+        expected_iso = ns_to_iso(datetime_to_ns(_at(minute=5)))
+        for interval in ("1m", "5m", "15m", "1h", "1d"):
+            assert tracked[interval]["last_event_ts"] == expected_iso
+
+        stale = second.stale_instruments(
+            now=_at(minute=5) + timedelta(seconds=121)
+        )
+        assert [(entry["interval"], entry["stale"]) for entry in stale] == [
+            ("1m", True)
+        ]
