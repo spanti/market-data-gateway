@@ -34,6 +34,10 @@ class ServerConfig(_ConfigModel):
 class BusConfig(_ConfigModel):
     transport: str = "inproc"
     zmq_hwm: int = 10_000
+    # External Streaming Interface PUB endpoint. Port 0 picks an ephemeral
+    # port; the resolved endpoint is exposed as `runtime.stream_endpoint`.
+    stream_bind_host: str = "127.0.0.1"
+    stream_pub_port: int = Field(default=0, ge=0, le=65_535)
 
     @field_validator("transport")
     @classmethod
@@ -44,6 +48,16 @@ class BusConfig(_ConfigModel):
                 f"{value!r} (supported: {sorted(SUPPORTED_BUS_TRANSPORTS)})"
             )
         return value
+
+
+class StreamingConfig(_ConfigModel):
+    """WebSocket fan-out limits for the Streaming Interface."""
+
+    # Per-session bounded queue. A full queue drops the oldest message and is
+    # reported to the client via `lag_notice`; the connection stays open.
+    queue_size: int = Field(default=1000, ge=1)
+    lag_notice_interval_ms: int = Field(default=1000, ge=0)
+
 
 
 class StorageConfig(_ConfigModel):
@@ -184,6 +198,7 @@ class AggregationConfig(_ConfigModel):
 class GatewayConfig(_ConfigModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     bus: BusConfig = Field(default_factory=BusConfig)
+    streaming: StreamingConfig = Field(default_factory=StreamingConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     aggregation: AggregationConfig = Field(default_factory=AggregationConfig)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 import pyarrow as pa
 import zmq
@@ -40,23 +40,52 @@ class ZMQBus:
 
         self._publisher: zmq.Socket | None = None
         self._pub_lock = threading.Lock()
+        self._bound_endpoints: tuple[str, ...] = ()
 
         self._subscribers: list[tuple[threading.Thread, threading.Event, threading.Event]] = []
         self._sub_lock = threading.Lock()
 
         self._closed = False
 
-    def bind_publisher(self, endpoint: str) -> None:
+    def bind_publisher(self, endpoint: str | Iterable[str]) -> tuple[str, ...]:
+        """Bind the PUB socket to one or more endpoints.
+
+        Returns the resolved endpoints, in binding order. A request such as
+        `tcp://127.0.0.1:0` is resolved by ZeroMQ, so callers can advertise the
+        actual port. One PUB socket serves both the internal `inproc://` bus and
+        the external `tcp://` Streaming Interface.
+        """
+        endpoints = [endpoint] if isinstance(endpoint, str) else list(endpoint)
+        if not endpoints:
+            raise ValueError("at least one publisher endpoint is required")
+
         with self._pub_lock:
             if self._publisher is not None:
                 raise RuntimeError("Publisher is already bound")
-            
+
             publisher = self._context.socket(zmq.PUB)
             publisher.setsockopt(zmq.SNDHWM, self._zmq_hwm)
             # 进程内通信时，设置 Linger=0 确保关闭时不阻塞
             publisher.setsockopt(zmq.LINGER, 0)
-            publisher.bind(endpoint)
+            resolved: list[str] = []
+            try:
+                for value in endpoints:
+                    publisher.bind(value)
+                    resolved.append(
+                        publisher.getsockopt_string(zmq.LAST_ENDPOINT)
+                    )
+            except Exception:
+                publisher.close()
+                raise
+
             self._publisher = publisher
+            self._bound_endpoints = tuple(resolved)
+            return self._bound_endpoints
+
+    @property
+    def endpoints(self) -> tuple[str, ...]:
+        """Resolved endpoints the PUB socket is bound to."""
+        return self._bound_endpoints
 
     def subscribe(
         self,
@@ -160,6 +189,7 @@ class ZMQBus:
             if self._publisher is not None:
                 self._publisher.close()
                 self._publisher = None
+            self._bound_endpoints = ()
 
         for thread, _, _ in subscribers_to_join:
             thread.join(timeout=2.0)
