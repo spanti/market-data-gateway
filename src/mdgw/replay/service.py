@@ -96,6 +96,24 @@ class ReplayService:
         session = self._get(session_id)
         return session.stop()
 
+    def pause_session(self, session_id: str) -> bool:
+        return self._get(session_id).pause()
+
+    def resume_session(self, session_id: str) -> bool:
+        return self._get(session_id).resume()
+
+    def seek_session(self, session_id: str, ts_ns: int) -> bool:
+        return self._get(session_id).seek(ts_ns)
+
+    def set_speed_session(self, session_id: str, speed: float) -> bool:
+        return self._get(session_id).set_speed(speed)
+
+    def step_session(self, session_id: str, credits: int) -> bool:
+        return self._get(session_id).step(credits)
+
+    def session_info(self, session_id: str) -> dict[str, object]:
+        return self._get(session_id).info()
+
     def wait_session(self, session_id: str, timeout: float | None = None) -> bool:
         return self._get(session_id).wait(timeout)
 

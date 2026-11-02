@@ -24,6 +24,7 @@ from mdgw.core.errors import (
     GatewayError,
     InvalidParameterError,
 )
+from mdgw.core.time import iso_to_ns
 from mdgw.replay.service import ReplayService
 from mdgw.replay.session import ReplaySessionSpec
 
@@ -240,16 +241,64 @@ class ReplayServer:
                 "publish_endpoint": self._publish_endpoint,
             }
 
-        if op == "stop":
-            session_id = request.get("session_id")
-            if not isinstance(session_id, str) or not session_id:
+        if op in ("stop", "pause", "resume"):
+            session_id = _require_session_id(request, op)
+            if op == "stop":
+                self._service.stop_session(session_id)
+            elif op == "pause":
+                self._service.pause_session(session_id)
+            else:
+                self._service.resume_session(session_id)
+            return {"ok": True, "session_id": session_id}
+
+        if op == "seek":
+            session_id = _require_session_id(request, op)
+            raw_ts = request.get("ts")
+            if not isinstance(raw_ts, str) or not raw_ts:
                 raise InvalidParameterError(
-                    "'session_id' is required for the stop op"
+                    "'ts' is required for the seek op and must be an ISO-8601 string"
                 )
-            self._service.stop_session(session_id)
+            try:
+                ts_ns = iso_to_ns(raw_ts)
+            except ValueError as exc:
+                raise InvalidParameterError(str(exc)) from exc
+            self._service.seek_session(session_id, ts_ns)
+            return {"ok": True, "session_id": session_id}
+
+        if op == "set_speed":
+            session_id = _require_session_id(request, op)
+            speed = request.get("speed")
+            if isinstance(speed, bool) or not isinstance(speed, (int, float)):
+                raise InvalidParameterError(
+                    "'speed' is required for the set_speed op and must be a number"
+                )
+            self._service.set_speed_session(session_id, speed)
+            return {"ok": True, "session_id": session_id}
+
+        if op == "step":
+            session_id = _require_session_id(request, op)
+            credits = request.get("credits")
+            if (
+                isinstance(credits, bool)
+                or not isinstance(credits, int)
+                or credits <= 0
+            ):
+                raise InvalidParameterError(
+                    "'credits' is required for the step op and must be a positive integer"
+                )
+            self._service.step_session(session_id, credits)
             return {"ok": True, "session_id": session_id}
 
         raise InvalidParameterError(f"unsupported control op: {op!r}")
+
+
+def _require_session_id(request: Mapping[str, Any], op: str) -> str:
+    session_id = request.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise InvalidParameterError(
+            f"'session_id' is required for the {op} op"
+        )
+    return session_id
 
 
 def _endpoint(host: str, port: int) -> str:

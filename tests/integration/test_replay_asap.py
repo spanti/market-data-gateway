@@ -531,7 +531,7 @@ def test_zmq_stop_of_a_blocked_session_sends_stopped(tmp_path: Path) -> None:
             json.dumps(
                 {
                     **_create_request(),
-                    "replay_mode": "realtime",
+                    "replay_mode": "turbo",
                 }
             ).encode(),
             INVALID_PARAMETER,
