@@ -738,12 +738,19 @@ def build_feed_handler(
     feed_config: FeedConfig,
     *,
     exchange=None,
-) -> CcxtFeedHandler:
+) -> FeedHandler:
     """Build the Feed Handler for one `[[feeds]]` entry.
 
-    `exchange` is injectable so tests and later tickets can supply a fake or a
-    preconfigured ccxt.pro client without reaching the network.
+    `kind = "fake"` selects the deterministic, network-free generator used by
+    development and the multi-process tests. `exchange` is injectable so tests
+    can supply a preconfigured ccxt.pro client.
     """
+    if feed_config.kind == "fake":
+        # Imported lazily: the fake factory itself imports the composite
+        # adapter, which must not create an import cycle at module load.
+        from mdgw.ingest.fake import build_fake_feed_handler
+
+        return build_fake_feed_handler(feed_config)
     if feed_config.kind != "ccxt":
         raise ValueError(f"unsupported Feed Handler kind: {feed_config.kind!r}")
     if exchange is None:

@@ -13,6 +13,23 @@ zmq_hwm = 10000
 # External Streaming Interface PUB endpoint (port 0 = ephemeral).
 stream_bind_host = "127.0.0.1"
 stream_pub_port = 0
+# Multi-process Service Role endpoints. Only tcp:// is accepted (Windows
+# pyzmq builds cannot bind ipc://). `mdgw run --service collector` binds
+# collector_pub_bind; the api connects to collector_pub_connect and binds
+# api_pub_bind for external consumers.
+collector_pub_bind = "tcp://127.0.0.1:5555"
+collector_pub_connect = "tcp://127.0.0.1:5555"
+api_pub_bind = "tcp://127.0.0.1:5556"
+
+[service]
+# Health/metrics listeners for collector and replay; the api uses http_port.
+health_host = "127.0.0.1"
+collector_health_port = 8081
+replay_health_port = 8082
+log_level = "INFO"
+startup_delay_s = 1.0
+collector_required = false
+collector_ready_timeout_s = 30.0
 
 [streaming]
 # Per-session WebSocket queue; overflow drops the oldest and sends lag_notice.

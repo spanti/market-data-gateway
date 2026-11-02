@@ -1,20 +1,29 @@
-"""Minimal operator CLI: `mdgw compact` and `mdgw gc`.
+"""Operator CLI: `run --service`, `up`, `compact`, and `gc`.
 
-`run --service` / `up` belong to a later ticket; this module deliberately uses
-only `argparse`.
+`run` starts exactly one Service Role and blocks until SIGINT/SIGTERM; `up` is
+a small supervisor that starts collector -> ready -> api and restarts unexpected
+exits. Only `argparse` is used; framework imports for the roles are lazy so the
+maintenance commands stay lightweight.
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
+import signal
 import sys
+import threading
 from pathlib import Path
 
 from mdgw.config import GatewayConfig, load_config
+from mdgw.logging import configure_json_logging
 from mdgw.store.maintenance import parse_duration
 from mdgw.store.parquet_dataset import ParquetBarStore
 
 DEFAULT_CONFIG_PATH = Path("config/gateway.toml")
+SERVICE_ROLES = ("collector", "api", "replay")
+
+logger = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,6 +62,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="actually delete Data Files and switch the Manifest",
     )
 
+    run = subcommands.add_parser(
+        "run", help="run exactly one Service Role until SIGINT/SIGTERM"
+    )
+    run.add_argument(
+        "--service",
+        required=True,
+        choices=SERVICE_ROLES,
+        help="Service Role to start",
+    )
+    _add_common_options(run, suppress_defaults=True)
+    run.add_argument(
+        "--log-level",
+        default=None,
+        metavar="LEVEL",
+        help="override [service].log_level",
+    )
+
+    up = subcommands.add_parser(
+        "up",
+        help="start collector -> ready -> api and restart unexpected exits",
+    )
+    _add_common_options(up, suppress_defaults=True)
+    up.add_argument(
+        "--log-level",
+        default=None,
+        metavar="LEVEL",
+        help="override [service].log_level",
+    )
+
     return parser
 
 
@@ -77,6 +115,11 @@ def _add_common_options(
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "run":
+        return _run_service(args)
+    if args.command == "up":
+        return _run_up(args)
 
     config = _load_config(args)
     store = _build_store(args, config)
@@ -117,6 +160,178 @@ def main(argv: list[str] | None = None) -> int:
     for failure in report.failures:
         print(f"error: {failure}", file=sys.stderr)
     return 1 if report.failures else 0
+
+
+# -- Service Role commands ---------------------------------------------------
+
+
+def _run_service(args: argparse.Namespace) -> int:
+    config = _load_config(args)
+    level = getattr(args, "log_level", None) or config.service.log_level
+    configure_json_logging(level, service=args.service)
+    root = getattr(args, "root", None) or config.storage.root
+
+    try:
+        service = _build_service(args.service, config, root)
+    except Exception:
+        logger.exception(
+            "failed to build Service Role",
+            extra={
+                "event": "service.build_failed",
+                "service": args.service,
+            },
+        )
+        return 1
+
+    stop = threading.Event()
+    _install_signal_handlers(stop)
+    try:
+        service.start()
+    except Exception:
+        logger.exception(
+            "Service Role failed to start",
+            extra={
+                "event": "service.start_failed",
+                "service": args.service,
+            },
+        )
+        _safe_stop(service)
+        return 1
+
+    logger.info(
+        "Service Role started",
+        extra={"event": "service.started", "service": args.service},
+    )
+    try:
+        while not stop.wait(0.5):
+            pass
+    finally:
+        _safe_stop(service)
+        logger.info(
+            "Service Role stopped",
+            extra={"event": "service.stopped", "service": args.service},
+        )
+    return 0
+
+
+def _build_service(role: str, config: GatewayConfig, root: Path):
+    if role == "collector":
+        from mdgw.service.collector import CollectorService
+
+        return CollectorService(config, data_root=root)
+    if role == "api":
+        from mdgw.service.api import ApiService
+
+        return ApiService(config, data_root=root)
+    if role == "replay":
+        from mdgw.service.replay import ReplayServiceRole
+
+        return ReplayServiceRole(config, data_root=root)
+    raise ValueError(f"unsupported Service Role: {role!r}")
+
+
+def _safe_stop(service) -> None:
+    try:
+        service.stop()
+    except Exception:  # pragma: no cover - defensive shutdown path
+        logger.exception(
+            "error while stopping Service Role",
+            extra={"event": "service.stop_failed"},
+        )
+
+
+def _run_up(args: argparse.Namespace) -> int:
+    config = _load_config(args)
+    level = getattr(args, "log_level", None) or config.service.log_level
+    configure_json_logging(level, service="supervisor")
+    root = getattr(args, "root", None) or config.storage.root
+
+    from mdgw.service.supervisor import Supervisor
+
+    specs = _build_up_specs(args, config, root, level)
+    supervisor = Supervisor(specs)
+    stop = threading.Event()
+    _install_signal_handlers(stop)
+    try:
+        return supervisor.run(stop)
+    except Exception:
+        logger.exception(
+            "supervisor failed",
+            extra={"event": "supervisor.failed"},
+        )
+        return 1
+
+
+def _build_up_specs(
+    args: argparse.Namespace,
+    config: GatewayConfig,
+    root: Path,
+    level: str,
+):
+    from mdgw.service.supervisor import ChildSpec
+
+    config_path = _resolved_config_path(args)
+    common: list[str] = []
+    if config_path is not None:
+        common.extend(["--config", str(config_path)])
+    common.extend(["--root", str(root)])
+    if level:
+        common.extend(["--log-level", level])
+
+    collector = ChildSpec(
+        role="collector",
+        command=[sys.executable, "-m", "mdgw", "run", "--service", "collector"]
+        + common,
+        health_url=_local_url(
+            config.service.health_host,
+            config.service.collector_health_port,
+            "/readyz",
+        ),
+        ready_timeout_s=config.service.collector_ready_timeout_s,
+    )
+    api = ChildSpec(
+        role="api",
+        command=[sys.executable, "-m", "mdgw", "run", "--service", "api"]
+        + common,
+        health_url=_local_url(
+            config.server.host,
+            config.server.http_port,
+            "/readyz",
+        ),
+        ready_timeout_s=config.service.collector_ready_timeout_s,
+    )
+    return [collector, api]
+
+
+def _resolved_config_path(args: argparse.Namespace) -> Path | None:
+    config_path = getattr(args, "config", None)
+    if config_path is None and DEFAULT_CONFIG_PATH.exists():
+        config_path = DEFAULT_CONFIG_PATH
+    return config_path
+
+
+def _local_url(host: str, port: int, path: str) -> str:
+    if host in {"0.0.0.0", "::", ""}:
+        host = "127.0.0.1"
+    return f"http://{host}:{port}{path}"
+
+
+def _install_signal_handlers(stop: threading.Event) -> None:
+    def _handle(signum, frame) -> None:  # noqa: ANN001 - signal signature
+        stop.set()
+
+    for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        signum = getattr(signal, name, None)
+        if signum is None:
+            continue
+        try:
+            signal.signal(signum, _handle)
+        except (ValueError, OSError):
+            # Not the main thread, or the signal is unsupported here.
+            continue
+
+
+# -- maintenance helpers -----------------------------------------------------
 
 
 def _load_config(args: argparse.Namespace) -> GatewayConfig:

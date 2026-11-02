@@ -89,12 +89,27 @@ class ReplayService:
             )
             self._sessions[session_id] = session
             session.start()
+        logger.info(
+            "replay session created",
+            extra={
+                "event": "replay.session_created",
+                "session_id": session_id,
+            },
+        )
         return session_id
 
     def stop_session(self, session_id: str) -> bool:
         """Stop a Session; a terminal Session is an idempotent `ok`."""
         session = self._get(session_id)
-        return session.stop()
+        stopped = session.stop()
+        logger.info(
+            "replay session stopped",
+            extra={
+                "event": "replay.session_stopped",
+                "session_id": session_id,
+            },
+        )
+        return stopped
 
     def pause_session(self, session_id: str) -> bool:
         return self._get(session_id).pause()
@@ -130,6 +145,19 @@ class ReplayService:
 
     def session_bars_sent(self, session_id: str) -> int:
         return self._get(session_id).bars_sent
+
+    def session_summaries(self) -> list[dict[str, object]]:
+        """Snapshot every tracked Session for `/metrics` and `/status`."""
+        with self._lock:
+            sessions = list(self._sessions.items())
+        return [
+            {
+                "session_id": session_id,
+                "status": session.status,
+                "bars_sent": session.bars_sent,
+            }
+            for session_id, session in sessions
+        ]
 
     def close(self) -> None:
         """Stop every Session and wait for its worker to release resources."""

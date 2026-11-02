@@ -588,3 +588,11 @@ class ReplaySession:
             f"replay.{self.session_id}.control",
             json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         )
+        logger.info(
+            "replay end of session",
+            extra={
+                "event": "replay.end_of_session",
+                "session_id": self.session_id,
+                "status": reason,
+            },
+        )
