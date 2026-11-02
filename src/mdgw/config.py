@@ -60,6 +60,21 @@ class InstrumentsConfig(_ConfigModel):
     path: Path = Path("config/instruments")
 
 
+class CollectorConfig(_ConfigModel):
+    """Backfill window and freshness thresholds for the collector process."""
+
+    backfill_hours: float = Field(default=24.0, ge=0)
+    stale_after_s: float = Field(default=120.0, ge=0)
+    state_db_name: str = "state.db"
+
+    @field_validator("state_db_name")
+    @classmethod
+    def _non_empty_state_db_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("state_db_name must be a non-empty file name")
+        return value
+
+
 class AggregationConfig(_ConfigModel):
     """Bar Aggregation settings: the base interval and produced parent intervals."""
 
@@ -105,6 +120,7 @@ class GatewayConfig(_ConfigModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     aggregation: AggregationConfig = Field(default_factory=AggregationConfig)
+    collector: CollectorConfig = Field(default_factory=CollectorConfig)
     instruments: InstrumentsConfig = Field(default_factory=InstrumentsConfig)
 
 

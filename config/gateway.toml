@@ -24,6 +24,14 @@ flush_max_age_s = 3600
 enabled = false
 bars_days = 0   # 0 = keep forever
 
+[collector]
+# Backfill starts from the HWM; without one it looks back this many hours.
+backfill_hours = 24
+# Stale threshold is max(2 x Bar Interval, stale_after_s).
+stale_after_s = 120
+# SQLite HWM database under the storage root.
+state_db_name = "state.db"
+
 [aggregation]
 base_interval = "1m"
 intervals = ["1m", "5m", "15m", "1h", "1d"]

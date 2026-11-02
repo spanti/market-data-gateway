@@ -105,3 +105,31 @@ def test_aggregation_accepts_positive_retention_window() -> None:
         {"aggregation": {"retention_parent_periods": 1}}
     )
     assert config.aggregation.retention_parent_periods == 1
+
+
+def test_collector_config_defaults() -> None:
+    collector = GatewayConfig().collector
+    assert collector.backfill_hours == 24
+    assert collector.stale_after_s == 120
+    assert collector.state_db_name == "state.db"
+
+
+def test_repository_toml_declares_collector() -> None:
+    with (PROJECT_ROOT / "config" / "gateway.toml").open("rb") as handle:
+        raw = tomllib.load(handle)
+    assert raw["collector"]["backfill_hours"] == 24
+    assert raw["collector"]["stale_after_s"] == 120
+    assert raw["collector"]["state_db_name"] == "state.db"
+
+
+def test_collector_rejects_negative_values() -> None:
+    with pytest.raises(ValidationError):
+        GatewayConfig.model_validate({"collector": {"backfill_hours": -1}})
+    with pytest.raises(ValidationError):
+        GatewayConfig.model_validate({"collector": {"stale_after_s": -1}})
+
+
+def test_collector_rejects_empty_state_db_name() -> None:
+    with pytest.raises(ValidationError):
+        GatewayConfig.model_validate({"collector": {"state_db_name": ""}})
+
