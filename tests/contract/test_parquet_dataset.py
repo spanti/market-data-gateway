@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -18,7 +17,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 def _ingest_one_bar(tmp_path: Path) -> Path:
     config = load_config(PROJECT_ROOT / "config" / "gateway.toml")
-    config = replace(config, server=replace(config.server, http_port=0))
+    server = config.server.model_copy(update={"http_port": 0})
+    config = config.model_copy(update={"server": server})
     feed = FakeFeedHandler(
         instrument_id="binance:BTC/USDT",
         bars=[

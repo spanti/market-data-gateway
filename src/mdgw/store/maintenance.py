@@ -125,6 +125,16 @@ def compact_store(
     now_ns: int | None = None,
     timeout_s: int = DEFAULT_LOCK_TIMEOUT_S,
 ) -> CompactionReport:
+    """Compact the store by merging eligible files older than the specified duration.
+    Args:
+        store: The ParquetBarStore instance to compact.
+        older_than: Duration specifying which files are eligible for compaction.
+        now_ns: Current time in nanoseconds. If None, the current system time is used.
+        timeout_s: Lock acquisition timeout in seconds.
+
+    Returns:
+        A CompactionReport summarizing the compaction results.
+    """
     store.validate_schema_version()
     dataset_root = store.dataset_root
     now_ns = time.time_ns() if now_ns is None else int(now_ns)
@@ -233,6 +243,18 @@ def gc_store(
     now: datetime | None = None,
     timeout_s: int = DEFAULT_LOCK_TIMEOUT_S,
 ) -> GCReport:
+    """Garbage collect old data in the store based on the specified retention period.
+
+    Args:
+        store: The ParquetBarStore instance to perform GC on.
+        bars_days: Number of days to retain bars.
+        apply: If True, perform the actual deletion; otherwise, perform a dry run.
+        now: Current datetime. If None, the current system time is used.
+        timeout_s: Lock acquisition timeout in seconds.
+
+    Returns:
+        A GCReport summarizing the GC results.
+    """
     store.validate_schema_version()
     dataset_root = store.dataset_root
     dry_run = not apply

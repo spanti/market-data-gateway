@@ -7,5 +7,6 @@ dependencies:
   - pyzmq
   - aiohttp
   - pyyaml
+  - pydantic
   - pytest
   - pip

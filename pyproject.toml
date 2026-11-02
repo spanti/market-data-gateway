@@ -12,6 +12,7 @@ dependencies = [
     "pyzmq>=26",
     "aiohttp>=3.10",
     "PyYAML>=6",
+    "pydantic>=2.9",
 ]
 
 [project.scripts]

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import urllib.request
-from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,7 +16,8 @@ UTC = timezone.utc
 
 def _config():
     config = load_config(PROJECT_ROOT / "config" / "gateway.toml")
-    return replace(config, server=replace(config.server, http_port=0))
+    server = config.server.model_copy(update={"http_port": 0})
+    return config.model_copy(update={"server": server})
 
 
 def _bar_input(minute: int) -> BarInput:

@@ -4,7 +4,6 @@ import json
 import tempfile
 import urllib.error
 import urllib.request
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -27,7 +26,8 @@ UTC = timezone.utc
 
 def _config():
     config = load_config(PROJECT_ROOT / "config" / "gateway.toml")
-    return replace(config, server=replace(config.server, http_port=0))
+    server = config.server.model_copy(update={"http_port": 0})
+    return config.model_copy(update={"server": server})
 
 
 def _bar_input(minute: int, *, open_value: str = "65000.1", trade_count: int | None = 128) -> BarInput:

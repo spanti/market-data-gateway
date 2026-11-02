@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import urllib.request
-from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -16,7 +15,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 def test_closed_fake_bar_roundtrips_to_rest(tmp_path: Path) -> None:
     config = load_config(PROJECT_ROOT / "config" / "gateway.toml")
-    config = replace(config, server=replace(config.server, http_port=0))
+    server = config.server.model_copy(update={"http_port": 0})
+    config = config.model_copy(update={"server": server})
     feed = FakeFeedHandler(
         instrument_id="binance:BTC/USDT",
         bars=[
