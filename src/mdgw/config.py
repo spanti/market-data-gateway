@@ -54,6 +54,12 @@ class RetentionConfig(_ConfigModel):
     bars_days: int = Field(default=0, ge=0)  # 0 = keep forever
 
 
+class InstrumentsConfig(_ConfigModel):
+    """Instrument Reference Data truth-source directory (`*.yaml` files)."""
+
+    path: Path = Path("config/instruments")
+
+
 class AggregationConfig(_ConfigModel):
     """Bar Aggregation settings: the base interval and produced parent intervals."""
 
@@ -99,6 +105,7 @@ class GatewayConfig(_ConfigModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     aggregation: AggregationConfig = Field(default_factory=AggregationConfig)
+    instruments: InstrumentsConfig = Field(default_factory=InstrumentsConfig)
 
 
 def load_config(path: Path) -> GatewayConfig:

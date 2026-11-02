@@ -1,0 +1,13 @@
+# Instrument Reference Data: Binance spot.
+- instrument_id: "binance:BTC/USDT"
+  venue: binance
+  symbol: "BTC/USDT"
+  asset_class: crypto
+  instrument_type: spot
+  base: BTC
+  quote: USDT
+  tick_size: "0.01"
+  lot_size: "0.00001"
+  multiplier: "1"
+  timezone: UTC
+  listing_ts: "2017-08-17T04:00:00Z"

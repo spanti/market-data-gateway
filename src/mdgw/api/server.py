@@ -24,6 +24,7 @@ from aiohttp import web
 from mdgw.core.envelope import decimal_to_str, table_to_messages
 from mdgw.core.errors import (
     INTERNAL_ERROR,
+    INSTRUMENT_NOT_FOUND,
     INVALID_FORMAT,
     INVALID_INSTRUMENT,
     INVALID_INTERVAL,
@@ -34,6 +35,7 @@ from mdgw.core.errors import (
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import BAR_SCHEMA, INTERVALS
 from mdgw.core.time import iso_to_ns, ns_to_iso
+from mdgw.reference import InstrumentStore, instrument_to_json
 from mdgw.store.parquet_dataset import ParquetBarStore
 
 logger = logging.getLogger(__name__)
@@ -71,13 +73,94 @@ async def _request_id_middleware(request: web.Request, handler) -> web.StreamRes
     return await handler(request)
 
 
-def create_app(store: ParquetBarStore) -> web.Application:
-    """Create an aiohttp web application for the Bar history API."""
+def create_app(
+    store: ParquetBarStore,
+    *,
+    instrument_store: InstrumentStore | None = None,
+) -> web.Application:
+    """Create an aiohttp web application for the Bar history API.
+
+    Instrument endpoints read only the `InstrumentStore` snapshot; they never
+    parse the YAML truth source at request time.
+    """
     app = web.Application(middlewares=[_request_id_middleware])
+    app.router.add_get(
+        "/api/v1/instruments", _make_instruments_handler(instrument_store)
+    )
+    app.router.add_get(
+        "/api/v1/instruments/{instrument_id:.+}",
+        _make_instrument_handler(instrument_store),
+    )
     app.router.add_get("/api/v1/bars", _make_bars_handler(store))
     app.router.add_get("/api/v1/bars/export", _make_export_handler(store))
     app.router.add_get("/api/v1/status", _make_status_handler(store))
     return app
+
+
+def _make_instruments_handler(instrument_store: InstrumentStore | None):
+    """Create the handler for the Instrument list endpoint."""
+
+    async def handle_instruments(request: web.Request) -> web.StreamResponse:
+        include_delisted = _parse_include_delisted(request)
+        if isinstance(include_delisted, web.Response):
+            return include_delisted
+
+        instruments = (
+            []
+            if instrument_store is None
+            else instrument_store.list(
+                venue=request.query.get("venue"),
+                asset_class=request.query.get("asset_class"),
+                include_delisted=include_delisted,
+            )
+        )
+        return web.json_response(
+            {"instruments": [instrument_to_json(item) for item in instruments]}
+        )
+
+    return handle_instruments
+
+
+def _make_instrument_handler(instrument_store: InstrumentStore | None):
+    """Create the handler for one Instrument lookup, including Delisted ones."""
+
+    async def handle_instrument(request: web.Request) -> web.StreamResponse:
+        instrument_id = request.match_info["instrument_id"]
+        try:
+            InstrumentId.parse(instrument_id)
+        except ValueError:
+            return _error(
+                request,
+                code=INVALID_INSTRUMENT,
+                message="path parameter 'instrument_id' must be an InstrumentId",
+            )
+
+        instrument = (
+            None if instrument_store is None else instrument_store.get(instrument_id)
+        )
+        if instrument is None:
+            return _error(
+                request,
+                code=INSTRUMENT_NOT_FOUND,
+                message=f"unknown Instrument {instrument_id!r}",
+                status=404,
+            )
+        return web.json_response({"instrument": instrument_to_json(instrument)})
+
+    return handle_instrument
+
+
+def _parse_include_delisted(request: web.Request) -> bool | web.Response:
+    raw = request.query.get("include_delisted", "false").strip().lower()
+    if raw in {"true", "1"}:
+        return True
+    if raw in {"false", "0", ""}:
+        return False
+    return _error(
+        request,
+        code=INVALID_RANGE,
+        message="query parameter 'include_delisted' must be a boolean",
+    )
 
 
 def _validate_request(

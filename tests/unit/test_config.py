@@ -26,6 +26,19 @@ def test_repository_toml_declares_aggregation() -> None:
     assert raw["aggregation"]["retention_parent_periods"] == 2
 
 
+def test_repository_toml_declares_instruments_path() -> None:
+    with (PROJECT_ROOT / "config" / "gateway.toml").open("rb") as handle:
+        raw = tomllib.load(handle)
+    assert raw["instruments"]["path"] == "config/instruments"
+
+    config = load_config(PROJECT_ROOT / "config" / "gateway.toml")
+    assert config.instruments.path == Path("config/instruments")
+
+
+def test_instruments_config_defaults() -> None:
+    assert GatewayConfig().instruments.path == Path("config/instruments")
+
+
 def test_aggregation_config_defaults() -> None:
     aggregation = GatewayConfig().aggregation
     assert aggregation.base_interval == "1m"

@@ -28,3 +28,7 @@ bars_days = 0   # 0 = keep forever
 base_interval = "1m"
 intervals = ["1m", "5m", "15m", "1h", "1d"]
 retention_parent_periods = 2
+
+[instruments]
+# Instrument Reference Data truth source (`*.yaml` files).
+path = "config/instruments"
