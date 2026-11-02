@@ -6,6 +6,7 @@ import asyncio
 import json
 import urllib.error
 import urllib.request
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -104,6 +105,18 @@ def _bar_input(minute: int = 0) -> BarInput:
         volume="12.34",
         trade_count=128,
     )
+
+
+class _MutableInstrumentStore:
+    """Test double that can learn an Instrument after the snapshot was loaded."""
+
+    def __init__(self, *instruments) -> None:
+        self._by_id = {
+            instrument.instrument_id: instrument for instrument in instruments
+        }
+
+    def get(self, instrument_id: str):
+        return self._by_id.get(instrument_id)
 
 
 def _runtime(tmp_path: Path, instruments_path: Path, **kwargs) -> GatewayRuntime:
@@ -350,6 +363,7 @@ def test_runtime_rejects_bars_for_unknown_instruments(tmp_path: Path) -> None:
         runtime.start()
         with pytest.raises(UnknownInstrumentError) as excinfo:
             runtime.ingest()
+        assert runtime.received_bar_count == 0
 
     assert "binance:UNKNOWN/USDT" in str(excinfo.value)
     assert excinfo.value.code == INSTRUMENT_NOT_FOUND
@@ -357,6 +371,59 @@ def test_runtime_rejects_bars_for_unknown_instruments(tmp_path: Path) -> None:
     bars_root = tmp_path / "data" / "bars"
     assert not (bars_root / "_manifest.json").exists()
     assert list(bars_root.rglob("data-*.parquet")) == []
+
+
+def test_rejected_batch_does_not_advance_aggregation_so_retry_emits_parent(
+    tmp_path: Path,
+) -> None:
+    instruments = _write_instruments(tmp_path / "config")
+    unknown_id = "binance:UNKNOWN/USDT"
+    data_root = tmp_path / "data"
+    feed = FakeFeedHandler(
+        instrument_id=unknown_id,
+        bars=[_bar_input(minute) for minute in range(5)],
+    )
+
+    with GatewayRuntime(
+        feed_handler=feed, config=_config(instruments), data_root=data_root
+    ) as runtime:
+        runtime.start()
+        with pytest.raises(UnknownInstrumentError):
+            runtime.ingest()
+
+        assert runtime.received_bar_count == 0
+        bars_root = data_root / "bars"
+        assert not (bars_root / "_manifest.json").exists()
+        assert list(bars_root.rglob("data-*.parquet")) == []
+
+        # Reference data is fixed, then the exact same batch is retried.
+        template = runtime.instrument_store.get("binance:BTC/USDT")
+        assert template is not None
+        runtime.instrument_store = _MutableInstrumentStore(
+            replace(template, instrument_id=unknown_id, symbol="UNKNOWN/USDT")
+        )
+
+        assert runtime.ingest() == 5
+        assert runtime.received_bar_count == 6  # 5 x 1m + 1 x 5m
+        status, _, body = _get(
+            f"{runtime.base_url}/api/v1/bars?instrument={unknown_id}&interval=5m"
+        )
+        assert status == 200
+        five_minute = json.loads(body)["bars"]
+
+    assert len(five_minute) == 1
+    envelope = five_minute[0]
+    assert envelope["instrument_id"] == unknown_id
+    payload = envelope["payload"]
+    assert payload["open_ts"] == "2024-01-01T00:00:00.000000000Z"
+    assert payload["close_ts"] == "2024-01-01T00:05:00.000000000Z"
+    assert payload["aggregation_source"] == "internal"
+    assert payload["open"] == "65000.1"
+    assert payload["high"] == "65010.0"
+    assert payload["low"] == "64990.0"
+    assert payload["close"] == "65005.5"
+    assert payload["volume"] == "61.7"
+    assert payload["trade_count"] == 640
 
 
 async def _request(app, path: str) -> tuple[int, dict]:

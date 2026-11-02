@@ -151,12 +151,25 @@ class GatewayRuntime:
         if not base_bars:
             return 0
 
+        # Validate every base Bar against the Instrument Snapshot before the
+        # aggregator advances any window or retention water mark. Rejecting a
+        # batch must leave the Aggregation state untouched so the same Bars can
+        # be retried once the reference data is fixed.
+        asset_classes: dict[str, str] = {}
+        for bar in base_bars:
+            if bar.instrument_id not in asset_classes:
+                asset_classes[bar.instrument_id] = self._asset_class_for(
+                    bar.instrument_id
+                )
+
         aggregated = self.aggregator.add_many(base_bars)
         bars = base_bars + aggregated
 
         by_asset_class: dict[str, list[Bar]] = defaultdict(list)
         for bar in bars:
-            by_asset_class[self._asset_class_for(bar.instrument_id)].append(bar)
+            # Aggregated parents inherit their children's instrument_id, so the
+            # validated mapping already covers them.
+            by_asset_class[asset_classes[bar.instrument_id]].append(bar)
         for asset_class, group in sorted(by_asset_class.items()):
             self.store.write_bars(group, asset_class=asset_class)
 
