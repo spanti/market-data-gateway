@@ -129,3 +129,20 @@ def test_configured_intervals_are_aggregated_together(tmp_path: Path) -> None:
     assert fifteen_minute[0]["payload"]["volume"] == "30.0"
     assert fifteen_minute[0]["payload"]["trade_count"] == 150
     assert hourly == []
+
+
+def test_runtime_wires_the_retention_window_into_the_aggregator(
+    tmp_path: Path,
+) -> None:
+    config = _config()
+    aggregation = config.aggregation.model_copy(
+        update={"retention_parent_periods": 5}
+    )
+    config = config.model_copy(update={"aggregation": aggregation})
+    runtime = GatewayRuntime(
+        feed_handler=FakeFeedHandler(instrument_id="binance:BTC/USDT", bars=[]),
+        config=config,
+        data_root=tmp_path,
+    )
+
+    assert runtime.aggregator.retention_parent_periods == 5
