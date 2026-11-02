@@ -125,6 +125,16 @@ def _subscriptions():
     ]
 
 
+def _wait_until(predicate, *, timeout_s: float = 5.0) -> bool:
+    """Poll ``predicate`` with a bounded deadline (never a blind sleep)."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
 def test_asap_streams_in_order_without_losing_the_first_event(
     tmp_path: Path,
 ) -> None:
@@ -326,6 +336,44 @@ def test_step_rejects_non_positive_credits_locally(tmp_path: Path) -> None:
         with pytest.raises(ValueError):
             session.step(0)
         session.stop()
+    finally:
+        if session is not None:
+            session.close()
+        client.close()
+        server.stop()
+
+
+def test_client_close_stops_the_server_sessions(tmp_path: Path) -> None:
+    """``close()`` must not leave step sessions running on the server.
+
+    A ``step`` session never advances on its own, so it is still ``running``
+    when the client is closed. The close path marks the client closed first
+    (blocking new sessions) but must still send ``stop`` on the wire.
+    """
+    store = ParquetBarStore(tmp_path / "data")
+    _populate(store, range(3))
+    service = ReplayService(store)
+    server = ReplayServer(service)
+    server.start()
+    client = _client(server)
+    session = None
+    try:
+        replay = client.replay
+        session = replay.create_session(
+            _subscriptions(), START, END, replay_mode="step"
+        )
+        session_id = session.session_id
+        assert service.session_info(session_id)["status"] == "running"
+        assert session_id in service.active_session_ids()
+
+        client.close()
+
+        assert _wait_until(
+            lambda: service.session_info(session_id)["status"] != "running"
+        ), "the server session was still running after client.close()"
+        assert service.session_info(session_id)["status"] == "stopped"
+        assert service.active_session_ids() == []
+        assert session.ended is True
     finally:
         if session is not None:
             session.close()

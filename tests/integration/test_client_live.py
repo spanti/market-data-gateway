@@ -7,12 +7,17 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+import zmq
+
 from mdgw.config import GatewayConfig, load_config
 from mdgw.core.bar import RawBar
 from mdgw.core.schema import BAR_SCHEMA
 from mdgw.ingest.fake import BarInput, FakeFeedHandler
 from mdgw.runtime import GatewayRuntime
 from mdgw_client import ClientError, GatewayClient, LiveSubscription
+from mdgw_client.live import READY_TOPIC
+from mdgw_client.schema import messages_to_table, table_to_ipc
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 UTC = timezone.utc
@@ -207,3 +212,94 @@ def test_subscribe_rejects_missing_transport_configuration(tmp_path: Path) -> No
             raise AssertionError("missing stream_endpoint was accepted")
     finally:
         client.close()
+
+
+def _bar_envelope(open_minute: int) -> dict:
+    open_ts = datetime(2024, 1, 1, tzinfo=UTC) + timedelta(minutes=open_minute)
+    close_ts = open_ts + timedelta(minutes=1)
+    open_iso = f"{open_ts:%Y-%m-%dT%H:%M:%SZ}"
+    close_iso = f"{close_ts:%Y-%m-%dT%H:%M:%SZ}"
+    return {
+        "schema_version": 1,
+        "data_type": "bar",
+        "instrument_id": BTC,
+        "event_ts": close_iso,
+        "ingest_ts": close_iso,
+        "feed": "fake",
+        "seq": None,
+        "payload": {
+            "interval": "1m",
+            "open_ts": open_iso,
+            "close_ts": close_iso,
+            "aggregation_source": "external",
+            "open": "100.5",
+            "high": "101.5",
+            "low": "99.5",
+            "close": "100.9",
+            "volume": "3.25",
+            "trade_count": 7,
+            "revision": 0,
+        },
+    }
+
+
+def test_zmq_bad_frame_does_not_kill_the_subscription() -> None:
+    """A malformed frame is reported and skipped, never fatal to the thread."""
+    context = zmq.Context()
+    publisher = context.socket(zmq.PUB)
+    publisher.setsockopt(zmq.LINGER, 0)
+    port = publisher.bind_to_random_port("tcp://127.0.0.1")
+    subscription = LiveSubscription(
+        transport="zmq",
+        topics=["market."],
+        stream_endpoint=f"tcp://127.0.0.1:{port}",
+        reconnect_backoff_s=(0.01, 0.02),
+    )
+    try:
+        # Bounded readiness handshake: repeat the ready gesture until the
+        # receiver has seen it. This proves the SUB pipe is connected without
+        # guessing with a fixed sleep.
+        deadline = time.monotonic() + 5.0
+        while not subscription._ready.is_set():
+            assert time.monotonic() < deadline, "ZMQ subscription was not ready"
+            publisher.send_multipart(
+                [READY_TOPIC.encode("utf-8"), b"ready"]
+            )
+            time.sleep(0.01)
+        assert subscription._thread is not None
+
+        good_frame = table_to_ipc(messages_to_table([_bar_envelope(0)]))
+        topic = TOPIC.encode("utf-8")
+
+        # Bad UTF-8 topic (still matching the "market." SUB prefix) and a
+        # non-Arrow payload on an otherwise valid topic.
+        publisher.send_multipart([b"market.\xff", good_frame])
+        publisher.send_multipart([topic, b"not-arrow-ipc"])
+
+        publisher.send_multipart([topic, good_frame])
+        event = subscription.next(timeout=2.0)
+        assert event.topic == TOPIC
+        assert event.table is not None
+        assert event.table.num_rows == 1
+        assert event.table.column("instrument_id").to_pylist() == [BTC]
+
+        # The malformed frames were skipped, not queued as events.
+        with pytest.raises(ClientError) as excinfo:
+            subscription.next(timeout=0.2)
+        assert excinfo.value.code == "timeout"
+
+        assert subscription._thread.is_alive()
+        assert subscription.last_error is not None
+
+        # A later valid frame is still delivered on the same socket.
+        second = table_to_ipc(messages_to_table([_bar_envelope(1)]))
+        publisher.send_multipart([topic, second])
+        second_event = subscription.next(timeout=2.0)
+        assert second_event.table is not None
+        assert second_event.table.column("close_ts").to_pylist() == [
+            datetime(2024, 1, 1, 0, 2, tzinfo=UTC)
+        ]
+    finally:
+        subscription.close()
+        publisher.close()
+        context.term()

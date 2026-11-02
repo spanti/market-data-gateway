@@ -309,8 +309,11 @@ class ReplayClient:
             raise
         return receiver
 
-    def _ensure_req_locked(self) -> zmq.Socket:
-        if self._closed:
+    def _ensure_req_locked(self, *, allow_closed: bool = False) -> zmq.Socket:
+        # ``allow_closed`` is reserved for ``close()``: it must still be able
+        # to send ``stop`` after marking the client closed so new sessions
+        # cannot be created. Every user-facing call keeps the hard check.
+        if self._closed and not allow_closed:
             raise ClientError(CONNECTION_ERROR, "ReplayClient is closed")
         if self._req is None:
             socket = self._context.socket(zmq.REQ)
@@ -327,9 +330,14 @@ class ReplayClient:
             self._req.close()
             self._req = None
 
-    def _request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def _request(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        allow_closed: bool = False,
+    ) -> dict[str, Any]:
         with self._request_lock:
-            socket = self._ensure_req_locked()
+            socket = self._ensure_req_locked(allow_closed=allow_closed)
             try:
                 socket.send_string(json.dumps(payload, ensure_ascii=False))
                 raw = socket.recv()
@@ -368,9 +376,13 @@ class ReplayClient:
             receiver = self._receiver
             self._receiver = None
 
+        # The client is already marked closed so no new session can appear,
+        # but the already-captured sessions still need a ``stop`` on the wire.
+        # ``allow_closed`` opens exactly that narrow path; a transport failure
+        # is swallowed so local resources are always released.
         for session in sessions:
             try:
-                session._control("stop")
+                session._control("stop", allow_closed=True)
             except ClientError:
                 pass
             session._ended.set()
@@ -423,9 +435,12 @@ class ReplaySession:
 
     # -- controls ----------------------------------------------------------
 
-    def _control(self, op: str, **fields: Any) -> dict[str, Any]:
+    def _control(
+        self, op: str, *, allow_closed: bool = False, **fields: Any
+    ) -> dict[str, Any]:
         return self._client._request(
-            {"op": op, "session_id": self.session_id, **fields}
+            {"op": op, "session_id": self.session_id, **fields},
+            allow_closed=allow_closed,
         )
 
     def pause(self) -> None:
