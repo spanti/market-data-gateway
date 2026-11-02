@@ -76,6 +76,7 @@ def create_app(store: ParquetBarStore) -> web.Application:
     app = web.Application(middlewares=[_request_id_middleware])
     app.router.add_get("/api/v1/bars", _make_bars_handler(store))
     app.router.add_get("/api/v1/bars/export", _make_export_handler(store))
+    app.router.add_get("/api/v1/status", _make_status_handler(store))
     return app
 
 
@@ -232,6 +233,30 @@ def _make_export_handler(store: ParquetBarStore):
             )
 
     return handle_export
+
+
+def _make_status_handler(store: ParquetBarStore):
+    """Create a request handler for Dataset operational status."""
+
+    async def handle_status(request: web.Request) -> web.StreamResponse:
+        try:
+            payload = await asyncio.to_thread(store.status)
+        except GatewayError as exc:
+            return _error(
+                request,
+                code=exc.code,
+                message=exc.message,
+                status=exc.status,
+                details=exc.details,
+            )
+        except Exception as exc:  # pragma: no cover - defensive error boundary
+            logger.exception("Dataset status request failed")
+            return _error(
+                request, code=INTERNAL_ERROR, message=str(exc), status=500
+            )
+        return web.json_response(payload)
+
+    return handle_status
 
 
 async def _respond_json(

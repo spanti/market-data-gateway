@@ -34,10 +34,17 @@ class StorageConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RetentionConfig:
+    enabled: bool = False
+    bars_days: int = 0  # 0 = keep forever
+
+
+@dataclass(frozen=True, slots=True)
 class GatewayConfig:
     server: ServerConfig = ServerConfig()
     bus: BusConfig = BusConfig()
     storage: StorageConfig = StorageConfig()
+    retention: RetentionConfig = RetentionConfig()
 
 
 def load_config(path: Path) -> GatewayConfig:
@@ -47,28 +54,44 @@ def load_config(path: Path) -> GatewayConfig:
     server = raw.get("server", {})
     bus = raw.get("bus", {})
     storage = raw.get("storage", {})
+    retention = raw.get("retention", {})
+    server_defaults = ServerConfig()
+    bus_defaults = BusConfig()
+    storage_defaults = StorageConfig()
 
     config = GatewayConfig(
         server=ServerConfig(
-            host=server.get("host", ServerConfig.host),
-            http_port=int(server.get("http_port", ServerConfig.http_port)),
-            ws_path=server.get("ws_path", ServerConfig.ws_path),
+            host=server.get("host", server_defaults.host),
+            http_port=int(server.get("http_port", server_defaults.http_port)),
+            ws_path=server.get("ws_path", server_defaults.ws_path),
         ),
         bus=BusConfig(
-            transport=bus.get("transport", BusConfig.transport),
-            zmq_hwm=int(bus.get("zmq_hwm", BusConfig.zmq_hwm)),
+            transport=bus.get("transport", bus_defaults.transport),
+            zmq_hwm=int(bus.get("zmq_hwm", bus_defaults.zmq_hwm)),
         ),
         storage=StorageConfig(
-            root=Path(storage.get("root", str(StorageConfig.root))),
-            schema_version=int(storage.get("schema_version", 1)),
-            format_version=storage.get("format_version", "2.6"),
-            compression=storage.get("compression", "zstd"),
-            row_group_size=int(storage.get("row_group_size", 1_000_000)),
-            flush_max_bytes=int(storage.get("flush_max_bytes", 67_108_864)),
-            flush_max_age_s=int(storage.get("flush_max_age_s", 3_600)),
+            root=Path(storage.get("root", str(storage_defaults.root))),
+            schema_version=int(storage.get("schema_version", storage_defaults.schema_version)),
+            format_version=storage.get("format_version", storage_defaults.format_version),
+            compression=storage.get("compression", storage_defaults.compression),
+            row_group_size=int(
+                storage.get("row_group_size", storage_defaults.row_group_size)
+            ),
+            flush_max_bytes=int(
+                storage.get("flush_max_bytes", storage_defaults.flush_max_bytes)
+            ),
+            flush_max_age_s=int(
+                storage.get("flush_max_age_s", storage_defaults.flush_max_age_s)
+            ),
+        ),
+        retention=RetentionConfig(
+            enabled=bool(retention.get("enabled", False)),
+            bars_days=int(retention.get("bars_days", 0)),
         ),
     )
 
+    if config.retention.bars_days < 0:
+        raise ValueError("retention.bars_days must not be negative")
     if config.bus.transport not in SUPPORTED_BUS_TRANSPORTS:
         raise ValueError(
             f"unsupported bus transport in this walking skeleton: "

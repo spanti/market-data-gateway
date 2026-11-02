@@ -19,3 +19,7 @@ compression = "zstd"
 row_group_size = 1000000
 flush_max_bytes = 67108864
 flush_max_age_s = 3600
+
+[retention]
+enabled = false
+bars_days = 0   # 0 = keep forever
