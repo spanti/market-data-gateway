@@ -23,3 +23,8 @@ flush_max_age_s = 3600
 [retention]
 enabled = false
 bars_days = 0   # 0 = keep forever
+
+[aggregation]
+base_interval = "1m"
+intervals = ["1m", "5m", "15m", "1h", "1d"]
+retention_parent_periods = 2
