@@ -5,7 +5,14 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from mdgw.core.schema import INTERVALS
 
@@ -58,6 +65,66 @@ class InstrumentsConfig(_ConfigModel):
     """Instrument Reference Data truth-source directory (`*.yaml` files)."""
 
     path: Path = Path("config/instruments")
+
+
+class FeedConfig(_ConfigModel):
+    """One Feed Handler's runtime settings (DESIGN §6 `[[feeds]]`)."""
+
+    name: str
+    kind: str = "ccxt"
+    venue: str
+    market_type: str = "spot"
+    enable_rate_limit: bool = True
+    symbols: tuple[str, ...]
+    data_types: tuple[str, ...] = ("bar",)
+    backfill_hours: float = Field(default=24.0, ge=0)
+    stale_after_s: float = Field(default=120.0, ge=0)
+    # Retained for the collector batching work in a later ticket; the ccxt
+    # Feed Handler does not consume these yet.
+    batch_window_ms: int = Field(default=100, ge=0)
+    batch_max_events: int = Field(default=500, ge=1)
+
+    @field_validator("name", "venue", "market_type")
+    @classmethod
+    def _non_empty(cls, value: str, info: ValidationInfo) -> str:
+        if not value.strip():
+            raise ValueError(f"{info.field_name} must be a non-empty string")
+        return value.strip()
+
+    @field_validator("kind")
+    @classmethod
+    def _supported_kind(cls, value: str) -> str:
+        if value != "ccxt":
+            raise ValueError(f"unsupported Feed Handler kind: {value!r}")
+        return value
+
+    @field_validator("symbols")
+    @classmethod
+    def _symbols(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value:
+            raise ValueError("symbols must contain at least one symbol")
+        cleaned = tuple(symbol.strip() for symbol in value)
+        if any(not symbol for symbol in cleaned):
+            raise ValueError("symbols must not contain empty values")
+        if len(set(cleaned)) != len(cleaned):
+            raise ValueError("symbols must not contain duplicates")
+        return cleaned
+
+    @field_validator("data_types")
+    @classmethod
+    def _data_types(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value:
+            raise ValueError("data_types must contain at least one Data Type")
+        unsupported = [data_type for data_type in value if data_type != "bar"]
+        if unsupported:
+            raise ValueError(
+                f"unsupported data_types for v1: {unsupported!r} (supported: ['bar'])"
+            )
+        return value
+
+    @property
+    def instrument_ids(self) -> tuple[str, ...]:
+        return tuple(f"{self.venue}:{symbol}" for symbol in self.symbols)
 
 
 class CollectorConfig(_ConfigModel):
@@ -122,6 +189,7 @@ class GatewayConfig(_ConfigModel):
     aggregation: AggregationConfig = Field(default_factory=AggregationConfig)
     collector: CollectorConfig = Field(default_factory=CollectorConfig)
     instruments: InstrumentsConfig = Field(default_factory=InstrumentsConfig)
+    feeds: tuple[FeedConfig, ...] = ()
 
 
 def load_config(path: Path) -> GatewayConfig:

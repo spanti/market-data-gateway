@@ -13,6 +13,7 @@ dependencies = [
     "aiohttp>=3.10",
     "PyYAML>=6",
     "pydantic>=2.9",
+    "ccxt>=4.5",
 ]
 
 [project.scripts]
@@ -26,7 +27,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra -m 'not network'"
 markers = [
     "network: tests that reach a real Venue (skipped by default)",
 ]
