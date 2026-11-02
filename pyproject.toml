@@ -20,7 +20,8 @@ dependencies = [
 mdgw = "mdgw.cli:main"
 
 [project.optional-dependencies]
-test = ["pytest>=8"]
+test = ["pytest>=8", "websockets>=13"]
+client-ws = ["websockets>=13"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
