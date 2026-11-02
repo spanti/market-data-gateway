@@ -147,7 +147,8 @@ print(session.end_of_session)
 
 `create_session` 会先建立 Replay SUB 并等待 `_internal.ready`（Replay Server 每
 50 ms 发送一次），确认订阅已转发后才发送 create 请求，避免 asap 模式漏掉开头的
-事件。`next_event(timeout=...)` 只返回本 session 的事件，其他会话的事件被丢弃。
+事件。每个 Replay Session 有独立队列，`next_event(timeout=...)` 只返回本会话的
+事件；多个会话可以独立消费，互不吞事件。
 
 三种 Replay Mode：
 
@@ -160,8 +161,8 @@ print(session.end_of_session)
 `ClientError(code="invalid_range")`。**向后 seek 会重新发送已经发送过的 Bar**，
 消费方需要自行按 `revision` / `open_ts` 去重。
 
-`session.close()` 会停止未完成的会话并释放 SUB；context manager 退出时执行
-`stop()` + `close()`。
+`session.close()` 会停止未完成的会话并释放该会话的队列；共享的 Replay SUB 在
+最后一个会话释放后才关闭。context manager 退出时执行 `stop()` + `close()`。
 
 ## 错误模型
 
@@ -176,8 +177,8 @@ except ClientError as exc:
 
 - REST/Replay 控制返回的服务端错误保留原 `code`。
 - 网络失败：`code="connection_error"`；超时：`code="timeout"`。
-- 未安装 `websockets` 却使用 `transport="ws"`：
-  `code="ws_unavailable"`，提示安装 `mdgw-client[ws]`。
+- 未安装 `websockets` 却使用 `transport="ws"`：`code="ws_unavailable"`。
+  安装：`pip install 'market-data-gateway[client-ws]'`（extra 名为 `client-ws`）。
 - 缺少 Replay endpoint 时访问 `client.replay`：`code="replay_unavailable"`。
 
 ## 已知限制
@@ -187,6 +188,8 @@ except ClientError as exc:
   WebSocket。
 - **Replay 预订阅要等 ready**：`create_session` 会等 `_internal.ready`；若 Replay
   Server 不可达，会在 `timeout_s` 后报错。
+- **每会话队列有界**：每个 Replay Session 的队列默认 `queue_size=1000`；消费过慢
+  时会丢弃最旧的 Bar 并计入 `session.dropped`。End of Session 永不丢弃。
 - **WebSocket 依赖可选**：基础安装只保证 ZMQ/REST/Replay。
 - **pandas 时间分辨率**：pandas 3 可能把 ns 呈现为 µs；Arrow 值仍精确。
 - **向后 seek 会重发**：同一 Bar 可能被消费多次。
