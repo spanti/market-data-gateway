@@ -107,6 +107,14 @@ class ApiService:
                 daemon=True,
             )
             self._ready_thread.start()
+            logger.info(
+                "api service started",
+                extra={
+                    "event": "api.started",
+                    "http": self.base_url,
+                    "publish_endpoint": self._publish_endpoint,
+                },
+            )
         except Exception:
             self.stop()
             raise
@@ -174,11 +182,13 @@ class ApiService:
             return
 
         self._messages_received += 1
+        self.metrics.inc("mdgw_api_messages_received_total")
         bus = self._bus
         if bus is not None:
             try:
                 bus.publish(topic, payload)
                 self._messages_forwarded += 1
+                self.metrics.inc("mdgw_api_messages_forwarded_total")
             except RuntimeError:  # pragma: no cover - shutdown race
                 pass
         if table.num_rows:
@@ -200,11 +210,13 @@ class ApiService:
             pass
 
     def _run_ready_loop(self) -> None:
-        # External consumers use this handshake to prove their SUB forwarding
-        # completed before they expect market Bar frames.
+        # Only advertise READY once the collector handshake was observed. That
+        # proves this api's SUB forwarding is live, so a collector waiting on
+        # this READY can safely start publishing the first Bars. An api without
+        # a collector never publishes READY (it has no live stream to offer).
         while not self._stop.is_set():
             bus = self._bus
-            if bus is not None:
+            if bus is not None and self._collector_is_ready():
                 try:
                     bus.publish(READY_TOPIC, b"")
                 except RuntimeError:

@@ -26,6 +26,12 @@ _OPTIONAL_FIELDS = (
     "feed",
     "duration_ms",
     "status",
+    "method",
+    "path",
+    "topics",
+    "control_endpoint",
+    "publish_endpoint",
+    "http",
 )
 
 

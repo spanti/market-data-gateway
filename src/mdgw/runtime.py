@@ -8,6 +8,7 @@ the whole chain deterministically; the HTTP server runs on its own event loop.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections import defaultdict
 from datetime import datetime
@@ -35,6 +36,8 @@ from mdgw.service.collector_core import CollectorCore
 
 MARKET_BAR_TOPIC_PREFIX = "market.bar."
 RECEIVE_WAIT_TIMEOUT_S = 2.0
+
+logger = logging.getLogger(__name__)
 
 
 class GatewayRuntime:
@@ -124,6 +127,7 @@ class GatewayRuntime:
                 bus.close()
             self._stream_endpoint = None
             self._stop_http()
+            self._close_feed_handler()
             self._close_state()
             raise
         self._bus = bus
@@ -137,8 +141,26 @@ class GatewayRuntime:
             self._bus.close()
             self._bus = None
         self._stream_endpoint = None
+        self._close_feed_handler()
         self._close_state()
         self._started = False
+
+    def _close_feed_handler(self) -> None:
+        """Release venue resources owned by the Feed Handler, if any.
+
+        HWM shutdown stays in `CollectorCore.close_state()`, so this never
+        duplicates state cleanup.
+        """
+        close = getattr(self.feed_handler, "close", None)
+        if close is None:
+            return
+        try:
+            close()
+        except Exception:  # pragma: no cover - defensive shutdown path
+            logger.exception(
+                "error closing Feed Handler",
+                extra={"event": "runtime.feed_close_failed"},
+            )
 
     def _close_state(self) -> None:
         self._core.close_state()

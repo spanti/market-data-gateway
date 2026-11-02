@@ -16,10 +16,10 @@ from pydantic import (
 
 from mdgw.core.schema import INTERVALS
 
-# `bus.transport` only selects the single-process walking skeleton's internal
-# transport. Multi-process Service Roles use the explicit `tcp://` endpoints
-# below, because Windows pyzmq builds cannot bind `ipc://`.
-SUPPORTED_BUS_TRANSPORTS = frozenset({"inproc"})
+# `bus.transport` only selects the single-process `GatewayRuntime` internal
+# transport. Multi-process Service Roles always use the explicit `tcp://`
+# endpoints below, because Windows pyzmq builds cannot bind `ipc://`.
+SUPPORTED_BUS_TRANSPORTS = frozenset({"inproc", "tcp"})
 SUPPORTED_FEED_KINDS = frozenset({"ccxt", "fake"})
 
 
@@ -67,18 +67,27 @@ class BusConfig(_ConfigModel):
     collector_pub_bind: str = "tcp://127.0.0.1:5555"
     collector_pub_connect: str = "tcp://127.0.0.1:5555"
     api_pub_bind: str = "tcp://127.0.0.1:5556"
+    # The collector connects here to observe the api PUB handshake. It only
+    # blocks ingest when `[service].wait_for_api_ready` (or `--wait-for-api`)
+    # is enabled.
+    api_pub_connect: str = "tcp://127.0.0.1:5556"
 
     @field_validator("transport")
     @classmethod
     def _supported_transport(cls, value: str) -> str:
         if value not in SUPPORTED_BUS_TRANSPORTS:
             raise ValueError(
-                f"unsupported bus transport in this walking skeleton: "
-                f"{value!r} (supported: {sorted(SUPPORTED_BUS_TRANSPORTS)})"
+                f"unsupported bus transport: {value!r} "
+                f"(supported: {sorted(SUPPORTED_BUS_TRANSPORTS)})"
             )
         return value
 
-    @field_validator("collector_pub_bind", "collector_pub_connect", "api_pub_bind")
+    @field_validator(
+        "collector_pub_bind",
+        "collector_pub_connect",
+        "api_pub_bind",
+        "api_pub_connect",
+    )
     @classmethod
     def _tcp_bus_endpoint(cls, value: str) -> str:
         return _tcp_endpoint(value)
@@ -99,6 +108,11 @@ class ServiceConfig(_ConfigModel):
     # `/readyz` returns 503 until the collector handshake is observed.
     collector_required: bool = False
     collector_ready_timeout_s: float = Field(default=30.0, gt=0)
+    # When true the collector waits for the api PUB to signal readiness (which
+    # the api only does after receiving the collector READY) before ingesting.
+    # Standalone collectors default to false; `mdgw up` and Docker enable it.
+    wait_for_api_ready: bool = False
+    api_ready_timeout_s: float = Field(default=30.0, gt=0)
 
 
 class StreamingConfig(_ConfigModel):
