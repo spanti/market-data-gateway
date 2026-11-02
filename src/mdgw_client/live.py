@@ -277,18 +277,31 @@ class LiveSubscription:
                     frames = socket.recv_multipart()
                     if len(frames) < 2:
                         continue
-                    topic = frames[0].decode("utf-8")
-                    if topic == READY_TOPIC:
-                        self._ready.set()
-                        continue
-                    self._put(
-                        StreamEvent(
+                    # One malformed frame (bad UTF-8 topic, non-Arrow payload)
+                    # must not kill the receiver thread: record it, skip it,
+                    # and keep consuming later frames on the same socket.
+                    try:
+                        topic = frames[0].decode("utf-8")
+                        if topic == READY_TOPIC:
+                            self._ready.set()
+                            attempt = 0
+                            continue
+                        event = StreamEvent(
                             topic=topic,
                             table=ipc_to_table(frames[1]),
                             kind="bar",
                         )
-                    )
-            except zmq.ZMQError as exc:
+                    except Exception as exc:  # noqa: BLE001 - bad frame
+                        if self._stop.is_set():
+                            break
+                        self._set_error(exc)
+                        continue
+                    if not self._put(event):
+                        break
+                    # A decoded message proves the connection is healthy, so
+                    # do not linger at the maximum reconnect backoff.
+                    attempt = 0
+            except Exception as exc:  # noqa: BLE001 - reconnection boundary
                 if self._stop.is_set():
                     break
                 self._set_error(exc)
@@ -395,11 +408,27 @@ class LiveSubscription:
             self._handle_ws_message(raw)
 
     def _handle_ws_message(self, raw: Any) -> None:
+        """Decode one message; record and skip anything malformed.
+
+        A single bad JSON document or envelope must not escape the receive
+        loop, where it would be treated as a connection failure and force a
+        reconnect. The error is still exposed through :attr:`last_error`.
+        """
+        try:
+            self._process_ws_message(raw)
+        except Exception as exc:  # noqa: BLE001 - one bad message
+            self._set_error(exc)
+
+    def _process_ws_message(self, raw: Any) -> None:
         try:
             payload = json.loads(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
+            self._set_error(exc)
             return
         if not isinstance(payload, dict):
+            self._set_error(
+                ValueError("WebSocket message envelope is not an object")
+            )
             return
         op = payload.get("op")
         if op == "event":
