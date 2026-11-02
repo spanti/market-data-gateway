@@ -40,3 +40,19 @@ retention_parent_periods = 2
 [instruments]
 # Instrument Reference Data truth source (`*.yaml` files).
 path = "config/instruments"
+
+# One Feed Handler per [[feeds]] entry. The ccxt Feed Handler connects a Venue,
+# watches native 1m K-lines, and backfills history through fetch_ohlcv.
+[[feeds]]
+name = "binance_spot"
+kind = "ccxt"
+venue = "binance"
+market_type = "spot"
+enable_rate_limit = true
+data_types = ["bar"]
+symbols = ["BTC/USDT", "ETH/USDT"]
+backfill_hours = 24
+stale_after_s = 120
+# Retained for the collector batching ticket; not consumed by the Feed Handler.
+batch_window_ms = 100
+batch_max_events = 500

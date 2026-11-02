@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from mdgw.config import GatewayConfig, load_config
+from mdgw.config import FeedConfig, GatewayConfig, load_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -132,4 +132,91 @@ def test_collector_rejects_negative_values() -> None:
 def test_collector_rejects_empty_state_db_name() -> None:
     with pytest.raises(ValidationError):
         GatewayConfig.model_validate({"collector": {"state_db_name": ""}})
+
+
+def test_feeds_default_to_empty() -> None:
+    assert GatewayConfig().feeds == ()
+
+
+def test_feed_config_defaults() -> None:
+    feed = FeedConfig(name="binance_spot", venue="binance", symbols=("BTC/USDT",))
+
+    assert feed.kind == "ccxt"
+    assert feed.market_type == "spot"
+    assert feed.enable_rate_limit is True
+    assert feed.data_types == ("bar",)
+    assert feed.backfill_hours == 24
+    assert feed.stale_after_s == 120
+    assert feed.batch_window_ms == 100
+    assert feed.batch_max_events == 500
+
+
+def test_repository_toml_declares_ccxt_feed() -> None:
+    with (PROJECT_ROOT / "config" / "gateway.toml").open("rb") as handle:
+        raw = tomllib.load(handle)
+
+    (feed,) = raw["feeds"]
+    assert feed["name"] == "binance_spot"
+    assert feed["kind"] == "ccxt"
+    assert feed["venue"] == "binance"
+    assert feed["market_type"] == "spot"
+    assert feed["enable_rate_limit"] is True
+    assert feed["data_types"] == ["bar"]
+    assert feed["symbols"] == ["BTC/USDT", "ETH/USDT"]
+
+    config = load_config(PROJECT_ROOT / "config" / "gateway.toml")
+    assert config.feeds[0].symbols == ("BTC/USDT", "ETH/USDT")
+
+
+def test_feed_config_rejects_unknown_kind() -> None:
+    with pytest.raises(ValidationError, match="kind"):
+        FeedConfig(name="feed", kind="websocket", venue="binance", symbols=("BTC/USDT",))
+
+
+def test_feed_config_rejects_empty_name_or_venue() -> None:
+    with pytest.raises(ValidationError):
+        FeedConfig(name="", venue="binance", symbols=("BTC/USDT",))
+    with pytest.raises(ValidationError):
+        FeedConfig(name="feed", venue="", symbols=("BTC/USDT",))
+
+
+def test_feed_config_rejects_empty_symbols() -> None:
+    with pytest.raises(ValidationError, match="symbols"):
+        FeedConfig(name="feed", venue="binance", symbols=())
+
+
+def test_feed_config_rejects_duplicate_symbols() -> None:
+    with pytest.raises(ValidationError, match="duplicates"):
+        FeedConfig(
+            name="feed",
+            venue="binance",
+            symbols=("BTC/USDT", "BTC/USDT"),
+        )
+
+
+def test_feed_config_rejects_unsupported_data_types() -> None:
+    with pytest.raises(ValidationError, match="data_types"):
+        FeedConfig(
+            name="feed",
+            venue="binance",
+            symbols=("BTC/USDT",),
+            data_types=("trade",),
+        )
+
+
+def test_feed_config_rejects_negative_batch_values() -> None:
+    with pytest.raises(ValidationError):
+        FeedConfig(
+            name="feed",
+            venue="binance",
+            symbols=("BTC/USDT",),
+            batch_window_ms=-1,
+        )
+    with pytest.raises(ValidationError):
+        FeedConfig(
+            name="feed",
+            venue="binance",
+            symbols=("BTC/USDT",),
+            batch_max_events=0,
+        )
 
