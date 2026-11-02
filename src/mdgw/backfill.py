@@ -14,15 +14,19 @@ Parquet Dataset.
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from mdgw.aggregate import BarAggregator
+from mdgw.backfill_common import (
+    BASE_INTERVAL,
+    group_bars_by_interval,
+    interval_ns,
+    merge_bar_batch,
+)
 from mdgw.core.bar import Bar, RawBar
 from mdgw.core.instrument import InstrumentId
-from mdgw.core.schema import INTERVALS
 from mdgw.core.time import datetime_to_ns, ns_to_datetime, to_utc
 from mdgw.ingest.feed_handler import FeedHandler
 from mdgw.normalize.bar import normalize_bar
@@ -35,8 +39,6 @@ from mdgw.state.high_water_mark import HighWaterMarkStore
 from mdgw.store.parquet_dataset import ParquetBarStore
 
 logger = logging.getLogger(__name__)
-
-BASE_INTERVAL = "1m"
 
 
 @dataclass
@@ -127,53 +129,17 @@ def run_backfill(
             start_ns=start_ns,
             now_ns=now_ns,
         )
-        existing_1m = _read_existing(store, instrument_id, BASE_INTERVAL, start_ns, now_ns)
+        result = merge_bar_batch(
+            store=store,
+            aggregator=aggregator,
+            instrument_id=instrument_id,
+            base_bars=history,
+            read_start_ns=start_ns,
+            read_end_ns=now_ns,
+        )
+        report.skipped_bars += result.skipped
 
-        aggregation_inputs: list[Bar] = []
-        one_minute_writes: list[Bar] = []
-        for bar in history:
-            key = datetime_to_ns(bar.open_ts)
-            previous = existing_1m.get(key)
-            if previous is None:
-                aggregation_inputs.append(bar)
-                one_minute_writes.append(bar)
-            elif _same_content(bar, previous):
-                # Feed the stored revision so a fresh Aggregator rebuilds the
-                # same parents without treating the Bar as new.
-                aggregation_inputs.append(previous)
-                report.skipped_bars += 1
-            else:
-                corrected = _with_revision(
-                    bar, _next_revision(previous.revision, bar.revision)
-                )
-                aggregation_inputs.append(corrected)
-                one_minute_writes.append(corrected)
-
-        if not aggregation_inputs:
-            continue
-
-        parents = aggregator.add_many(aggregation_inputs)
-        parent_writes: list[Bar] = []
-        for interval, group in _group_by_interval(parents).items():
-            interval_ns = _interval_ns(interval)
-            parent_start_ns = (start_ns // interval_ns) * interval_ns
-            existing_parents = _read_existing(
-                store, instrument_id, interval, parent_start_ns, now_ns
-            )
-            for bar in group:
-                previous = existing_parents.get(datetime_to_ns(bar.open_ts))
-                if previous is None:
-                    parent_writes.append(bar)
-                elif _same_content(bar, previous):
-                    report.skipped_bars += 1
-                else:
-                    parent_writes.append(
-                        _with_revision(
-                            bar, _next_revision(previous.revision, bar.revision)
-                        )
-                    )
-
-        bars_to_write = one_minute_writes + parent_writes
+        bars_to_write = result.written
         if not bars_to_write:
             continue
 
@@ -181,7 +147,7 @@ def run_backfill(
         report.written_bars += len(bars_to_write)
 
         # The HWM advances only after the Data Files and Manifest are durable.
-        for interval, group in _group_by_interval(bars_to_write).items():
+        for interval, group in group_bars_by_interval(bars_to_write).items():
             hwm.set(
                 instrument_id,
                 interval,
@@ -246,7 +212,7 @@ def _normalize_history(
     now_ns: int,
 ) -> list[Bar]:
     """Normalize, filter to the closed window, sort, and dedupe by `open_ts`."""
-    interval_ns = _interval_ns(BASE_INTERVAL)
+    width_ns = interval_ns(BASE_INTERVAL)
     by_open_ts: dict[int, Bar] = {}
     for raw in raw_bars:
         if raw.interval != BASE_INTERVAL:
@@ -254,125 +220,9 @@ def _normalize_history(
         open_ns = datetime_to_ns(to_utc(raw.open_ts))
         if open_ns < start_ns or open_ns >= now_ns:
             continue
-        if open_ns + interval_ns > now_ns:
+        if open_ns + width_ns > now_ns:
             # The caller/reference layer rejects forming Bars.
             continue
         bar = normalize_bar(raw, feed=feed, ingest_ts=ingest_ts)
         by_open_ts[open_ns] = bar
     return [by_open_ts[key] for key in sorted(by_open_ts)]
-
-
-def _read_existing(
-    store: ParquetBarStore,
-    instrument_id: str,
-    interval: str,
-    start_ns: int,
-    end_ns: int,
-) -> dict[int, Bar]:
-    """Stored Bars in the range, keeping the greatest revision per `open_ts`."""
-    existing: dict[int, Bar] = {}
-    for batch in store.iter_batches(
-        instrument_id=instrument_id,
-        interval=interval,
-        start_ns=start_ns,
-        end_ns=end_ns,
-    ):
-        for row in batch.to_pylist():
-            bar = _row_to_bar(row)
-            key = datetime_to_ns(bar.open_ts)
-            previous = existing.get(key)
-            if previous is None or bar.revision > previous.revision:
-                existing[key] = bar
-    return existing
-
-
-def _row_to_bar(row: dict) -> Bar:
-    return Bar(
-        schema_version=int(row["schema_version"]),
-        data_type=str(row["data_type"]),
-        instrument_id=str(row["instrument_id"]),
-        interval=str(row["interval"]),
-        open_ts=to_utc(row["open_ts"]),
-        close_ts=to_utc(row["close_ts"]),
-        event_ts=to_utc(row["event_ts"]),
-        ingest_ts=to_utc(row["ingest_ts"]),
-        feed=str(row["feed"]),
-        seq=row["seq"],
-        aggregation_source=str(row["aggregation_source"]),
-        open=row["open"],
-        high=row["high"],
-        low=row["low"],
-        close=row["close"],
-        volume=row["volume"],
-        trade_count=row["trade_count"],
-        revision=int(row["revision"]),
-    )
-
-
-def _same_content(left: Bar, right: Bar) -> bool:
-    """Compare everything except `ingest_ts` and `revision`."""
-    return _content_key(left) == _content_key(right)
-
-
-def _content_key(bar: Bar):
-    return (
-        bar.schema_version,
-        bar.data_type,
-        bar.instrument_id,
-        bar.interval,
-        datetime_to_ns(bar.open_ts),
-        datetime_to_ns(bar.close_ts),
-        datetime_to_ns(bar.event_ts),
-        bar.feed,
-        bar.seq,
-        bar.aggregation_source,
-        bar.open,
-        bar.high,
-        bar.low,
-        bar.close,
-        bar.volume,
-        bar.trade_count,
-    )
-
-
-def _next_revision(stored_revision: int, candidate_revision: int) -> int:
-    return max(stored_revision + 1, candidate_revision)
-
-
-def _with_revision(bar: Bar, revision: int) -> Bar:
-    return Bar(
-        schema_version=bar.schema_version,
-        data_type=bar.data_type,
-        instrument_id=bar.instrument_id,
-        interval=bar.interval,
-        open_ts=bar.open_ts,
-        close_ts=bar.close_ts,
-        event_ts=bar.event_ts,
-        ingest_ts=bar.ingest_ts,
-        feed=bar.feed,
-        seq=bar.seq,
-        aggregation_source=bar.aggregation_source,
-        open=bar.open,
-        high=bar.high,
-        low=bar.low,
-        close=bar.close,
-        volume=bar.volume,
-        trade_count=bar.trade_count,
-        revision=revision,
-    )
-
-
-def _group_by_interval(bars: Sequence[Bar]) -> dict[str, list[Bar]]:
-    grouped: dict[str, list[Bar]] = defaultdict(list)
-    for bar in bars:
-        grouped[bar.interval].append(bar)
-    return grouped
-
-
-def _interval_ns(interval: str) -> int:
-    delta = INTERVALS[interval]
-    return (
-        delta.days * 86_400 * 1_000_000_000
-        + delta.seconds * 1_000_000_000
-        + delta.microseconds * 1_000
-    )

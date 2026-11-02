@@ -13,9 +13,11 @@ import logging
 import signal
 import sys
 import threading
+from datetime import date, timedelta
 from pathlib import Path
 
 from mdgw.config import GatewayConfig, load_config
+from mdgw.core.time import utc_now
 from mdgw.logging import configure_json_logging
 from mdgw.store.maintenance import parse_duration
 from mdgw.store.parquet_dataset import ParquetBarStore
@@ -24,6 +26,15 @@ DEFAULT_CONFIG_PATH = Path("config/gateway.toml")
 SERVICE_ROLES = ("collector", "api", "replay")
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_date(value: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"invalid date {value!r}; expected YYYY-MM-DD"
+        ) from exc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -100,6 +111,78 @@ def build_parser() -> argparse.ArgumentParser:
         help="override [service].log_level",
     )
 
+    backfill = subcommands.add_parser(
+        "backfill",
+        help="import historical Bars (v1: Binance archive backfill)",
+    )
+    _add_common_options(backfill, suppress_defaults=True)
+    backfill.add_argument(
+        "--archive",
+        action="store_true",
+        help="import Binance data.binance.vision K-line archives (v1 only mode)",
+    )
+    backfill.add_argument(
+        "--log-level",
+        default=None,
+        metavar="LEVEL",
+        help="override [service].log_level",
+    )
+    backfill.add_argument(
+        "--instrument",
+        action="append",
+        default=[],
+        metavar="INSTRUMENT_ID",
+        help=(
+            "import this InstrumentId (repeatable); defaults to every "
+            "venue/market-type match in Instrument Reference Data"
+        ),
+    )
+    backfill.add_argument(
+        "--start",
+        type=_parse_date,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="first UTC date to import (inclusive; defaults to --end)",
+    )
+    backfill.add_argument(
+        "--end",
+        type=_parse_date,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="last UTC date to import (inclusive; defaults to yesterday UTC)",
+    )
+    backfill.add_argument("--venue", default="binance")
+    backfill.add_argument("--market-type", default="spot")
+    backfill.add_argument(
+        "--interval",
+        default="1m",
+        help="archive K-line interval (v1 only supports 1m)",
+    )
+    backfill.add_argument(
+        "--granularity",
+        choices=("auto", "daily", "monthly"),
+        default="auto",
+        help="archive file granularity; auto uses monthly for complete months",
+    )
+    backfill.add_argument(
+        "--archive-dir",
+        type=Path,
+        default=None,
+        help="read archives from this local directory; never touches the network",
+    )
+    backfill.add_argument(
+        "--base-url",
+        default="https://data.binance.vision",
+        help="data.binance.vision base URL",
+    )
+    backfill.add_argument("--timeout-s", type=float, default=30.0)
+    backfill.add_argument("--retries", type=int, default=3)
+    backfill.add_argument(
+        "--feed",
+        default="binance_archive",
+        help="Feed Handler name stamped on imported Bars",
+    )
+
     return parser
 
 
@@ -129,6 +212,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_service(args)
     if args.command == "up":
         return _run_up(args)
+    if args.command == "backfill":
+        return _run_archive_backfill(args, parser)
 
     config = _load_config(args)
     store = _build_store(args, config)
@@ -380,3 +465,144 @@ def _build_store(
         format_version=config.storage.format_version,
         schema_version=config.storage.schema_version,
     )
+
+
+# -- archive backfill --------------------------------------------------------
+
+
+def _run_archive_backfill(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> int:
+    """Import Binance `data.binance.vision` archives into the Bar Dataset."""
+    if not getattr(args, "archive", False):
+        parser.error(
+            "backfill requires --archive (v1 only supports archive backfill)"
+        )
+    if args.interval != "1m":
+        parser.error("--interval only supports '1m' in v1")
+
+    config = _load_config(args)
+    level = getattr(args, "log_level", None) or config.service.log_level
+    configure_json_logging(level, service="backfill")
+    store = _build_store(args, config)
+
+    today = utc_now().date()
+    end = args.end or (today - timedelta(days=1))
+    start = args.start or end
+    if end < start:
+        print(
+            f"error: --end {end} precedes --start {start}",
+            file=sys.stderr,
+        )
+        return 1
+
+    from mdgw.archive import (
+        ArchiveFetcher,
+        ArchiveInstrument,
+        import_archive,
+        market_symbol,
+    )
+    from mdgw.aggregate import BarAggregator
+    from mdgw.core.instrument import InstrumentId
+    from mdgw.reference import load_instrument_reference
+    from mdgw.state.high_water_mark import HighWaterMarkStore
+
+    try:
+        reference = load_instrument_reference(Path(config.instruments.path))
+    except (OSError, ValueError) as exc:
+        print(f"error: cannot load Instrument Reference Data: {exc}", file=sys.stderr)
+        return 1
+
+    by_id = {instrument.instrument_id: instrument for instrument in reference.instruments}
+    requested = list(dict.fromkeys(args.instrument))
+    if requested:
+        instruments = []
+        for raw in requested:
+            try:
+                instrument_id = InstrumentId.parse(raw).value
+            except ValueError:
+                print(f"error: invalid --instrument {raw!r}", file=sys.stderr)
+                return 1
+            instrument = by_id.get(instrument_id)
+            if instrument is None:
+                print(
+                    f"error: Instrument {instrument_id!r} is not in "
+                    "Instrument Reference Data",
+                    file=sys.stderr,
+                )
+                return 1
+            if (
+                instrument.venue != args.venue
+                or instrument.instrument_type != args.market_type
+            ):
+                print(
+                    f"error: archive import only supports "
+                    f"{args.venue}/{args.market_type}; "
+                    f"{instrument_id!r} is "
+                    f"{instrument.venue}/{instrument.instrument_type}",
+                    file=sys.stderr,
+                )
+                return 1
+            instruments.append(instrument)
+    else:
+        instruments = [
+            instrument
+            for instrument in reference.instruments
+            if instrument.venue == args.venue
+            and instrument.instrument_type == args.market_type
+        ]
+
+    archive_instruments = [
+        ArchiveInstrument(
+            instrument_id=instrument.instrument_id,
+            symbol=market_symbol(instrument.instrument_id),
+            asset_class=instrument.asset_class,
+        )
+        for instrument in instruments
+    ]
+    aggregator = BarAggregator(
+        intervals=config.aggregation.intervals,
+        base_interval=config.aggregation.base_interval,
+        retention_parent_periods=config.aggregation.retention_parent_periods,
+    )
+    fetcher = ArchiveFetcher(
+        base_url=args.base_url,
+        archive_dir=args.archive_dir,
+        timeout_s=args.timeout_s,
+        retries=args.retries,
+    )
+    retention_bars_days = (
+        config.retention.bars_days if config.retention.enabled else 0
+    )
+    hwm = HighWaterMarkStore(store.root / config.collector.state_db_name)
+    try:
+        report = import_archive(
+            instruments=archive_instruments,
+            store=store,
+            hwm=hwm,
+            aggregator=aggregator,
+            fetcher=fetcher,
+            start=start,
+            end=end,
+            feed=args.feed,
+            market_type=args.market_type,
+            interval=args.interval,
+            granularity=args.granularity,
+            retention_bars_days=retention_bars_days,
+        )
+    finally:
+        hwm.close()
+
+    print(
+        "backfill --archive: "
+        f"instruments={report.instruments} "
+        f"files={report.files} "
+        f"bars_read={report.bars_read} "
+        f"bars_written={report.bars_written} "
+        f"skipped_existing={report.skipped_existing} "
+        f"revisions={report.revisions} "
+        f"missing_files={report.missing_files} "
+        f"skipped_by_retention={report.skipped_by_retention} "
+        f"failures={report.failures}"
+    )
+    return 0 if report.ok else 1
