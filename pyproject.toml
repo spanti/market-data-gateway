@@ -35,3 +35,25 @@ addopts = "-ra -m 'not network'"
 markers = [
     "network: tests that reach a real Venue (skipped by default)",
 ]
+
+[tool.ruff.lint]
+# Ruff linting configuration
+preview = true
+
+extend-select = [
+    "A", "ARG", "ASYNC", "B", "C4", "COM", "DJ", "EM", "ERA",
+    "FURB", "FLY", "G", "I", "ICN", "INP", "INT", "ISC", "LOG",
+    "N", "NPY", "PERF", "PD", "PIE", "PGH", "PL", "PT", "PTH",
+    "PYI", "Q", "RET", "RSE", "RUF", "S", "SIM", "TCH", "TID",
+    "TRY", "UP", "YTT", "E501",
+]
+
+ignore = [
+    "COM812",
+    "ISC001",
+    "PGH003",
+    "PLR0904",
+    "PLR2004",
+    "S101",
+    "TID252",
+]
