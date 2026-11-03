@@ -308,20 +308,29 @@ class StreamingInterface:
 
     # -- publishing --------------------------------------------------------
 
-    def publish_bars(self, bars: Sequence[Bar]) -> None:
+    def publish_bars(
+        self, bars: Sequence[Bar], *, namespace: str | None = None
+    ) -> None:
         """Group Bars by ``(interval, instrument_id)`` and send one frame each.
+
+        ``namespace`` overrides the instance namespace for this call only;
+        ``None`` keeps the instance namespace. Replay uses it because one PUB
+        multiplexes several Sessions under ``replay.<session_id>`` topics.
 
         Callers on multiple threads may invoke this concurrently; sends are
         serialized by the module's publish lock.
         """
         if not self._publish_allowed():
             return
+        effective_namespace = (
+            self._namespace if namespace is None else namespace
+        )
         groups: dict[tuple[str, str], list[Bar]] = {}
         for bar in bars:
             groups.setdefault((bar.interval, bar.instrument_id), []).append(bar)
 
         for group in groups.values():
-            topic = bar_topic(group[0], namespace=self._namespace)
+            topic = bar_topic(group[0], namespace=effective_namespace)
             payload = table_to_ipc(bars_to_logical_table(group))
             self._send(topic, payload, bar=True)
 
@@ -332,14 +341,24 @@ class StreamingInterface:
         payload = _encode_json(status)
         self._send(_STATUS_TOPIC, payload, bar=False)
 
-    def publish_event(self, event: Mapping[str, Any]) -> None:
-        """Publish one JSON event on ``{namespace}.control`` (Replay only)."""
-        if not self._namespace.strip("."):
+    def publish_event(
+        self, event: Mapping[str, Any], *, namespace: str | None = None
+    ) -> None:
+        """Publish one JSON event on ``{namespace}.control`` (Replay only).
+
+        ``namespace`` overrides the instance namespace for this call only;
+        ``None`` keeps the instance namespace. An empty effective namespace is
+        rejected because Replay control topics must name their Session.
+        """
+        effective_namespace = (
+            self._namespace if namespace is None else namespace
+        )
+        if not effective_namespace.strip("."):
             msg = "publish_event requires a non-empty namespace"
             raise ValueError(msg)
         if not self._publish_allowed():
             return
-        topic = _namespaced(self._namespace, "control")
+        topic = _namespaced(effective_namespace, "control")
         payload = _encode_json(event)
         self._send(topic, payload, bar=False)
 
