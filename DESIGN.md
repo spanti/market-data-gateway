@@ -385,7 +385,7 @@ src/
     normalize/
     aggregate/     # 1m 接收与 Bar Aggregation
     store/         # Parquet 读写、_dataset.json/_manifest.json、HWM、GC、compaction
-    bus/           # ZMQ PUB/SUB + REQ/REP、Arrow/JSON 编解码
+    streaming.py   # Streaming Interface：Bar topic 语法、Arrow IPC、PUB/SUB、READY、status/control
     replay/
     api/           # REST、WebSocket、metrics
     cli/           # run --service / up / gc / export / compact / backfill --archive
@@ -412,11 +412,12 @@ DESIGN.md
 
 ### 9.1 测试缝（Seams）
 
-仓库从零开始，无既有 seam。按"尽可能高、尽可能少"的原则，确定 **三个**：
+仓库从零开始，无既有 seam。按"尽可能高、尽可能少"的原则，确定 **四个**：
 
 1. **`GatewayRuntime` 端到端（主 seam）**：组合根接收配置、一个实现 `FeedHandler` Protocol 的假数据源、一个临时数据目录，在单进程内用 `inproc://` ZMQ 跑起 collector → Parquet → api → replay。所有行为测试从这里进入。
 2. **线上字节（Data Contract seam）**：Arrow schema 黄金文件、Arrow IPC 往返、`_dataset.json`/`_manifest.json` 校验、topic 与路径编码。它不是行为 seam，而是 Data Contract 夹具。
 3. **`HttpServer` 与 `ApiService` 的公共接口（HTTP 生命周期 seam）**：刻意新增的第三个 seam。用真实 socket 与端口 0 直接验证启停、失败回滚与跨线程派发，不经过完整的 feed → collector → api → replay 链路；全链路行为仍从 `GatewayRuntime` 进入。
+4. **`StreamingInterface` 的公共接口（Streaming Interface seam）**：用真实 ZMQ 在 `inproc://` 与端口 0 上验证 topic 语法、Arrow IPC 往返、READY、计数器与转发，不经过 aiohttp；全链路行为仍从 `GatewayRuntime` 进入。
 
 真实 Binance 只出现在 `@pytest.mark.network` 的测试里，默认跳过。
 
