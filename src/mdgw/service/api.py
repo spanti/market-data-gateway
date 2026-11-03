@@ -18,7 +18,7 @@ from mdgw.bus.zmq_bus import READY_TOPIC, ZMQBus, ipc_to_table
 from mdgw.config import GatewayConfig
 from mdgw.core.envelope import table_to_messages
 from mdgw.metrics import MetricsRegistry
-from mdgw.reference import InstrumentStore
+from mdgw.reference import load_instrument_store
 from mdgw.service.common import ns_iso, update_dataset_metrics
 from mdgw.store.parquet_dataset import ParquetBarStore
 
@@ -46,7 +46,7 @@ class ApiService:
             format_version=config.storage.format_version,
             schema_version=config.storage.schema_version,
         )
-        self.instrument_store = _load_instrument_store(self.store.root)
+        self.instrument_store = load_instrument_store(self.store.root)
         self.metrics = MetricsRegistry()
 
         self._bus: ZMQBus | None = None
@@ -379,20 +379,6 @@ class ApiService:
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
-
-
-def _load_instrument_store(root: Path) -> InstrumentStore | None:
-    directory = Path(root) / "instruments"
-    if not directory.exists():
-        return None
-    candidates = sorted(
-        directory.glob("snapshot-*.parquet"),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    if not candidates:
-        return None
-    return InstrumentStore(candidates[0])
 
 
 __all__ = ["ApiService"]

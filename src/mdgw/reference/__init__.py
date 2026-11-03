@@ -10,8 +10,10 @@ from mdgw.reference.snapshot import (
     InstrumentStore,
     SnapshotExport,
     export_instrument_snapshot,
+    find_instrument_snapshot,
     instrument_to_json,
     instruments_to_table,
+    load_instrument_store,
 )
 
 __all__ = [
@@ -21,7 +23,9 @@ __all__ = [
     "InstrumentStore",
     "SnapshotExport",
     "export_instrument_snapshot",
+    "find_instrument_snapshot",
     "instrument_to_json",
     "instruments_to_table",
     "load_instrument_reference",
+    "load_instrument_store",
 ]

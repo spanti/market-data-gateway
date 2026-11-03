@@ -26,6 +26,7 @@ import zmq
 from mdgw.bus.zmq_bus import READY_TOPIC, ipc_to_table
 from mdgw.core.bar import Bar
 from mdgw.core.errors import (
+    INSTRUMENT_NOT_FOUND,
     INVALID_INSTRUMENT,
     INVALID_INTERVAL,
     INVALID_PARAMETER,
@@ -33,8 +34,14 @@ from mdgw.core.errors import (
     SESSION_NOT_FOUND,
     InvalidParameterError,
     SessionNotFoundError,
+    UnknownInstrumentError,
 )
 from mdgw.core.schema import BAR_SCHEMA, INTERVALS
+from mdgw.reference import (
+    export_instrument_snapshot,
+    load_instrument_reference,
+    load_instrument_store,
+)
 from mdgw.replay.server import ReplayServer
 from mdgw.replay.service import ReplayService
 from mdgw.replay.session import ReplaySessionSpec
@@ -90,6 +97,62 @@ def _populate(store: ParquetBarStore) -> None:
             _bar(instrument_id=BTC, interval="1m", open_minute=4),
         ],
         asset_class="crypto",
+    )
+
+
+INSTRUMENT_YAML = """\
+- instrument_id: "binance:BTC/USDT"
+  venue: binance
+  symbol: "BTC/USDT"
+  asset_class: crypto
+  instrument_type: spot
+  base: BTC
+  quote: USDT
+  tick_size: "0.01"
+  lot_size: "0.00001"
+  multiplier: "1"
+  timezone: UTC
+  listing_ts: "2017-08-17T04:00:00Z"
+- instrument_id: "binance:ETH/USDT"
+  venue: binance
+  symbol: "ETH/USDT"
+  asset_class: crypto
+  instrument_type: spot
+  base: ETH
+  quote: USDT
+  tick_size: "0.01"
+  lot_size: "0.0001"
+  multiplier: "1"
+  timezone: UTC
+  listing_ts: "2017-08-17T04:00:00Z"
+  delisted_ts: "2026-10-29T00:00:00Z"
+"""
+
+
+def _instrument_store(store: ParquetBarStore, tmp_path: Path):
+    reference_dir = tmp_path / "reference"
+    reference_dir.mkdir()
+    (reference_dir / "binance.yaml").write_text(
+        INSTRUMENT_YAML, encoding="utf-8"
+    )
+    reference = load_instrument_reference(reference_dir)
+    export_instrument_snapshot(reference, store.root / "instruments")
+    instrument_store = load_instrument_store(store.root)
+    assert instrument_store is not None
+    return instrument_store
+
+
+def _spec_with_instrument(instrument_id: str) -> ReplaySessionSpec:
+    return ReplaySessionSpec.from_mapping(
+        {
+            "op": "create_session",
+            "subscriptions": [
+                {"data_type": "bar", "instrument_id": instrument_id, "interval": "1m"}
+            ],
+            "start_ts": START,
+            "end_ts": END,
+            "replay_mode": "asap",
+        }
     )
 
 
@@ -303,6 +366,83 @@ def test_unknown_session_raises_session_not_found(tmp_path: Path) -> None:
 
     with pytest.raises(SessionNotFoundError):
         service.session_status("rpl-missing")
+
+
+def test_create_session_rejects_an_instrument_missing_from_the_snapshot(
+    tmp_path: Path,
+) -> None:
+    store = ParquetBarStore(tmp_path / "data")
+    _populate(store)
+    instrument_store = _instrument_store(store, tmp_path)
+    service = ReplayService(store, instrument_store=instrument_store)
+
+    with pytest.raises(UnknownInstrumentError) as excinfo:
+        service.create_session(_spec_with_instrument("binance:SOL/USDT"))
+
+    assert excinfo.value.code == INSTRUMENT_NOT_FOUND
+    assert excinfo.value.details == {"instrument_id": "binance:SOL/USDT"}
+    assert service.active_session_ids() == []
+
+
+def test_delisted_instrument_still_replays(tmp_path: Path) -> None:
+    store = ParquetBarStore(tmp_path / "data")
+    _populate(store)
+    instrument_store = _instrument_store(store, tmp_path)
+    assert instrument_store.get(ETH).is_delisted
+
+    collector = _Collector()
+    service = ReplayService(
+        store,
+        publish=collector,
+        instrument_store=instrument_store,
+        session_id_factory=lambda: "rpl-delisted",
+    )
+    session_id = service.create_session(_spec())
+    assert service.wait_session(session_id, timeout=10)
+
+    market = _market_messages(collector.messages, session_id)
+    assert [topic for topic, _ in market] == [
+        f"replay.{session_id}.market.bar.1m.{BTC}",
+        f"replay.{session_id}.market.bar.1m.{ETH}",
+        f"replay.{session_id}.market.bar.1m.{BTC}",
+        f"replay.{session_id}.market.bar.5m.{BTC}",
+    ]
+    end = _end_of_session(collector.messages)
+    assert end["reason"] == "exhausted"
+    assert end["bars_sent"] == 4
+
+
+def test_zmq_control_reports_instrument_not_found(tmp_path: Path) -> None:
+    store = ParquetBarStore(tmp_path / "data")
+    _populate(store)
+    instrument_store = _instrument_store(store, tmp_path)
+    service = ReplayService(store, instrument_store=instrument_store)
+    server = ReplayServer(service)
+    context = zmq.Context()
+    requester = context.socket(zmq.REQ)
+    requester.setsockopt(zmq.LINGER, 0)
+    requester.setsockopt(zmq.RCVTIMEO, 5000)
+    try:
+        server.start()
+        requester.connect(server.control_endpoint)
+        request = {
+            **_create_request(),
+            "subscriptions": [
+                {"data_type": "bar", "instrument_id": "binance:SOL/USDT", "interval": "1m"}
+            ],
+        }
+        response = _request(requester, request)
+        assert response["ok"] is False
+        assert response["error"]["code"] == INSTRUMENT_NOT_FOUND
+
+        # The REP socket stayed in a valid state for the next request.
+        assert _request(requester, {"op": "unknown"})["error"]["code"] == (
+            INVALID_PARAMETER
+        )
+    finally:
+        requester.close()
+        server.stop()
+        context.term()
 
 
 def test_session_lock_lives_for_the_run_and_is_released(tmp_path: Path) -> None:

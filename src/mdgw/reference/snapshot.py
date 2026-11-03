@@ -112,6 +112,34 @@ def export_instrument_snapshot(
     return SnapshotExport(path=path, config_hash=reference.config_hash, created=True)
 
 
+def find_instrument_snapshot(data_root: Path) -> Path | None:
+    """Return the newest Instrument Snapshot under `<data_root>/instruments`.
+
+    Every process reads the same exported snapshot directory; `None` means the
+    collector has not exported one yet. Snapshots are immutable and named by
+    config hash, so the newest mtime is the one the collector last published.
+    """
+    directory = Path(data_root) / "instruments"
+    if not directory.exists():
+        return None
+    candidates = sorted(
+        directory.glob(f"{SNAPSHOT_PREFIX}*{SNAPSHOT_SUFFIX}"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def load_instrument_store(data_root: Path) -> InstrumentStore | None:
+    """Open the newest Instrument Snapshot, or `None` when none exists.
+
+    A malformed snapshot raises `InstrumentSnapshotError` rather than being
+    silently ignored: readers must not fall back to unvalidated Instruments.
+    """
+    path = find_instrument_snapshot(data_root)
+    return None if path is None else InstrumentStore(path)
+
+
 class InstrumentStore:
     """Read-only view over one Instrument Snapshot."""
 

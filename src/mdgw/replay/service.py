@@ -12,7 +12,12 @@ import threading
 from collections.abc import Callable
 from uuid import uuid4
 
-from mdgw.core.errors import InvalidParameterError, SessionNotFoundError
+from mdgw.core.errors import (
+    InvalidParameterError,
+    SessionNotFoundError,
+    UnknownInstrumentError,
+)
+from mdgw.reference import InstrumentStore
 from mdgw.replay.session import Publish, ReplaySession, ReplaySessionSpec
 from mdgw.store.parquet_dataset import ParquetBarStore
 
@@ -40,6 +45,7 @@ class ReplayService:
         heartbeat_s: float = 1.0,
         publish: Publish | None = None,
         session_id_factory: Callable[[], str] | None = None,
+        instrument_store: InstrumentStore | None = None,
     ) -> None:
         if max_sessions < 1:
             raise ValueError("max_sessions must be at least 1")
@@ -50,6 +56,10 @@ class ReplayService:
         self._heartbeat_s = heartbeat_s
         self._publish: Publish = publish or _null_publish
         self._session_id_factory = session_id_factory or default_session_id_factory
+        # When supplied, every subscription must name an Instrument present in
+        # the snapshot (Delisted Instruments included). Without a snapshot the
+        # Session behaves as before; the Service Role logs that it is missing.
+        self._instrument_store = instrument_store
 
         self._sessions: dict[str, ReplaySession] = {}
         self._lock = threading.Lock()
@@ -68,6 +78,7 @@ class ReplayService:
         with self._lock:
             if self._closed:
                 raise InvalidParameterError("Replay Service is closed")
+            self._validate_instruments(spec)
             active = [
                 session for session in self._sessions.values() if not session.is_terminal
             ]
@@ -173,6 +184,17 @@ class ReplayService:
             session.wait(timeout=max(5.0, self._heartbeat_s * 2))
 
     # -- helpers -----------------------------------------------------------
+
+    def _validate_instruments(self, spec: ReplaySessionSpec) -> None:
+        store = self._instrument_store
+        if store is None:
+            return
+        for subscription in spec.subscriptions:
+            if store.get(subscription.instrument_id) is None:
+                raise UnknownInstrumentError(
+                    f"unknown Instrument {subscription.instrument_id!r}",
+                    details={"instrument_id": subscription.instrument_id},
+                )
 
     def _send(self, topic: str, payload: bytes) -> None:
         # Resolve the publisher at send time so `set_publish` also affects

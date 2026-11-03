@@ -8,6 +8,7 @@ from pathlib import Path
 
 from mdgw.config import GatewayConfig
 from mdgw.metrics import MetricsRegistry
+from mdgw.reference import InstrumentStore, load_instrument_store
 from mdgw.replay.server import ReplayServer
 from mdgw.replay.service import ReplayService
 from mdgw.service.health_server import ServiceHealthServer
@@ -34,6 +35,7 @@ class ReplayServiceRole:
             schema_version=config.storage.schema_version,
         )
         self.metrics = MetricsRegistry()
+        self.instrument_store: InstrumentStore | None = None
 
         self.service: ReplayService | None = None
         self.server: ReplayServer | None = None
@@ -47,10 +49,35 @@ class ReplayServiceRole:
         if self._started:
             return
         try:
+            # Replay reads the Instrument Snapshot exported by the collector,
+            # never the YAML truth source (DESIGN §5.1). A missing snapshot is
+            # reported through /status and the log instead of silently
+            # disabling Instrument validation without a trace.
+            self.instrument_store = load_instrument_store(self.store.root)
+            if self.instrument_store is None:
+                logger.warning(
+                    "Instrument Snapshot missing; Replay Sessions cannot "
+                    "validate Instruments",
+                    extra={
+                        "event": "replay.instrument_snapshot_missing",
+                        "directory": str(self.store.root / "instruments"),
+                    },
+                )
+            else:
+                logger.info(
+                    "loaded Instrument Snapshot",
+                    extra={
+                        "event": "replay.instrument_snapshot_loaded",
+                        "snapshot": str(self.instrument_store.snapshot_path),
+                        "instruments": len(self.instrument_store),
+                    },
+                )
+
             self.service = ReplayService(
                 self.store,
                 max_sessions=self.config.replay.max_sessions,
                 heartbeat_s=self.config.replay.heartbeat_s,
+                instrument_store=self.instrument_store,
             )
             self.server = ReplayServer(
                 self.service,
@@ -91,6 +118,7 @@ class ReplayServiceRole:
             self.server.stop()
             self.server = None
         self.service = None
+        self.instrument_store = None
         if self._health is not None:
             self._health.stop()
             self._health = None
@@ -142,6 +170,23 @@ class ReplayServiceRole:
                 [] if self.service is None else self.service.active_session_ids()
             ),
             "sessions": summaries,
+            "instrument_snapshot": self._instrument_snapshot_status(),
+        }
+
+    def _instrument_snapshot_status(self) -> dict:
+        store = self.instrument_store
+        if store is None:
+            return {
+                "status": "missing",
+                "loaded": False,
+                "snapshot": None,
+                "count": 0,
+            }
+        return {
+            "status": "loaded",
+            "loaded": True,
+            "snapshot": str(store.snapshot_path),
+            "count": len(store),
         }
 
     # -- metrics -----------------------------------------------------------

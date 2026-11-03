@@ -29,6 +29,8 @@ from mdgw.core.errors import UnknownInstrumentError
 from mdgw.core.schema import bars_to_logical_table
 from mdgw.core.time import utc_now
 from mdgw.ingest.feed_handler import FeedHandler
+from mdgw.replay.service import ReplayService
+from mdgw.replay.session import Publish, ReplaySessionSpec
 from mdgw.state.health import GapEvent, HealthTracker
 from mdgw.state.high_water_mark import HighWaterMarkStore
 from mdgw.store.parquet_dataset import ParquetBarStore
@@ -79,6 +81,10 @@ class GatewayRuntime:
 
         self._bus: ZMQBus | None = None
         self._hub: WebSocketHub | None = None
+        # Replay is created lazily: most runtime tests never replay, and a
+        # ReplayService costs nothing until its first Session. No ZMQ server is
+        # started here, so no port is bound unless the caller asks for replay.
+        self._replay_service: ReplayService | None = None
         self._stream_endpoint: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
@@ -136,6 +142,7 @@ class GatewayRuntime:
     def stop(self) -> None:
         if not self._started:
             return
+        self._close_replay()
         self._stop_http()
         if self._bus is not None:
             self._bus.close()
@@ -144,6 +151,20 @@ class GatewayRuntime:
         self._close_feed_handler()
         self._close_state()
         self._started = False
+
+    def _close_replay(self) -> None:
+        """Stop every Replay Session created through the runtime seam."""
+        service = self._replay_service
+        self._replay_service = None
+        if service is None:
+            return
+        try:
+            service.close()
+        except Exception:  # pragma: no cover - defensive shutdown path
+            logger.exception(
+                "error closing Replay Sessions",
+                extra={"event": "runtime.replay_close_failed"},
+            )
 
     def _close_feed_handler(self) -> None:
         """Release venue resources owned by the Feed Handler, if any.
@@ -256,6 +277,46 @@ class GatewayRuntime:
 
     def gap_events(self) -> tuple[GapEvent, ...]:
         return self._core.gap_events()
+
+    # -- replay ------------------------------------------------------------
+
+    @property
+    def replay_service(self) -> ReplayService:
+        """The lazily created in-process Replay Service (no ZMQ server bound).
+
+        It reuses this runtime's Parquet Store and Instrument Snapshot, so a
+        Replay Session observes the same Bars the collector just wrote. The
+        first access creates it; `stop()` closes it and every Session.
+        """
+        if not self._started:
+            raise RuntimeError(
+                "GatewayRuntime.start() must be called before replay_service"
+            )
+        if self._replay_service is None:
+            self._replay_service = ReplayService(
+                self.store,
+                max_sessions=self.config.replay.max_sessions,
+                heartbeat_s=self.config.replay.heartbeat_s,
+                instrument_store=self.instrument_store,
+            )
+        return self._replay_service
+
+    def create_replay_session(
+        self,
+        spec: ReplaySessionSpec,
+        *,
+        publish: Publish | None = None,
+    ) -> str:
+        """Create a Replay Session through the runtime seam and return its id.
+
+        `publish` replaces the runtime Replay Service's message sink, which
+        receives the same `[topic][Arrow IPC]` frames a `ReplayServer` would
+        send. That lets a test observe replay events without binding ZMQ.
+        """
+        service = self.replay_service
+        if publish is not None:
+            service.set_publish(publish)
+        return service.create_session(spec)
 
     def _asset_class_for(self, instrument_id: str) -> str:
         """Resolve the asset class from the Instrument Snapshot only.
