@@ -15,18 +15,17 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 from aiohttp import web
 
-from mdgw.api.ws_hub import WebSocketHub
 from mdgw.core.envelope import decimal_to_str, table_to_messages
 from mdgw.core.errors import (
-    INTERNAL_ERROR,
     INSTRUMENT_NOT_FOUND,
+    INTERNAL_ERROR,
     INVALID_FORMAT,
     INVALID_INSTRUMENT,
     INVALID_INTERVAL,
@@ -38,9 +37,14 @@ from mdgw.core.errors import (
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import BAR_SCHEMA, INTERVALS
 from mdgw.core.time import iso_to_ns, ns_to_iso
-from mdgw.metrics import MetricsRegistry
 from mdgw.reference import InstrumentStore, instrument_to_json
-from mdgw.store.parquet_dataset import ParquetBarStore
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
+    from mdgw.api.ws_hub import WebSocketHub
+    from mdgw.metrics import MetricsRegistry
+    from mdgw.store.parquet_dataset import ParquetBarStore
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +83,34 @@ def _make_request_middleware(metrics: MetricsRegistry | None):
     correlate an error body with the JSON log line.
     """
 
+    def _record_request(
+        request: web.Request,
+        *,
+        path: str,
+        status: int,
+        request_id: str,
+        duration_ms: float,
+    ) -> None:
+        if metrics is not None:
+            metrics.inc(
+                "mdgw_api_http_requests_total",
+                labels={
+                    "method": request.method,
+                    "path": path,
+                    "status": str(status),
+                },
+                help="HTTP requests handled by the api role",
+            )
+        logger.info(
+            "http request completed",
+            extra={
+                "event": "api.http_request",
+                "request_id": request_id,
+                "status": status,
+                "duration_ms": round(duration_ms, 3),
+            },
+        )
+
     @web.middleware
     async def middleware(request: web.Request, handler) -> web.StreamResponse:
         request_id = request.headers.get("X-Request-ID", "").strip() or uuid4().hex
@@ -89,7 +121,6 @@ def _make_request_middleware(metrics: MetricsRegistry | None):
             response = await handler(request)
         except web.HTTPException as exc:
             _record_request(
-                metrics,
                 request,
                 path=path,
                 status=exc.status,
@@ -99,7 +130,6 @@ def _make_request_middleware(metrics: MetricsRegistry | None):
             raise
         except Exception:
             _record_request(
-                metrics,
                 request,
                 path=path,
                 status=500,
@@ -118,7 +148,6 @@ def _make_request_middleware(metrics: MetricsRegistry | None):
 
         response.headers["X-Request-ID"] = request_id
         _record_request(
-            metrics,
             request,
             path=path,
             status=response.status,
@@ -136,37 +165,7 @@ def _route_label(request: web.Request) -> str:
     return canonical or request.path
 
 
-def _record_request(
-    metrics: MetricsRegistry | None,
-    request: web.Request,
-    *,
-    path: str,
-    status: int,
-    request_id: str,
-    duration_ms: float,
-) -> None:
-    if metrics is not None:
-        metrics.inc(
-            "mdgw_api_http_requests_total",
-            labels={
-                "method": request.method,
-                "path": path,
-                "status": str(status),
-            },
-            help="HTTP requests handled by the api role",
-        )
-    logger.info(
-        "http request completed",
-        extra={
-            "event": "api.http_request",
-            "request_id": request_id,
-            "status": status,
-            "duration_ms": round(duration_ms, 3),
-        },
-    )
-
-
-def create_app(
+def create_app(  # ruff: ignore[too-many-arguments]  # keyword-only app configuration
     store: ParquetBarStore,
     *,
     instrument_store: InstrumentStore | None = None,
@@ -210,7 +209,9 @@ def create_app(
 
 
 def _make_healthz_handler(service_role: str | None):
-    async def handle_healthz(request: web.Request) -> web.Response:
+    async def handle_healthz(  # ruff: ignore[unused-async]  # aiohttp handlers are async
+        _request: web.Request,
+    ) -> web.Response:
         return web.json_response(
             {"status": "ok", "service": service_role or "api"}
         )
@@ -219,7 +220,9 @@ def _make_healthz_handler(service_role: str | None):
 
 
 def _make_readyz_handler(provider: Callable[[], dict] | None):
-    async def handle_readyz(request: web.Request) -> web.Response:
+    async def handle_readyz(  # ruff: ignore[unused-async]  # aiohttp handlers are async
+        _request: web.Request,
+    ) -> web.Response:
         payload = (
             {"ready": True, "reason": "ok"}
             if provider is None
@@ -254,7 +257,9 @@ def _make_service_status_handler(
 
 
 def _make_metrics_handler(render: Callable[[], str] | None):
-    async def handle_metrics(request: web.Request) -> web.Response:
+    async def handle_metrics(  # ruff: ignore[unused-async]  # aiohttp handlers are async
+        _request: web.Request,
+    ) -> web.Response:
         text = "" if render is None else render()
         return web.Response(
             body=text.encode("utf-8"),
@@ -291,7 +296,9 @@ def _make_websocket_handler(hub: WebSocketHub):
 def _make_instruments_handler(instrument_store: InstrumentStore | None):
     """Create the handler for the Instrument list endpoint."""
 
-    async def handle_instruments(request: web.Request) -> web.StreamResponse:
+    async def handle_instruments(  # ruff: ignore[unused-async]  # aiohttp handlers are async
+        request: web.Request,
+    ) -> web.StreamResponse:
         include_delisted = _parse_include_delisted(request)
         if isinstance(include_delisted, web.Response):
             return include_delisted
@@ -315,7 +322,9 @@ def _make_instruments_handler(instrument_store: InstrumentStore | None):
 def _make_instrument_handler(instrument_store: InstrumentStore | None):
     """Create the handler for one Instrument lookup, including Delisted ones."""
 
-    async def handle_instrument(request: web.Request) -> web.StreamResponse:
+    async def handle_instrument(  # ruff: ignore[unused-async]  # aiohttp handlers are async
+        request: web.Request,
+    ) -> web.StreamResponse:
         instrument_id = request.match_info["instrument_id"]
         try:
             InstrumentId.parse(instrument_id)
@@ -394,6 +403,25 @@ def _validate_request(
             ),
         )
 
+    window = _parse_window(request)
+    if isinstance(window, web.Response):
+        return window
+    start_ns, end_ns, limit = window
+
+    return BarQuery(
+        interval=interval,
+        instrument=instrument,
+        start_ns=start_ns,
+        end_ns=end_ns,
+        limit=limit,
+        format=output_format,
+    )
+
+
+def _parse_window(
+    request: web.Request,
+) -> tuple[int | None, int | None, int | None] | web.Response:
+    """Parse the optional `start`, `end` and `limit` query parameters."""
     try:
         start_ns = _parse_optional_ns(request.query.get("start"))
         end_ns = _parse_optional_ns(request.query.get("end"))
@@ -407,32 +435,24 @@ def _validate_request(
             message="query parameter 'start' must not be after 'end'",
         )
 
-    limit = None
     raw_limit = request.query.get("limit")
-    if raw_limit is not None:
-        try:
-            limit = int(raw_limit)
-        except ValueError:
-            return _error(
-                request,
-                code=INVALID_RANGE,
-                message="query parameter 'limit' must be an integer",
-            )
-        if limit < 0:
-            return _error(
-                request,
-                code=INVALID_RANGE,
-                message="query parameter 'limit' must not be negative",
-            )
-
-    return BarQuery(
-        interval=interval,
-        instrument=instrument,
-        start_ns=start_ns,
-        end_ns=end_ns,
-        limit=limit,
-        format=output_format,
-    )
+    if raw_limit is None:
+        return start_ns, end_ns, None
+    try:
+        limit = int(raw_limit)
+    except ValueError:
+        return _error(
+            request,
+            code=INVALID_RANGE,
+            message="query parameter 'limit' must be an integer",
+        )
+    if limit < 0:
+        return _error(
+            request,
+            code=INVALID_RANGE,
+            message="query parameter 'limit' must not be negative",
+        )
+    return start_ns, end_ns, limit
 
 
 def _make_bars_handler(store: ParquetBarStore):
@@ -640,7 +660,7 @@ async def _iter_batches(store: ParquetBarStore, query: BarQuery):
         yield batch
 
 
-async def _flush(response: web.StreamResponse, sink: "_ChunkSink") -> None:
+async def _flush(response: web.StreamResponse, sink: _ChunkSink) -> None:
     chunk = sink.drain()
     if chunk:
         await response.write(chunk)
@@ -684,27 +704,44 @@ def _write_export_file(store: ParquetBarStore, query: BarQuery) -> Path:
             limit=query.limit,
         )
         if query.format == "parquet":
-            writer = pq.ParquetWriter(
-                path,
-                BAR_SCHEMA,
-                version=store.format_version,
-                use_deprecated_int96_timestamps=False,
-                compression=store.compression,
-            )
-            try:
-                for batch in batches:
-                    writer.write_batch(batch)
-            finally:
-                writer.close()
+            _write_parquet_export(batches, path, store)
         else:
-            with pa.OSFile(str(path), "wb") as sink:
-                with pa.ipc.new_file(sink, BAR_SCHEMA) as writer:
-                    for batch in batches:
-                        writer.write_batch(batch)
+            _write_arrow_export(batches, path)
     except Exception:
         shutil.rmtree(tempdir, ignore_errors=True)
         raise
     return path
+
+
+def _write_parquet_export(
+    batches: Iterator[pa.RecordBatch],
+    path: Path,
+    store: ParquetBarStore,
+) -> None:
+    writer = pq.ParquetWriter(
+        path,
+        BAR_SCHEMA,
+        version=store.format_version,
+        use_deprecated_int96_timestamps=False,
+        compression=store.compression,
+    )
+    try:
+        for batch in batches:
+            writer.write_batch(batch)
+    finally:
+        writer.close()
+
+
+def _write_arrow_export(
+    batches: Iterator[pa.RecordBatch],
+    path: Path,
+) -> None:
+    with (
+        pa.OSFile(str(path), "wb") as sink,
+        pa.ipc.new_file(sink, BAR_SCHEMA) as writer,
+    ):
+        for batch in batches:
+            writer.write_batch(batch)
 
 
 async def _send_file(
@@ -714,12 +751,13 @@ async def _send_file(
     content_type: str,
     filename: str,
 ) -> web.StreamResponse:
+    stat = await asyncio.to_thread(path.stat)
     response = web.StreamResponse(
         status=200,
         headers={
             "Content-Type": content_type,
             "Content-Disposition": f'attachment; filename="{filename}"',
-            "Content-Length": str(path.stat().st_size),
+            "Content-Length": str(stat.st_size),
         },
     )
     try:

@@ -16,12 +16,13 @@ import asyncio
 import json
 import logging
 from contextlib import suppress
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from aiohttp import web
-
 from mdgw.core.time import datetime_to_ns, ns_to_iso, utc_now
+
+if TYPE_CHECKING:
+    from aiohttp import web
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +185,13 @@ class WebSocketSession:
             await self._ws.close()
 
 
+class _HubClosedError(RuntimeError):
+    """Raised when registering a session on a closed `WebSocketHub`."""
+
+    def __init__(self) -> None:
+        super().__init__("WebSocketHub is closed")
+
+
 class WebSocketHub:
     """Registry of WebSocket sessions and the fan-out entry point."""
 
@@ -209,7 +217,7 @@ class WebSocketHub:
 
     def register(self, ws: web.WebSocketResponse) -> WebSocketSession:
         if self._closed:
-            raise RuntimeError("WebSocketHub is closed")
+            raise _HubClosedError
         session = WebSocketSession(
             ws,
             queue_size=self._queue_size,
@@ -246,8 +254,9 @@ class WebSocketHub:
             for message in messages:
                 session.enqueue(topic, message)
 
+    @staticmethod
     async def handle_client_message(
-        self, session: WebSocketSession, text: str
+        session: WebSocketSession, text: str
     ) -> None:
         try:
             payload = json.loads(text)
