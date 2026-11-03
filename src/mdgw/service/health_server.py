@@ -78,19 +78,20 @@ class ServiceHealthServer:
 
     # -- endpoints ---------------------------------------------------------
 
-    @property
-    def bound_port(self) -> int:
+    def _running_http(self) -> HttpServer:
+        """Return the running `HttpServer`, or raise this server's error."""
         http = self._http
         if http is None:
             raise RuntimeError(_NOT_RUNNING_MESSAGE)
-        return http.bound_port
+        return http
+
+    @property
+    def bound_port(self) -> int:
+        return self._running_http().bound_port
 
     @property
     def base_url(self) -> str:
-        http = self._http
-        if http is None:
-            raise RuntimeError(_NOT_RUNNING_MESSAGE)
-        return http.base_url
+        return self._running_http().base_url
 
     async def _healthz(self, _request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "service": self.service})

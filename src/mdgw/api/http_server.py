@@ -70,17 +70,15 @@ class HttpServer:
 
         self._host = host
         self._on_shutdown = on_shutdown
-        loop = asyncio.new_event_loop()
-        thread = threading.Thread(
-            target=self._run_event_loop,
-            args=(loop,),
-            name=thread_name,
-            daemon=True,
-        )
-        self._loop = loop
-        self._thread = thread
-        thread.start()
         try:
+            self._loop = loop = asyncio.new_event_loop()
+            self._thread = thread = threading.Thread(
+                target=self._run_event_loop,
+                args=(loop,),
+                name=thread_name,
+                daemon=True,
+            )
+            thread.start()
             future = asyncio.run_coroutine_threadsafe(
                 self._start_on_loop(app, host=host, port=port),
                 loop,
@@ -105,6 +103,10 @@ class HttpServer:
             return
         if threading.current_thread() is self._thread:
             raise RuntimeError(_OWN_THREAD_MESSAGE)
+        # Clear the flag before scheduling teardown so `call_soon_threadsafe`
+        # rejects dispatches for the whole shutdown window instead of queueing
+        # onto a loop that is about to stop and silently dropping them.
+        self._started = False
         loop = self._loop
         try:
             if loop is not None and loop.is_running():
@@ -118,7 +120,6 @@ class HttpServer:
                     loop.call_soon_threadsafe(loop.stop)
         finally:
             self._teardown_loop()
-            self._started = False
             self._bound_port = None
             self._host = None
             self._on_shutdown = None
@@ -207,7 +208,8 @@ class HttpServer:
             loop.call_soon_threadsafe(loop.stop)
         thread = self._thread
         if thread is not None:
-            thread.join(timeout=THREAD_JOIN_TIMEOUT_S)
+            if thread.is_alive():
+                thread.join(timeout=THREAD_JOIN_TIMEOUT_S)
             self._thread = None
         if loop is not None:
             if not loop.is_running():

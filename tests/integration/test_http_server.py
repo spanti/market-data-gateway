@@ -32,6 +32,10 @@ def _threads_named(name: str) -> list[threading.Thread]:
     return [thread for thread in threading.enumerate() if thread.name == name]
 
 
+def _assert_thread_stopped() -> None:
+    assert _threads_named(THREAD_NAME) == []
+
+
 def _get_json(url: str) -> dict:
     with urllib.request.urlopen(  # ruff: ignore[suspicious-url-open-usage]
         url, timeout=WAIT_TIMEOUT_S
@@ -49,6 +53,7 @@ def test_start_on_port_zero_reports_bound_port_and_base_url() -> None:
         assert server.base_url == f"http://{HOST}:{port}"
     finally:
         server.stop()
+        _assert_thread_stopped()
 
 
 @pytest.mark.parametrize(
@@ -62,6 +67,7 @@ def test_base_url_rewrites_wildcard_hosts_to_loopback(host: str) -> None:
         assert server.base_url == f"http://127.0.0.1:{port}"
     finally:
         server.stop()
+        _assert_thread_stopped()
 
 
 def test_serves_a_real_http_request() -> None:
@@ -71,6 +77,7 @@ def test_serves_a_real_http_request() -> None:
         payload = _get_json(f"http://{HOST}:{port}/ping")
     finally:
         server.stop()
+        _assert_thread_stopped()
     assert payload == {"status": "ok"}
 
 
@@ -83,29 +90,33 @@ def test_repeated_start_returns_same_port_and_keeps_one_thread() -> None:
         assert len(_threads_named(THREAD_NAME)) == 1
     finally:
         server.stop()
+        _assert_thread_stopped()
 
 
 def test_stop_is_idempotent() -> None:
     server = HttpServer()
     server.stop()  # never started
+    _assert_thread_stopped()
 
     server.start(_app(), host=HOST, port=0, thread_name=THREAD_NAME)
     server.stop()
+    _assert_thread_stopped()
     server.stop()
-
-    assert _threads_named(THREAD_NAME) == []
+    _assert_thread_stopped()
 
 
 def test_port_is_reusable_right_after_stop() -> None:
     first = HttpServer()
     port = first.start(_app(), host=HOST, port=0, thread_name=THREAD_NAME)
     first.stop()
+    _assert_thread_stopped()
 
     second = HttpServer()
     try:
         rebound = second.start(_app(), host=HOST, port=port, thread_name=THREAD_NAME)
     finally:
         second.stop()
+        _assert_thread_stopped()
 
     assert rebound == port
 
@@ -133,7 +144,29 @@ def test_bind_failure_reraises_original_error_and_leaves_no_thread() -> None:
         assert len(_threads_named(THREAD_NAME)) == 1
     finally:
         server.stop()
+        _assert_thread_stopped()
         occupied.close()
+
+
+def test_start_failure_from_thread_start_reraises_without_leaking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = HttpServer()
+
+    def _fail_thread_start(_thread: threading.Thread) -> None:
+        msg = "thread start failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(threading.Thread, "start", _fail_thread_start)
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        server.start(_app(), host=HOST, port=0, thread_name=THREAD_NAME)
+
+    _assert_thread_stopped()
+    with pytest.raises(RuntimeError, match="must be called first"):
+        _ = server.bound_port
+    with pytest.raises(RuntimeError, match="must be called first"):
+        _ = server.base_url
 
 
 def test_on_shutdown_runs_before_cleanup_and_errors_are_swallowed() -> None:
@@ -163,9 +196,10 @@ def test_on_shutdown_runs_before_cleanup_and_errors_are_swallowed() -> None:
         )
     finally:
         server.stop()
+        _assert_thread_stopped()
 
     assert events == ["on_shutdown", "runner_cleanup"]
-    assert _threads_named(THREAD_NAME) == []
+    _assert_thread_stopped()
 
 
 def test_call_soon_threadsafe_dispatches_across_threads() -> None:
@@ -184,6 +218,7 @@ def test_call_soon_threadsafe_dispatches_across_threads() -> None:
         assert done.wait(WAIT_TIMEOUT_S)
     finally:
         server.stop()
+        _assert_thread_stopped()
 
     assert len(seen) == 1
     assert seen[0][0] == "payload"
@@ -212,6 +247,7 @@ def test_stop_from_the_server_thread_raises_instead_of_deadlocking() -> None:
         assert finished.wait(WAIT_TIMEOUT_S), "stop() deadlocked on its own thread"
     finally:
         server.stop()
+        _assert_thread_stopped()
 
     assert len(errors) == 1
     assert isinstance(errors[0], RuntimeError)

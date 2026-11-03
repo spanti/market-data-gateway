@@ -118,6 +118,8 @@ def test_runtime_start_failure_closes_the_feed_handler(
 
     assert feed.closed is True
     assert runtime._started is False
+    assert runtime._hwm is None
+    assert runtime._bus is None
 
 
 # -- replay seam -----------------------------------------------------------

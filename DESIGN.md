@@ -412,10 +412,11 @@ DESIGN.md
 
 ### 9.1 测试缝（Seams）
 
-仓库从零开始，无既有 seam。按"尽可能高、尽可能少"的原则，确定 **两个**：
+仓库从零开始，无既有 seam。按"尽可能高、尽可能少"的原则，确定 **三个**：
 
 1. **`GatewayRuntime` 端到端（主 seam）**：组合根接收配置、一个实现 `FeedHandler` Protocol 的假数据源、一个临时数据目录，在单进程内用 `inproc://` ZMQ 跑起 collector → Parquet → api → replay。所有行为测试从这里进入。
 2. **线上字节（Data Contract seam）**：Arrow schema 黄金文件、Arrow IPC 往返、`_dataset.json`/`_manifest.json` 校验、topic 与路径编码。它不是行为 seam，而是 Data Contract 夹具。
+3. **`HttpServer` 与 `ApiService` 的公共接口（HTTP 生命周期 seam）**：刻意新增的第三个 seam。用真实 socket 与端口 0 直接验证启停、失败回滚与跨线程派发，不经过完整的 feed → collector → api → replay 链路；全链路行为仍从 `GatewayRuntime` 进入。
 
 真实 Binance 只出现在 `@pytest.mark.network` 的测试里，默认跳过。
 
@@ -424,6 +425,7 @@ DESIGN.md
 - Data Contract 测试：Arrow schema 黄金文件；Arrow IPC 与 JSON 编解码往返；Parquet 目录布局；`_dataset.json`/`_manifest.json` 校验。
 - 单元测试：1m 收口、Bar Aggregation、revision、HWM 推进、topic/路径编码、错误码映射、decimal 不经浮点。
 - 集成测试：假 Feed Handler → collector → Parquet → api → replay 全链路，不触网。
+- HTTP 生命周期测试：`HttpServer` 与 `ApiService` 在端口 0 上用真实 socket 验证启动、幂等、停止、失败回滚与跨线程派发；不构造完整链路。
 - 回放确定性：同一 Replay Session 跑两次，输出事件序列逐字节相同。
 - 验收标准：
   1. 新数据源只实现 `FeedHandler` Protocol + 配置即可接入，不改核心代码。

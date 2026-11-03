@@ -139,19 +139,21 @@ class ApiService:
 
     # -- properties --------------------------------------------------------
 
-    @property
-    def base_url(self) -> str:
+    def _started_http(self) -> HttpServer:
+        """Return the started `HttpServer`, or raise this service's error."""
         try:
-            return self._http.base_url
+            _ = self._http.bound_port
         except RuntimeError as exc:
             raise RuntimeError(_NOT_STARTED_MESSAGE) from exc
+        return self._http
+
+    @property
+    def base_url(self) -> str:
+        return self._started_http().base_url
 
     @property
     def http_port(self) -> int:
-        try:
-            return self._http.bound_port
-        except RuntimeError as exc:
-            raise RuntimeError(_NOT_STARTED_MESSAGE) from exc
+        return self._started_http().bound_port
 
     @property
     def publish_endpoint(self) -> str:
