@@ -1,0 +1,217 @@
+# ruff: file-ignore[implicit-namespace-package]
+"""Public-interface tests for the HttpServer lifecycle module."""
+
+from __future__ import annotations
+
+import json
+import socket
+import threading
+import urllib.request
+
+import pytest
+from aiohttp import web
+
+from mdgw.api.http_server import HttpServer
+
+THREAD_NAME = "mdgw-test-http"
+HOST = "127.0.0.1"
+WAIT_TIMEOUT_S = 5.0
+
+
+async def _ping(_request: web.Request) -> web.Response:  # ruff: ignore[unused-async] - aiohttp handler
+    return web.json_response({"status": "ok"})
+
+
+def _app() -> web.Application:
+    app = web.Application()
+    app.router.add_get("/ping", _ping)
+    return app
+
+
+def _threads_named(name: str) -> list[threading.Thread]:
+    return [thread for thread in threading.enumerate() if thread.name == name]
+
+
+def _get_json(url: str) -> dict:
+    with urllib.request.urlopen(  # ruff: ignore[suspicious-url-open-usage]
+        url, timeout=WAIT_TIMEOUT_S
+    ) as response:
+        assert response.status == 200
+        return json.loads(response.read())
+
+
+def test_start_on_port_zero_reports_bound_port_and_base_url() -> None:
+    server = HttpServer()
+    try:
+        port = server.start(_app(), host=HOST, port=0, thread_name=THREAD_NAME)
+        assert port > 0
+        assert server.bound_port == port
+        assert server.base_url == f"http://{HOST}:{port}"
+    finally:
+        server.stop()
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["0.0.0.0", "::"],  # ruff: ignore[hardcoded-bind-all-interfaces] - URL rewriting
+)
+def test_base_url_rewrites_wildcard_hosts_to_loopback(host: str) -> None:
+    server = HttpServer()
+    try:
+        port = server.start(_app(), host=host, port=0, thread_name=THREAD_NAME)
+        assert server.base_url == f"http://127.0.0.1:{port}"
+    finally:
+        server.stop()
+
+
+def test_serves_a_real_http_request() -> None:
+    server = HttpServer()
+    try:
+        port = server.start(_app(), host=HOST, port=0, thread_name=THREAD_NAME)
+        payload = _get_json(f"http://{HOST}:{port}/ping")
+    finally:
+        server.stop()
+    assert payload == {"status": "ok"}
+
+
+def test_repeated_start_returns_same_port_and_keeps_one_thread() -> None:
+    server = HttpServer()
+    try:
+        first = server.start(_app(), host=HOST, port=0, thread_name=THREAD_NAME)
+        second = server.start(_app(), host=HOST, port=0, thread_name=THREAD_NAME)
+        assert second == first
+        assert len(_threads_named(THREAD_NAME)) == 1
+    finally:
+        server.stop()
+
+
+def test_stop_is_idempotent() -> None:
+    server = HttpServer()
+    server.stop()  # never started
+
+    server.start(_app(), host=HOST, port=0, thread_name=THREAD_NAME)
+    server.stop()
+    server.stop()
+
+    assert _threads_named(THREAD_NAME) == []
+
+
+def test_port_is_reusable_right_after_stop() -> None:
+    first = HttpServer()
+    port = first.start(_app(), host=HOST, port=0, thread_name=THREAD_NAME)
+    first.stop()
+
+    second = HttpServer()
+    try:
+        rebound = second.start(_app(), host=HOST, port=port, thread_name=THREAD_NAME)
+    finally:
+        second.stop()
+
+    assert rebound == port
+
+
+def test_bind_failure_reraises_original_error_and_leaves_no_thread() -> None:
+    occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    occupied.bind((HOST, 0))
+    occupied.listen()
+    port = occupied.getsockname()[1]
+    server = HttpServer()
+    try:
+        with pytest.raises(OSError, match=r".*"):
+            server.start(_app(), host=HOST, port=port, thread_name=THREAD_NAME)
+
+        assert _threads_named(THREAD_NAME) == []
+        with pytest.raises(RuntimeError, match="must be called first"):
+            _ = server.bound_port
+        with pytest.raises(RuntimeError, match="must be called first"):
+            _ = server.base_url
+
+        # The failed instance is still usable, proving the loop and thread
+        # were torn down rather than leaked.
+        retry_port = server.start(_app(), host=HOST, port=0, thread_name=THREAD_NAME)
+        assert retry_port > 0
+        assert len(_threads_named(THREAD_NAME)) == 1
+    finally:
+        server.stop()
+        occupied.close()
+
+
+def test_on_shutdown_runs_before_cleanup_and_errors_are_swallowed() -> None:
+    events: list[str] = []
+
+    async def on_shutdown() -> None:  # ruff: ignore[unused-async] - hook contract
+        events.append("on_shutdown")
+        msg = "shutdown hook failed"
+        raise RuntimeError(msg)
+
+    async def on_cleanup(  # ruff: ignore[unused-async] - aiohttp signal
+        _application: web.Application,
+    ) -> None:
+        events.append("runner_cleanup")
+
+    app = _app()
+    app.on_cleanup.append(on_cleanup)
+
+    server = HttpServer()
+    try:
+        server.start(
+            app,
+            host=HOST,
+            port=0,
+            thread_name=THREAD_NAME,
+            on_shutdown=on_shutdown,
+        )
+    finally:
+        server.stop()
+
+    assert events == ["on_shutdown", "runner_cleanup"]
+    assert _threads_named(THREAD_NAME) == []
+
+
+def test_call_soon_threadsafe_dispatches_across_threads() -> None:
+    server = HttpServer()
+    server.start(_app(), host=HOST, port=0, thread_name=THREAD_NAME)
+    caller = threading.current_thread()
+    seen: list[tuple[str, int]] = []
+    done = threading.Event()
+
+    def callback(value: str) -> None:
+        seen.append((value, threading.get_ident()))
+        done.set()
+
+    try:
+        server.call_soon_threadsafe(callback, "payload")
+        assert done.wait(WAIT_TIMEOUT_S)
+    finally:
+        server.stop()
+
+    assert len(seen) == 1
+    assert seen[0][0] == "payload"
+    assert seen[0][1] != caller.ident
+
+    with pytest.raises(RuntimeError, match="must be called first"):
+        server.call_soon_threadsafe(callback, "after-stop")
+
+
+def test_stop_from_the_server_thread_raises_instead_of_deadlocking() -> None:
+    server = HttpServer()
+    server.start(_app(), host=HOST, port=0, thread_name=THREAD_NAME)
+    errors: list[Exception] = []
+    finished = threading.Event()
+
+    def call_stop() -> None:
+        try:
+            server.stop()
+        except Exception as error:  # ruff: ignore[blind-except] - recorded
+            errors.append(error)
+        finally:
+            finished.set()
+
+    try:
+        server.call_soon_threadsafe(call_stop)
+        assert finished.wait(WAIT_TIMEOUT_S), "stop() deadlocked on its own thread"
+    finally:
+        server.stop()
+
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
