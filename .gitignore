@@ -17,6 +17,7 @@ data-demo/
 
 # Editor
 .vscode/
+.claude/
 
 # OS
 Thumbs.db

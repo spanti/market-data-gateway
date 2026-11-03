@@ -251,7 +251,7 @@ class GatewayRuntime:
         return self._core.stale_instruments(now)
 
     def health(self, now: datetime | None = None) -> dict:
-        """Assertable collector health snapshot (stale + gap_unrecoverable)."""
+        """Assertable collector health status (stale + gap_unrecoverable)."""
         return self._core.health_snapshot(now)
 
     def gap_events(self) -> tuple[GapEvent, ...]:

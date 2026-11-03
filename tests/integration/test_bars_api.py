@@ -387,3 +387,24 @@ def test_json_arrow_csv_and_exports_return_the_same_semantics(tmp_path: Path) ->
     assert from_parquet == from_json
     assert from_arrow_file == from_json
     assert from_csv_messages == from_json_projection
+
+
+def test_json_limit_bounds_the_range_too_large_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("mdgw.api.server.JSON_ROW_LIMIT", 1)
+    with _runtime(
+        tmp_path, [_bar_input(0), _bar_input(1), _bar_input(2)]
+    ) as runtime:
+        runtime.start()
+        runtime.ingest()
+
+        status, _, body = _get(
+            f"{runtime.base_url}/api/v1/bars?interval=1m&limit=1"
+        )
+        assert status == 200
+        assert len(json.loads(body)["bars"]) == 1
+
+        status, _, body = _get(f"{runtime.base_url}/api/v1/bars?interval=1m")
+        assert status == 400
+        assert json.loads(body)["error"]["code"] == "range_too_large"

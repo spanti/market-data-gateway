@@ -10,10 +10,10 @@ from mdgw.core.instrument import InstrumentId
 
 
 class CompositeFeedHandler:
-    """Expose several Feed Handlers as one `FeedHandler`.
+    """Expose several Feed Handlers as one Feed Handler.
 
-    This is only an adapter: normalization, aggregation, HWM and Backfill stay
-    in their existing modules and operate on the combined stream.
+    This is a thin composite Feed Handler: normalization, aggregation, HWM and
+    Backfill stay in their existing modules and operate on the combined stream.
     """
 
     def __init__(

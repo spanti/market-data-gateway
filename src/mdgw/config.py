@@ -303,6 +303,35 @@ class GatewayConfig(_ConfigModel):
     instruments: InstrumentsConfig = Field(default_factory=InstrumentsConfig)
     feeds: tuple[FeedConfig, ...] = ()
 
+    @model_validator(mode="after")
+    def _backfill_lookback_within_retention(self) -> "GatewayConfig":
+        """Reject a Backfill window the Retention policy would immediately erase.
+
+        DESIGN §11: the Backfill lookback must not exceed the Data Type
+        Retention, and the constraint is checked when the config is loaded.
+        """
+        if not self.retention.enabled or self.retention.bars_days <= 0:
+            return self
+        retention_hours = self.retention.bars_days * 24
+        offenders: list[str] = []
+        if self.collector.backfill_hours > retention_hours:
+            offenders.append(
+                f"collector.backfill_hours={self.collector.backfill_hours:g}h"
+            )
+        for feed in self.feeds:
+            if feed.backfill_hours > retention_hours:
+                offenders.append(
+                    f"feed {feed.name!r} backfill_hours="
+                    f"{feed.backfill_hours:g}h"
+                )
+        if offenders:
+            raise ValueError(
+                "Backfill lookback must not exceed Retention "
+                f"({self.retention.bars_days} day(s) = {retention_hours:g}h): "
+                + ", ".join(offenders)
+            )
+        return self
+
 
 def load_config(path: Path) -> GatewayConfig:
     """Parse and validate a runtime config TOML file."""

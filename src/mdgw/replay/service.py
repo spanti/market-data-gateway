@@ -147,7 +147,7 @@ class ReplayService:
         return self._get(session_id).bars_sent
 
     def session_summaries(self) -> list[dict[str, object]]:
-        """Snapshot every tracked Session for `/metrics` and `/status`."""
+        """Return a status view of every tracked Session for `/metrics` and `/status`."""
         with self._lock:
             sessions = list(self._sessions.items())
         return [

@@ -10,7 +10,7 @@ requires-python = ">=3.13"
 dependencies = [
     "pyarrow>=18",
     "pyzmq>=26",
-    "aiohttp>=3.10",
+    "aiohttp>=3.14",
     "PyYAML>=6",
     "pydantic>=2.9",
     "ccxt>=4.5",

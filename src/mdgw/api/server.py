@@ -543,7 +543,10 @@ async def _respond_json(
         start_ns=query.start_ns,
         end_ns=query.end_ns,
     )
-    if total > JSON_ROW_LIMIT:
+    # `limit` caps the response, so only the rows that would actually be
+    # rendered count against the JSON ceiling.
+    effective_total = total if query.limit is None else min(total, query.limit)
+    if effective_total > JSON_ROW_LIMIT:
         return _error(
             request,
             code=RANGE_TOO_LARGE,

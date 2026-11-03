@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -78,6 +79,37 @@ def _seed_store(root: Path) -> list[Bar]:
     store = ParquetBarStore(root)
     store.write_bars(bars, asset_class="crypto")
     return bars
+
+
+def test_parquet_history_example_keeps_only_the_max_revision(
+    tmp_path: Path,
+) -> None:
+    bars = _seed_store(tmp_path)
+    corrected = replace(
+        bars[0],
+        high=Decimal("999.0"),
+        close=Decimal("999.0"),
+        revision=1,
+    )
+    ParquetBarStore(tmp_path).write_bars([corrected], asset_class="crypto")
+
+    result = _run(
+        EXAMPLES / "parquet_history.py",
+        "--data-root",
+        tmp_path,
+        "--instrument",
+        INSTRUMENT_ID,
+        "--interval",
+        "1m",
+        "--limit",
+        "10",
+    )
+
+    assert result.returncode == 0, result.stderr
+    # Two identities exist, with three raw rows after the correction.
+    assert "Rows: 2 matching" in result.stdout
+    assert "'revision': 1" in result.stdout
+    assert "999.0" in result.stdout
 
 
 def test_demo_config_loads_and_declares_fake_feed() -> None:

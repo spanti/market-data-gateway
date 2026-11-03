@@ -264,3 +264,62 @@ def test_replay_config_rejects_invalid_values(payload: dict) -> None:
     with pytest.raises(ValidationError):
         GatewayConfig.model_validate(payload)
 
+
+
+def test_retention_allows_backfill_within_the_window() -> None:
+    config = GatewayConfig.model_validate(
+        {
+            "retention": {"enabled": True, "bars_days": 2},
+            "collector": {"backfill_hours": 48},
+            "feeds": [
+                {
+                    "name": "feed",
+                    "venue": "binance",
+                    "symbols": ["BTC/USDT"],
+                    "backfill_hours": 24,
+                }
+            ],
+        }
+    )
+
+    assert config.collector.backfill_hours == 48
+    assert config.feeds[0].backfill_hours == 24
+
+
+def test_retention_rejects_collector_backfill_beyond_the_window() -> None:
+    with pytest.raises(ValidationError, match="Backfill lookback"):
+        GatewayConfig.model_validate(
+            {
+                "retention": {"enabled": True, "bars_days": 1},
+                "collector": {"backfill_hours": 48},
+            }
+        )
+
+
+def test_retention_rejects_feed_backfill_beyond_the_window() -> None:
+    with pytest.raises(ValidationError, match="Backfill lookback"):
+        GatewayConfig.model_validate(
+            {
+                "retention": {"enabled": True, "bars_days": 1},
+                "collector": {"backfill_hours": 24},
+                "feeds": [
+                    {
+                        "name": "feed",
+                        "venue": "binance",
+                        "symbols": ["BTC/USDT"],
+                        "backfill_hours": 48,
+                    }
+                ],
+            }
+        )
+
+
+def test_disabled_retention_does_not_constrain_backfill() -> None:
+    config = GatewayConfig.model_validate(
+        {
+            "retention": {"enabled": False, "bars_days": 1},
+            "collector": {"backfill_hours": 1000},
+        }
+    )
+
+    assert config.collector.backfill_hours == 1000

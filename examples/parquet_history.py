@@ -112,6 +112,28 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def latest_revisions(table: pa.Table) -> pa.Table:
+    """Keep the greatest revision per (instrument_id, interval, open_ts).
+
+    The Data Contract makes those three fields the Bar identity; a source
+    correction appends a new row with a higher revision. Raw PyArrow scans see
+    every row, so a semantic consumer must deduplicate before using the series.
+    """
+    if table.num_rows == 0:
+        return table
+    latest: dict[tuple, dict] = {}
+    for row in table.to_pylist():
+        key = (row["instrument_id"], row["interval"], row["open_ts"])
+        previous = latest.get(key)
+        if previous is None or row["revision"] > previous["revision"]:
+            latest[key] = row
+    rows = sorted(
+        latest.values(),
+        key=lambda row: (row["instrument_id"], row["interval"], row["open_ts"]),
+    )
+    return pa.Table.from_pylist(rows, schema=table.schema)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -132,9 +154,10 @@ def main(argv: list[str] | None = None) -> int:
     expression = build_filter(args)
     table = dataset.to_table(filter=expression) if expression is not None else dataset.to_table()
 
-    # File order is not part of the contract; sort for readable output.
-    if table.num_rows:
-        table = table.sort_by("open_ts")
+    # File order is not part of the contract; sort for readable output. A raw
+    # scan can also contain several revisions of one Bar, so collapse them to
+    # the greatest revision per identity (Data Contract §9).
+    table = latest_revisions(table)
 
     print(f"Dataset root: {dataset_root}")
     print("Schema (Arrow):")

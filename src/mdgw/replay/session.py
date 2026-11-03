@@ -301,7 +301,7 @@ class ReplaySession:
         return True
 
     def set_speed(self, speed: float) -> bool:
-        """Change realtime pacing, running or paused. Legal in `realtime` only."""
+        """Change the realtime Replay Clock speed, running or paused."""
         value = validate_speed(speed)
         with self._cond:
             self._require_active("set_speed")
