@@ -4,15 +4,17 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] `CollectorService` 使用 `StreamingInterface` 完成 PUB 绑定与 SUB 连接；`publish_endpoint` 委托给 `endpoints`。
-- [ ] Bar 发布走 `publish_bars`；`_internal.status` 走 `publish_status`；删除本地 `MARKET_BAR_TOPIC_PREFIX`、`READY_INTERVAL_S` 与 `_publish_bars` 的分组/编码逻辑。
-- [ ] READY 由 `mark_ready()` 统一发布；删除 `_run_ready_loop`、`_api_ready` handler 与 `_api_ready_signal` 的双重表示。
-- [ ] `wait_until_peer_ready(api_ready_timeout_s)` 保留原有策略：未启用时不等待；超时只记录 `collector.api_ready_timeout` 并继续 ingest。
-- [ ] `mdgw_collector_zmq_publishes_total`、`mdgw_collector_bars_ingested_total`、`mdgw_collector_bars_written_total` 等指标名称与语义不变。
-- [ ] `status_payload` 的字段与值不变；shutdown 顺序仍保证 sink flush、HWM 关闭与 Feed Handler 关闭。
-- [ ] collector 单元测试与多进程 streaming 测试通过；离线套件无新增失败。
-- [ ] 不修改配置字段、topic 字符串、collector ingest 语义或 supervisor 行为。
+- [x] `CollectorService` 使用 `StreamingInterface` 完成 PUB 绑定与 SUB 连接；`publish_endpoint` 委托给 `endpoints`。
+- [x] Bar 发布走 `publish_bars`；`_internal.status` 走 `publish_status`；删除本地 `MARKET_BAR_TOPIC_PREFIX`、`READY_INTERVAL_S` 与 `_publish_bars` 的分组/编码逻辑。
+- [x] READY 由 `mark_ready()` 统一发布；删除 `_run_ready_loop`、`_api_ready` handler 与 `_api_ready_signal` 的双重表示。
+- [x] `wait_until_peer_ready(api_ready_timeout_s)` 保留原有策略：未启用时不等待；超时只记录 `collector.api_ready_timeout` 并继续 ingest。
+- [x] `mdgw_collector_zmq_publishes_total`、`mdgw_collector_bars_ingested_total`、`mdgw_collector_bars_written_total` 等指标名称与语义不变。
+- [x] `status_payload` 的字段与值不变；shutdown 顺序仍保证 sink flush、HWM 关闭与 Feed Handler 关闭。
+- [x] collector 单元测试与多进程 streaming 测试通过；离线套件无新增失败。
+- [x] 不修改配置字段、topic 字符串、collector ingest 语义或 supervisor 行为。
 
 ## Comments
+
+- Resolved on `integration/streaming-interface` (merge `71e7cb8`, code-review fix `2fe91fd`). Collector publishes through `publish_bars`/`publish_status`, advertises READY through `mark_ready()`, and keeps its timeout policy around `wait_until_peer_ready`. Full offline suite: 572 passed, 5 known baseline failures, no new failures.

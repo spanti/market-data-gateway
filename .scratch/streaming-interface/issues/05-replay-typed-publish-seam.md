@@ -4,14 +4,16 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] `ReplaySession` 只调用 `publish_bar(bar)` 与 `publish_event(mapping)`；删除 `_market_topic`、`_publish_bar` 中的 topic/IPC 构造与 `table_to_ipc` 直接依赖。
-- [ ] `ReplayService` 与 `ReplayServer` 的发布接缝改为两个类型化回调；`set_publish` 的旧 `(topic, payload)` 形状被移除。
-- [ ] `ReplayServer` 的临时适配器使用 `mdgw.streaming` 的 `bar_topic` / `bar_topic_prefix` 生成带 `replay.<session_id>` namespace 的 topic，并继续发布 End of Session。
-- [ ] `GatewayRuntime.create_replay_session(publish=...)` 的测试接缝同步改为两个类型化回调；测试仍能观察同一份 Bar 与 End of Session 帧。
-- [ ] Replay asap / controls / client replay 测试通过；End of Session 的字段、topic 与顺序不变。
-- [ ] `ReplayServer` 的 REP 控制循环、控制命令语义与 Session 生命周期不变。
-- [ ] 本 ticket 不删除 `mdgw.bus`，也不替换 `ReplayServer` 的 PUB/READY 实现；离线套件无新增失败。
+- [x] `ReplaySession` 只调用 `publish_bar(bar)` 与 `publish_event(mapping)`；删除 `_market_topic`、`_publish_bar` 中的 topic/IPC 构造与 `table_to_ipc` 直接依赖。
+- [x] `ReplayService` 与 `ReplayServer` 的发布接缝改为两个类型化回调；`set_publish` 的旧 `(topic, payload)` 形状被移除。
+- [x] `ReplayServer` 的临时适配器使用 `mdgw.streaming` 的 `bar_topic` / `bar_topic_prefix` 生成带 `replay.<session_id>` namespace 的 topic，并继续发布 End of Session。
+- [x] `GatewayRuntime.create_replay_session(publish=...)` 的测试接缝同步改为两个类型化回调；测试仍能观察同一份 Bar 与 End of Session 帧。
+- [x] Replay asap / controls / client replay 测试通过；End of Session 的字段、topic 与顺序不变。
+- [x] `ReplayServer` 的 REP 控制循环、控制命令语义与 Session 生命周期不变。
+- [x] 本 ticket 不删除 `mdgw.bus`，也不替换 `ReplayServer` 的 PUB/READY 实现；离线套件无新增失败。
 
 ## Comments
+
+- Resolved on `integration/streaming-interface` (merge `3923e42`, code-review fix `2fe91fd`). `ReplaySession` calls typed `publish_bar(bar)`/`publish_event(mapping)`; the Service/Server seam is session-id-aware so one PUB multiplexes concurrent Sessions. The Replay wire behavior is unchanged. Full offline suite: 572 passed, 5 known baseline failures, no new failures.
