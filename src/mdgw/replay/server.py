@@ -1,10 +1,12 @@
 """Thin ZMQ adapter for the Replay Service.
 
 Wire format mirrors the Streaming Interface: every market message is a
-two-frame `[topic][Arrow IPC stream]` multipart message. Control is JSON over
-REQ/REP. The PUB socket also emits the same `_internal.ready` gesture as the
-live `ZMQBus` every 50 ms, so an external SUB can confirm its subscription was
-forwarded before it calls `create_session`.
+two-frame `[topic][Arrow IPC stream]` multipart message, and End of Session is
+JSON on `replay.<session_id>.control`. Control is JSON over REQ/REP, which
+stays in this module. Data publishing, namespaced topics and the
+`_internal.ready` gesture are delegated to `StreamingInterface`, so an
+external SUB can confirm its subscription was forwarded before it calls
+`create_session`.
 """
 
 from __future__ import annotations
@@ -22,10 +24,9 @@ from mdgw.core.errors import (
     GatewayError,
     InvalidParameterError,
 )
-from mdgw.core.schema import bars_to_logical_table
 from mdgw.core.time import iso_to_ns
 from mdgw.replay.session import ReplaySessionSpec
-from mdgw.streaming import READY_TOPIC, bar_topic, table_to_ipc
+from mdgw.streaming import StreamingInterface
 
 if TYPE_CHECKING:
     from typing import Self
@@ -35,7 +36,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-READY_INTERVAL_S = 0.05
 CONTROL_POLL_MS = 100
 
 
@@ -54,29 +54,34 @@ class ReplayServer:
         self._service = service
         self._control_bind_host = control_bind_host
         self._control_port = control_port
-        self._publish_bind_host = publish_bind_host
-        self._publish_port = publish_port
 
-        self._context = zmq.Context()
-        self._publisher: zmq.Socket | None = None
+        # One PUB multiplexes every Session; session ids live in the topic
+        # namespace of each publish call.
+        self._streaming = StreamingInterface(
+            bind=_endpoint(publish_bind_host, publish_port),
+            zmq_hwm=10_000,
+        )
+        # The REQ/REP control plane keeps its own context, separate from the
+        # data PUB/SUB context owned by the Streaming Interface.
+        self._context: zmq.Context | None = None
         self._controller: zmq.Socket | None = None
-        self._publish_lock = threading.Lock()
 
-        self._publish_endpoint: str | None = None
         self._control_endpoint: str | None = None
 
         self._lifecycle_lock = threading.Lock()
         self._started = False
         self._stop = threading.Event()
-        self._ready_stop = threading.Event()
         self._control_thread: threading.Thread | None = None
-        self._ready_thread: threading.Thread | None = None
 
     # -- endpoints ---------------------------------------------------------
 
     @property
     def publish_endpoint(self) -> str | None:
-        return self._publish_endpoint
+        """Resolved PUB endpoint while started; ``None`` before/after."""
+        if not self._started:
+            return None
+        endpoints = self._streaming.endpoints
+        return endpoints[0] if endpoints else None
 
     @property
     def control_endpoint(self) -> str | None:
@@ -89,48 +94,43 @@ class ReplayServer:
             if self._started:
                 return
 
-            publisher = self._context.socket(zmq.PUB)
-            publisher.setsockopt(zmq.LINGER, 0)
-            publisher.setsockopt(zmq.SNDHWM, 10_000)
-            controller = self._context.socket(zmq.REP)
-            controller.setsockopt(zmq.LINGER, 0)
+            streaming = self._streaming
+            context: zmq.Context | None = None
+            controller: zmq.Socket | None = None
             try:
-                publisher.bind(
-                    _endpoint(self._publish_bind_host, self._publish_port)
-                )
-                self._publish_endpoint = publisher.getsockopt_string(
-                    zmq.LAST_ENDPOINT
-                )
+                streaming.start()
+                streaming.mark_ready()
+                context = zmq.Context()
+                controller = context.socket(zmq.REP)
+                controller.setsockopt(zmq.LINGER, 0)
                 controller.bind(
                     _endpoint(self._control_bind_host, self._control_port)
                 )
                 self._control_endpoint = controller.getsockopt_string(
                     zmq.LAST_ENDPOINT
                 )
-            except Exception:
-                publisher.close()
-                controller.close()
+                self._service.set_publish(
+                    self._publish_bar, self._publish_event
+                )
+            except BaseException:
+                self._control_endpoint = None
+                if controller is not None:
+                    controller.close(linger=0)
+                if context is not None:
+                    context.term()
+                streaming.stop()
                 raise
 
-            self._publisher = publisher
+            self._context = context
             self._controller = controller
-            self._service.set_publish(self._publish_bar, self._publish_event)
-
             self._stop.clear()
-            self._ready_stop.clear()
             self._started = True
 
-            self._ready_thread = threading.Thread(
-                target=self._run_ready,
-                name="mdgw-replay-ready",
-                daemon=True,
-            )
             self._control_thread = threading.Thread(
                 target=self._run_control,
                 name="mdgw-replay-control",
                 daemon=True,
             )
-            self._ready_thread.start()
             self._control_thread.start()
 
     def stop(self) -> None:
@@ -138,27 +138,25 @@ class ReplayServer:
             if not self._started:
                 return
             self._started = False
-            self._ready_stop.set()
             self._stop.set()
 
-            # Stop Sessions before closing PUB so each one can still publish
-            # its final `reason="stopped"` End of Session message.
+            # Stop Sessions before the Streaming Interface so each one can
+            # still publish its final `reason="stopped"` End of Session.
             self._service.close()
+            self._streaming.stop()
 
-            if self._ready_thread is not None:
-                self._ready_thread.join(timeout=2.0)
-                self._ready_thread = None
             if self._control_thread is not None:
                 self._control_thread.join(timeout=5.0)
                 self._control_thread = None
 
-            for socket in (self._controller, self._publisher):
-                if socket is not None:
-                    socket.close()
+            controller = self._controller
             self._controller = None
-            self._publisher = None
-            self._context.term()
-            self._publish_endpoint = None
+            if controller is not None:
+                controller.close(linger=0)
+            context = self._context
+            self._context = None
+            if context is not None:
+                context.term()
             self._control_endpoint = None
 
     def __enter__(self) -> Self:
@@ -171,35 +169,14 @@ class ReplayServer:
     # -- publishing --------------------------------------------------------
 
     def _publish_bar(self, session_id: str, bar: Bar) -> None:
-        # Temporary adapter for this ticket: Replay still owns its PUB, but
-        # topic/IPC construction already comes from the Streaming Interface.
-        topic = bar_topic(bar, namespace=f"replay.{session_id}")
-        payload = table_to_ipc(bars_to_logical_table([bar]))
-        self._publish_message(topic, payload)
+        self._streaming.publish_bars(
+            [bar], namespace=f"replay.{session_id}"
+        )
 
     def _publish_event(self, session_id: str, event: Mapping[str, Any]) -> None:
-        topic = f"replay.{session_id}.control"
-        payload = json.dumps(event, ensure_ascii=False).encode("utf-8")
-        self._publish_message(topic, payload)
-
-    def _publish_message(self, topic: str, payload: bytes) -> None:
-        with self._publish_lock:
-            if self._publisher is None:
-                return
-            try:
-                self._publisher.send_multipart(
-                    [topic.encode("utf-8"), payload]
-                )
-            except zmq.ZMQError:  # pragma: no cover - socket closed during shutdown
-                logger.debug("Replay PUB socket closed while sending", exc_info=True)
-
-    def _run_ready(self) -> None:
-        # Same readiness gesture as the live bus (DESIGN §2.2): an empty
-        # `_internal.ready` payload proves PUB/SUB subscription forwarding has
-        # completed. Repeated every 50 ms while the server runs.
-        while not self._ready_stop.is_set():
-            self._publish_message(READY_TOPIC, b"")
-            self._ready_stop.wait(READY_INTERVAL_S)
+        self._streaming.publish_event(
+            event, namespace=f"replay.{session_id}"
+        )
 
     # -- control -----------------------------------------------------------
 
@@ -257,7 +234,7 @@ class ReplayServer:
             return {
                 "ok": True,
                 "session_id": session_id,
-                "publish_endpoint": self._publish_endpoint,
+                "publish_endpoint": self.publish_endpoint,
             }
 
         if op in {"stop", "pause", "resume"}:
