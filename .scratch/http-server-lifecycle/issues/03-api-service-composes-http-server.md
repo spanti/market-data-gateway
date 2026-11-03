@@ -13,4 +13,4 @@
 - [ ] 测试断言 `/healthz` 返回 200、`/readyz` 返回 200（`collector_required` 默认 false）、`/api/v1/status` 报告 `service: "api"`。
 - [ ] 测试结束调用 `stop()`，断言 HTTP 线程已退出，测试进程可继续复用端口。
 - [ ] 既有 collector → api 多进程测试与 Streaming Interface 测试保持通过。
-- [ ] 离线测试套件全绿；不修改端点行为或配置默认值。
+- [ ] 离线测试套件无新增失败（基线已知 5 个 Typer/Click 退出码失败，与本次无关）；不修改端点行为或配置默认值。

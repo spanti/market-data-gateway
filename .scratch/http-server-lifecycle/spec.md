@@ -128,6 +128,15 @@ Status: ready-for-agent
 - 新增 `ApiService` 的进程内集成测试模块。
 - 将 `GatewayRuntime` 的启动失败测试从 monkeypatch `_start_http` 改为 monkeypatch `runtime._http.start`，保留“失败后 feed / state / bus 已关闭、`_started` 为 false”的断言。
 
+### 基线说明
+
+当前 `master` 基线有 5 个与本次改动无关的失败，全部是 Typer/Click 退出码差异（期望 2、实际 1）：
+
+- `tests/integration/test_archive_backfill.py` 中四个 CLI backfill 参数校验用例；
+- `tests/unit/test_cli_flags.py` 中的未知 Service Role 用例。
+
+本次以“无新增失败”为验收标准，不修复这些既有失败。
+
 ### 既有测试先例
 
 - `tests/integration/test_bars_api.py`：端口 0 + `runtime.base_url` 的 HTTP 往返。

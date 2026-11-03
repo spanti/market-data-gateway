@@ -12,4 +12,4 @@
 - [ ] collector 与 replay 的 `ServiceHealthServer` 启动、停止、健康探测行为不变。
 - [ ] 既有多进程 Service Role 测试与 `mdgw up` 就绪探测测试保持通过。
 - [ ] 不新增 `ServiceHealthServer` 专用测试接缝；其转发行为由 `HttpServer` 测试与多进程测试共同覆盖。
-- [ ] 离线测试套件全绿；不修改 Docker health check、端口默认值或 supervisor 行为。
+- [ ] 离线测试套件无新增失败（基线已知 5 个 Typer/Click 退出码失败，与本次无关）；不修改 Docker health check、端口默认值或 supervisor 行为。

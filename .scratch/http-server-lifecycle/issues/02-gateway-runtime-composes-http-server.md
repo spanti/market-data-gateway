@@ -12,4 +12,4 @@
 - [ ] `base_url` 保持原有名称、返回类型与语义，内部委托；`start()` / `stop()` 的可见行为不变。
 - [ ] 既有 `GatewayRuntime` 端到端测试全部通过：Bars、status、Streaming Interface、replay 使用场景。
 - [ ] 启动失败回滚测试改为命中 `runtime._http.start`，并保持“失败后 feed / state / bus 已关闭、`_started` 为 false”的断言。
-- [ ] 离线测试套件全绿；不修改 HTTP 端点、ZMQ topic、Replay Protocol 或配置。
+- [ ] 离线测试套件无新增失败（基线已知 5 个 Typer/Click 退出码失败，与本次无关）；不修改 HTTP 端点、ZMQ topic、Replay Protocol 或配置。
