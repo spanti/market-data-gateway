@@ -27,8 +27,10 @@ from mdgw.store.parquet_dataset import ParquetBarStore
 from mdgw.streaming import StreamingInterface
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from datetime import datetime
     from pathlib import Path
+    from typing import Any
 
     import pyarrow as pa
 
@@ -37,12 +39,21 @@ if TYPE_CHECKING:
     from mdgw.core.bar import Bar
     from mdgw.ingest.feed_handler import FeedHandler
     from mdgw.reference.snapshot import InstrumentStore
-    from mdgw.replay.session import Publish, ReplaySessionSpec
+    from mdgw.replay.service import PublishBar, PublishEvent
+    from mdgw.replay.session import ReplaySessionSpec
     from mdgw.state.high_water_mark import HighWaterMarkStore
 
 RECEIVE_WAIT_TIMEOUT_S = 2.0
 
 logger = logging.getLogger(__name__)
+
+
+def _drop_bar(bar: Bar) -> None:
+    """Default runtime replay Bar sink (the session id is irrelevant here)."""
+
+
+def _drop_event(event: Mapping[str, Any]) -> None:
+    """Default runtime replay event sink."""
 
 
 class GatewayRuntime:
@@ -288,17 +299,28 @@ class GatewayRuntime:
         self,
         spec: ReplaySessionSpec,
         *,
-        publish: Publish | None = None,
+        publish_bar: PublishBar | None = None,
+        publish_event: PublishEvent | None = None,
     ) -> str:
         """Create a Replay Session through the runtime seam and return its id.
 
-        `publish` replaces the runtime Replay Service's message sink, which
-        receives the same `[topic][Arrow IPC]` frames a `ReplayServer` would
-        send. That lets a test observe replay events without binding ZMQ.
+        `publish_bar` and `publish_event` are typed, single-argument callbacks
+        that receive the same Bars and End of Session mapping a `ReplayServer`
+        would encode for the wire. They let a test observe replay events
+        without binding ZMQ. Either callback may be omitted.
         """
         service = self.replay_service
-        if publish is not None:
-            service.set_publish(publish)
+        bar_sink = publish_bar if publish_bar is not None else _drop_bar
+        event_sink = (
+            publish_event if publish_event is not None else _drop_event
+        )
+        # The Service seam is session-id aware because one ReplayServer PUB
+        # multiplexes every Session; the runtime has no transport, so the
+        # wrappers drop the id and keep the test-facing callbacks typed.
+        service.set_publish(
+            lambda _session_id, bar: bar_sink(bar),
+            lambda _session_id, event: event_sink(event),
+        )
         return service.create_session(spec)
 
     def _asset_class_for(self, instrument_id: str) -> str:

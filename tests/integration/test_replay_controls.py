@@ -32,12 +32,13 @@ from mdgw.core.errors import (
     InvalidParameterError,
     InvalidRangeError,
 )
-from mdgw.core.schema import INTERVALS
+from mdgw.core.schema import INTERVALS, bars_to_logical_table
 from mdgw.core.time import datetime_to_ns, iso_to_ns, ns_to_iso
 from mdgw.replay.server import ReplayServer
 from mdgw.replay.service import ReplayService
 from mdgw.replay.session import ReplaySessionSpec
 from mdgw.store.parquet_dataset import ParquetBarStore
+from mdgw.streaming import bar_topic, table_to_ipc
 
 UTC = timezone.utc
 BASE = datetime(2026, 10, 30, 0, 0, tzinfo=UTC)
@@ -143,10 +144,22 @@ class _Collector:
         self._messages: list[tuple[str, bytes]] = []
         self._cond = threading.Condition()
 
-    def __call__(self, topic: str, payload: bytes) -> None:
+    def _append(self, topic: str, payload: bytes) -> None:
         with self._cond:
             self._messages.append((topic, payload))
             self._cond.notify_all()
+
+    def publish_bar(self, session_id: str, bar: Bar) -> None:
+        self._append(
+            bar_topic(bar, namespace=f"replay.{session_id}"),
+            table_to_ipc(bars_to_logical_table([bar])),
+        )
+
+    def publish_event(self, session_id: str, event: dict[str, Any]) -> None:
+        self._append(
+            f"replay.{session_id}.control",
+            json.dumps(event, ensure_ascii=False).encode("utf-8"),
+        )
 
     def snapshot(self) -> list[tuple[str, bytes]]:
         with self._cond:
@@ -258,7 +271,11 @@ class _GatePublisher:
         self._lock = threading.Lock()
         self._first = True
 
-    def __call__(self, topic: str, payload: bytes) -> None:
+    def _append(self, topic: str, payload: bytes) -> None:
+        with self._lock:
+            self.messages.append((topic, payload))
+
+    def publish_bar(self, session_id: str, bar: Bar) -> None:
         with self._lock:
             if self._first:
                 self._first = False
@@ -268,8 +285,16 @@ class _GatePublisher:
         if block:
             self.entered.set()
             assert self.release.wait(5), "test never released the first publish"
-        with self._lock:
-            self.messages.append((topic, payload))
+        self._append(
+            bar_topic(bar, namespace=f"replay.{session_id}"),
+            table_to_ipc(bars_to_logical_table([bar])),
+        )
+
+    def publish_event(self, session_id: str, event: dict[str, Any]) -> None:
+        self._append(
+            f"replay.{session_id}.control",
+            json.dumps(event, ensure_ascii=False).encode("utf-8"),
+        )
 
 
 # -- realtime --------------------------------------------------------------
@@ -280,7 +305,10 @@ def test_realtime_streams_ordered_bars_then_end_of_session(tmp_path: Path) -> No
     _populate_ordering(store)
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: "rpl-rt"
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: "rpl-rt"
     )
 
     spec = _spec(
@@ -324,7 +352,10 @@ def test_realtime_pause_freezes_the_clock_and_resume_advances(
     _populate_minutes(store, range(1))  # close = start_ts + 1m
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: "rpl-pause"
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: "rpl-pause"
     )
     session_id = service.create_session(_spec(mode="realtime", speed=1.0))
     try:
@@ -369,7 +400,10 @@ def test_set_speed_while_paused_is_applied_on_resume(tmp_path: Path) -> None:
     _populate_minutes(store, range(1))
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: "rpl-speed"
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: "rpl-speed"
     )
     session_id = service.create_session(_spec(mode="realtime", speed=1.0))
     try:
@@ -399,7 +433,10 @@ def test_stop_while_paused_sends_stopped_eos(tmp_path: Path) -> None:
     _populate_minutes(store, range(2))
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: "rpl-stop-paused"
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: "rpl-stop-paused"
     )
     session_id = service.create_session(_spec(mode="realtime", speed=1.0))
     try:
@@ -428,7 +465,10 @@ def test_step_sends_exactly_the_credited_bars(tmp_path: Path) -> None:
     _populate_minutes(store, range(5))
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: "rpl-step"
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: "rpl-step"
     )
     session_id = service.create_session(_spec(mode="step"))
     try:
@@ -468,7 +508,10 @@ def test_step_credits_accumulate(tmp_path: Path) -> None:
     store = _BlockingReadStore(inner, gate)
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: "rpl-credit"
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: "rpl-credit"
     )
     session_id = service.create_session(_spec(mode="step"))
     try:
@@ -494,7 +537,10 @@ def test_step_last_bar_sends_eos_without_another_credit(tmp_path: Path) -> None:
     _populate_minutes(store, range(1))
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: "rpl-last"
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: "rpl-last"
     )
     session_id = service.create_session(_spec(mode="step"))
     try:
@@ -513,7 +559,10 @@ def test_step_empty_session_sends_eos_immediately(tmp_path: Path) -> None:
     store = ParquetBarStore(tmp_path / "data")
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: "rpl-empty"
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: "rpl-empty"
     )
     session_id = service.create_session(_spec(mode="step"))
 
@@ -533,7 +582,10 @@ def test_step_control_is_not_blocked_by_a_slow_publish(tmp_path: Path) -> None:
     _populate_minutes(store, range(2))
     publisher = _GatePublisher()
     service = ReplayService(
-        store, publish=publisher, session_id_factory=lambda: "rpl-step-block"
+        store,
+        publish_bar=publisher.publish_bar,
+        publish_event=publisher.publish_event,
+        session_id_factory=lambda: "rpl-step-block"
     )
     session_id = service.create_session(_spec(mode="step"))
     try:
@@ -571,7 +623,10 @@ def test_seek_while_running_is_rejected(tmp_path: Path) -> None:
     _populate_minutes(store, range(3))
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: "rpl-seek-run"
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: "rpl-seek-run"
     )
     session_id = service.create_session(_spec(mode="realtime", speed=1.0))
     try:
@@ -595,7 +650,10 @@ def test_seek_forward_skips_bars_while_paused(tmp_path: Path) -> None:
     _populate_minutes(store, range(4))  # close 1, 2, 3, 4 minutes
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: "rpl-seek-skip"
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: "rpl-seek-skip"
     )
     session_id = service.create_session(_spec(mode="step"))
     try:
@@ -620,7 +678,10 @@ def test_seek_backward_resends_already_sent_bars(tmp_path: Path) -> None:
     _populate_minutes(store, range(3))
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: "rpl-seek-back"
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: "rpl-seek-back"
     )
     session_id = service.create_session(_spec(mode="step"))
     try:
@@ -646,7 +707,10 @@ def test_seek_to_the_end_sends_eos(tmp_path: Path) -> None:
     _populate_minutes(store, range(2))
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: "rpl-seek-end"
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: "rpl-seek-end"
     )
     session_id = service.create_session(_spec(mode="step"))
     try:
@@ -671,7 +735,10 @@ def test_realtime_seek_to_the_end_while_paused_sends_eos(tmp_path: Path) -> None
     _populate_minutes(store, range(2))
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: "rpl-rt-seek-end"
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: "rpl-rt-seek-end"
     )
     session_id = service.create_session(_spec(mode="realtime", speed=1.0))
     try:
@@ -694,7 +761,10 @@ def test_seek_outside_the_session_range_is_invalid_range(tmp_path: Path) -> None
     _populate_minutes(store, range(2))
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: "rpl-seek-range"
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: "rpl-seek-range"
     )
     session_id = service.create_session(_spec(mode="step"))
     try:
@@ -716,7 +786,10 @@ def test_asap_rejects_every_control_op(tmp_path: Path) -> None:
     store = _BlockingReadStore(inner, gate)
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: "rpl-asap-ctl"
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: "rpl-asap-ctl"
     )
     session_id = service.create_session(_spec(mode="asap"))
     try:
@@ -742,7 +815,7 @@ def test_realtime_rejects_step(tmp_path: Path) -> None:
     store = ParquetBarStore(tmp_path / "data")
     _populate_minutes(store, range(2))
     service = ReplayService(
-        store, publish=_Collector(), session_id_factory=lambda: "rpl-rt-step"
+        store, session_id_factory=lambda: "rpl-rt-step"
     )
     session_id = service.create_session(_spec(mode="realtime", speed=1.0))
     try:
@@ -758,7 +831,7 @@ def test_step_rejects_resume_and_set_speed(tmp_path: Path) -> None:
     store = ParquetBarStore(tmp_path / "data")
     _populate_minutes(store, range(2))
     service = ReplayService(
-        store, publish=_Collector(), session_id_factory=lambda: "rpl-step-ctl"
+        store, session_id_factory=lambda: "rpl-step-ctl"
     )
     session_id = service.create_session(_spec(mode="step"))
     try:
@@ -777,7 +850,10 @@ def test_finished_session_rejects_controls_but_stop_is_ok(tmp_path: Path) -> Non
     _populate_minutes(store, range(1))
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: "rpl-finished"
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: "rpl-finished"
     )
     session_id = service.create_session(_spec(mode="asap"))
     collector.wait_control(session_id, timeout=10)
@@ -807,7 +883,10 @@ def test_two_step_sessions_do_not_affect_each_other(tmp_path: Path) -> None:
     collector = _Collector()
     ids = iter(["rpl-iso-a", "rpl-iso-b"])
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: next(ids)
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: next(ids)
     )
     first = service.create_session(_spec(mode="step"))
     second = service.create_session(_spec(mode="step"))

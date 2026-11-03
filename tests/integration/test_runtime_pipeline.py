@@ -6,15 +6,16 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from mdgw.bus.zmq_bus import ipc_to_table
 from mdgw.config import load_config
+from mdgw.core.bar import Bar
 from mdgw.ingest.fake import BarInput, FakeFeedHandler
 from mdgw.replay.session import ReplaySessionSpec
 from mdgw.runtime import GatewayRuntime
-from mdgw.streaming import StreamingInterface
+from mdgw.streaming import StreamingInterface, bar_topic
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -191,12 +192,17 @@ def test_runtime_replay_seam_streams_collected_bars_in_close_order(
     feed = FakeFeedHandler(
         instrument_id="binance:BTC/USDT", bars=_three_closed_bars()
     )
-    events: list[tuple[str, bytes]] = []
+    bars: list[Bar] = []
+    events: list[dict[str, Any]] = []
     lock = threading.Lock()
 
-    def _publish(topic: str, payload: bytes) -> None:
+    def _publish_bar(bar: Bar) -> None:
         with lock:
-            events.append((topic, payload))
+            bars.append(bar)
+
+    def _publish_event(event: dict[str, Any]) -> None:
+        with lock:
+            events.append(event)
 
     with GatewayRuntime(
         feed_handler=feed, config=_config(), data_root=tmp_path
@@ -206,36 +212,30 @@ def test_runtime_replay_seam_streams_collected_bars_in_close_order(
         assert runtime.received_bar_count == 3
 
         session_id = runtime.create_replay_session(
-            _replay_spec(), publish=_publish
+            _replay_spec(),
+            publish_bar=_publish_bar,
+            publish_event=_publish_event,
         )
         assert runtime.replay_service.wait_session(session_id, timeout=10)
 
     with lock:
-        collected = list(events)
+        collected_bars = list(bars)
+        collected_events = list(events)
 
-    market = [
-        (topic, payload)
-        for topic, payload in collected
-        if topic.startswith(f"replay.{session_id}.market.")
-    ]
-    assert [topic for topic, _ in market] == [
-        f"replay.{session_id}.market.bar.1m.binance:BTC/USDT"
-    ] * 3
+    assert [
+        bar_topic(bar, namespace=f"replay.{session_id}")
+        for bar in collected_bars
+    ] == [f"replay.{session_id}.market.bar.1m.binance:BTC/USDT"] * 3
 
-    close_ts = [
-        ipc_to_table(payload).column("close_ts").to_pylist()[0]
-        for _, payload in market
-    ]
     start = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
-    assert close_ts == [
+    assert [bar.close_ts for bar in collected_bars] == [
         start + timedelta(minutes=1),
         start + timedelta(minutes=2),
         start + timedelta(minutes=3),
     ]
 
-    control_topic, control_payload = collected[-1]
-    assert control_topic == f"replay.{session_id}.control"
-    end = json.loads(control_payload)
+    end = collected_events[-1]
+    assert end["session_id"] == session_id
     assert end["reason"] == "exhausted"
     assert end["bars_sent"] == 3
 
@@ -244,12 +244,12 @@ def test_runtime_stop_closes_active_replay_sessions(tmp_path: Path) -> None:
     feed = FakeFeedHandler(
         instrument_id="binance:BTC/USDT", bars=_three_closed_bars()
     )
-    events: list[tuple[str, bytes]] = []
+    events: list[dict[str, Any]] = []
     lock = threading.Lock()
 
-    def _publish(topic: str, payload: bytes) -> None:
+    def _publish_event(event: dict[str, Any]) -> None:
         with lock:
-            events.append((topic, payload))
+            events.append(event)
 
     runtime = GatewayRuntime(
         feed_handler=feed, config=_config(), data_root=tmp_path
@@ -259,7 +259,7 @@ def test_runtime_stop_closes_active_replay_sessions(tmp_path: Path) -> None:
         runtime.ingest()
         # A step Session stays alive until it receives credits.
         session_id = runtime.create_replay_session(
-            _replay_spec(replay_mode="step"), publish=_publish
+            _replay_spec(replay_mode="step"), publish_event=_publish_event
         )
         service = runtime.replay_service
     finally:
@@ -268,6 +268,6 @@ def test_runtime_stop_closes_active_replay_sessions(tmp_path: Path) -> None:
     assert service.session_status(session_id) == "stopped"
     assert runtime._replay_service is None
     with lock:
-        control_topic, control_payload = events[-1]
-    assert control_topic == f"replay.{session_id}.control"
-    assert json.loads(control_payload)["reason"] == "stopped"
+        end = events[-1]
+    assert end["session_id"] == session_id
+    assert end["reason"] == "stopped"

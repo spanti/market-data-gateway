@@ -17,18 +17,20 @@ from typing import TYPE_CHECKING, Any
 
 import zmq
 
-from mdgw.bus.zmq_bus import READY_TOPIC
 from mdgw.core.errors import (
     INTERNAL_ERROR,
     GatewayError,
     InvalidParameterError,
 )
+from mdgw.core.schema import bars_to_logical_table
 from mdgw.core.time import iso_to_ns
 from mdgw.replay.session import ReplaySessionSpec
+from mdgw.streaming import READY_TOPIC, bar_topic, table_to_ipc
 
 if TYPE_CHECKING:
     from typing import Self
 
+    from mdgw.core.bar import Bar
     from mdgw.replay.service import ReplayService
 
 logger = logging.getLogger(__name__)
@@ -112,7 +114,7 @@ class ReplayServer:
 
             self._publisher = publisher
             self._controller = controller
-            self._service.set_publish(self._publish_message)
+            self._service.set_publish(self._publish_bar, self._publish_event)
 
             self._stop.clear()
             self._ready_stop.clear()
@@ -167,6 +169,18 @@ class ReplayServer:
         self.stop()
 
     # -- publishing --------------------------------------------------------
+
+    def _publish_bar(self, session_id: str, bar: Bar) -> None:
+        # Temporary adapter for this ticket: Replay still owns its PUB, but
+        # topic/IPC construction already comes from the Streaming Interface.
+        topic = bar_topic(bar, namespace=f"replay.{session_id}")
+        payload = table_to_ipc(bars_to_logical_table([bar]))
+        self._publish_message(topic, payload)
+
+    def _publish_event(self, session_id: str, event: Mapping[str, Any]) -> None:
+        topic = f"replay.{session_id}.control"
+        payload = json.dumps(event, ensure_ascii=False).encode("utf-8")
+        self._publish_message(topic, payload)
 
     def _publish_message(self, topic: str, payload: bytes) -> None:
         with self._publish_lock:

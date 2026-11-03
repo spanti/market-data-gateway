@@ -9,19 +9,20 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Mapping
+from functools import partial
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from mdgw.core.bar import Bar
 from mdgw.core.errors import (
     InvalidParameterError,
     SessionNotFoundError,
     UnknownInstrumentError,
 )
-from mdgw.replay.session import Publish, ReplaySession, ReplaySessionSpec
+from mdgw.replay.session import ReplaySession, ReplaySessionSpec
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from mdgw.reference import InstrumentStore
     from mdgw.store.parquet_dataset import ParquetBarStore
 
@@ -29,9 +30,19 @@ logger = logging.getLogger(__name__)
 
 SESSION_ID_PREFIX = "rpl-"
 
+#: Typed publish seam between the Replay Service and its transport adapter.
+#: The session id is part of the callback because one PUB socket multiplexes
+#: several concurrent Sessions under distinct `replay.<session_id>.` topics.
+PublishBar = Callable[[str, Bar], None]
+PublishEvent = Callable[[str, Mapping[str, Any]], None]
 
-def _null_publish(topic: str, payload: bytes) -> None:
-    """Default publisher for transport-free use (messages are dropped)."""
+
+def _null_publish_bar(session_id: str, bar: Bar) -> None:
+    """Default Bar sink for transport-free use (messages are dropped)."""
+
+
+def _null_publish_event(session_id: str, event: Mapping[str, Any]) -> None:
+    """Default event sink for transport-free use (messages are dropped)."""
 
 
 def default_session_id_factory() -> str:
@@ -48,7 +59,8 @@ class ReplayService:
         *,
         max_sessions: int = 4,
         heartbeat_s: float = 1.0,
-        publish: Publish | None = None,
+        publish_bar: PublishBar | None = None,
+        publish_event: PublishEvent | None = None,
         session_id_factory: Callable[[], str] | None = None,
         instrument_store: InstrumentStore | None = None,
     ) -> None:
@@ -61,7 +73,8 @@ class ReplayService:
         self._store = store
         self._max_sessions = max_sessions
         self._heartbeat_s = heartbeat_s
-        self._publish: Publish = publish or _null_publish
+        self._publish_bar: PublishBar = publish_bar or _null_publish_bar
+        self._publish_event: PublishEvent = publish_event or _null_publish_event
         self._session_id_factory = session_id_factory or default_session_id_factory
         # When supplied, every subscription must name an Instrument present in
         # the snapshot (Delisted Instruments included). Without a snapshot the
@@ -74,9 +87,12 @@ class ReplayService:
 
     # -- wiring ------------------------------------------------------------
 
-    def set_publish(self, publish: Publish) -> None:
-        """Replace the message sink, e.g. once `ReplayServer` binds its PUB."""
-        self._publish = publish
+    def set_publish(
+        self, publish_bar: PublishBar, publish_event: PublishEvent
+    ) -> None:
+        """Replace the typed message sinks, e.g. once `ReplayServer` binds PUB."""
+        self._publish_bar = publish_bar
+        self._publish_event = publish_event
 
     # -- control surface ---------------------------------------------------
 
@@ -106,7 +122,8 @@ class ReplayService:
                 session_id,
                 spec,
                 self._store,
-                self._send,
+                partial(self._send_bar, session_id),
+                partial(self._send_event, session_id),
                 heartbeat_s=self._heartbeat_s,
             )
             self._sessions[session_id] = session
@@ -211,10 +228,13 @@ class ReplayService:
                     details={"instrument_id": subscription.instrument_id},
                 )
 
-    def _send(self, topic: str, payload: bytes) -> None:
+    def _send_bar(self, session_id: str, bar: Bar) -> None:
         # Resolve the publisher at send time so `set_publish` also affects
         # Sessions that were created before the transport was bound.
-        self._publish(topic, payload)
+        self._publish_bar(session_id, bar)
+
+    def _send_event(self, session_id: str, event: Mapping[str, Any]) -> None:
+        self._publish_event(session_id, event)
 
     def _get(self, session_id: str) -> ReplaySession:
         with self._lock:
