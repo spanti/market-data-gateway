@@ -24,7 +24,7 @@ import pyarrow as pa
 import pytest
 import zmq
 
-from mdgw.bus.zmq_bus import READY_TOPIC
+from mdgw.streaming import READY_TOPIC
 from mdgw.core.bar import Bar
 from mdgw.reference import export_instrument_snapshot, load_instrument_reference
 from mdgw.store.parquet_dataset import ParquetBarStore

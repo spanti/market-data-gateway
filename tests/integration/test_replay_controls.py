@@ -24,7 +24,6 @@ from typing import Any, Callable
 import pytest
 import zmq
 
-from mdgw.bus.zmq_bus import READY_TOPIC, ipc_to_table
 from mdgw.core.bar import Bar
 from mdgw.core.errors import (
     INVALID_PARAMETER,
@@ -38,7 +37,7 @@ from mdgw.replay.server import ReplayServer
 from mdgw.replay.service import ReplayService
 from mdgw.replay.session import ReplaySessionSpec
 from mdgw.store.parquet_dataset import ParquetBarStore
-from mdgw.streaming import bar_topic, table_to_ipc
+from mdgw.streaming import READY_TOPIC, bar_topic, ipc_to_table, table_to_ipc
 
 UTC = timezone.utc
 BASE = datetime(2026, 10, 30, 0, 0, tzinfo=UTC)

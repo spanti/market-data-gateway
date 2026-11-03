@@ -328,6 +328,29 @@ def test_publish_bars_roundtrip_over_inproc_arrow_ipc() -> None:
     assert interface.received_frames == 1
 
 
+def test_publish_bars_accepts_a_per_call_namespace() -> None:
+    from mdgw.streaming import StreamingInterface
+
+    endpoint = _inproc_endpoint()
+    received: list[tuple[str, pa.Table]] = []
+    interface = StreamingInterface(bind=endpoint, connect=endpoint)
+    interface.start()
+    try:
+        interface.subscribe_bars(
+            lambda topic, table: received.append((topic, table)),
+            await_ready=True,
+        )
+        interface.publish_bars([_bar()], namespace="replay.rpl-abc")
+        _wait_until(lambda: len(received) == 1)
+    finally:
+        interface.stop()
+
+    topic, table = received[0]
+    assert topic == f"replay.rpl-abc.{BAR_TOPIC}"
+    assert table.num_rows == 1
+    assert interface.published_frames == 1
+
+
 def test_publish_bars_groups_by_interval_and_instrument() -> None:
     from mdgw.streaming import StreamingInterface
 
@@ -700,6 +723,87 @@ def test_publish_event_uses_the_namespaced_control_topic() -> None:
     assert frames[0] == b"replay.rpl-abc.control"
     assert frames[1] == b'{"event": "end_of_session"}'
     assert interface.published_frames == 0
+
+
+def test_publish_event_accepts_a_per_call_namespace() -> None:
+    from mdgw.streaming import StreamingInterface
+
+    interface = StreamingInterface(bind="tcp://127.0.0.1:0")
+    interface.start()
+    context = zmq.Context()
+    subscriber = context.socket(zmq.SUB)
+    subscriber.setsockopt(zmq.LINGER, 0)
+    subscriber.setsockopt(zmq.SUBSCRIBE, b"replay.rpl-abc.control")
+    subscriber.setsockopt(zmq.SUBSCRIBE, b"_internal.ready")
+    subscriber.connect(interface.endpoints[0])
+    try:
+        interface.mark_ready()
+        _recv_matching(
+            subscriber, lambda frames: frames[0] == b"_internal.ready"
+        )
+        interface.publish_event(
+            {"event": "end_of_session"}, namespace="replay.rpl-abc"
+        )
+        frames = _recv_matching(
+            subscriber, lambda frame: frame[0] != b"_internal.ready"
+        )
+    finally:
+        subscriber.close()
+        context.term()
+        interface.stop()
+
+    assert frames[0] == b"replay.rpl-abc.control"
+    assert frames[1] == b'{"event": "end_of_session"}'
+
+
+def test_publish_event_rejects_an_empty_effective_namespace() -> None:
+    from mdgw.streaming import StreamingInterface
+
+    named = StreamingInterface(
+        bind=_inproc_endpoint(), namespace="replay.rpl-instance"
+    )
+    named.start()
+    try:
+        for namespace in ("", "."):
+            with pytest.raises(ValueError):
+                named.publish_event(
+                    {"event": "end_of_session"}, namespace=namespace
+                )
+    finally:
+        named.stop()
+
+    nameless = StreamingInterface(bind=_inproc_endpoint())
+    nameless.start()
+    try:
+        with pytest.raises(ValueError):
+            nameless.publish_event({"event": "end_of_session"})
+        with pytest.raises(ValueError):
+            nameless.publish_event(
+                {"event": "end_of_session"}, namespace=None
+            )
+    finally:
+        nameless.stop()
+
+
+def test_publish_bars_defaults_to_the_instance_namespace() -> None:
+    from mdgw.streaming import StreamingInterface
+
+    endpoint = _inproc_endpoint()
+    received: list[str] = []
+    interface = StreamingInterface(
+        bind=endpoint, connect=endpoint, namespace="replay.rpl-default"
+    )
+    interface.start()
+    try:
+        interface.subscribe_bars(
+            lambda topic, _table: received.append(topic), await_ready=True
+        )
+        interface.publish_bars([_bar()])
+        _wait_until(lambda: len(received) == 1)
+    finally:
+        interface.stop()
+
+    assert received == [f"replay.rpl-default.{BAR_TOPIC}"]
 
 
 def test_publish_event_requires_a_namespace() -> None:
