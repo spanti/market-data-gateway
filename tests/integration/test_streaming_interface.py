@@ -24,7 +24,7 @@ import pyarrow as pa
 import pytest
 import zmq
 
-from mdgw.bus.zmq_bus import ipc_to_table
+from mdgw.streaming import ipc_to_table
 from mdgw.config import GatewayConfig, load_config
 from mdgw.core.bar import RawBar
 from mdgw.core.schema import BAR_SCHEMA
