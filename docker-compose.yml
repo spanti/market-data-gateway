@@ -54,6 +54,9 @@ services:
       - replay
       - --config
       - config/gateway.docker.toml
+    depends_on:
+      collector:
+        condition: service_healthy
     volumes:
       - ./data:/app/data
     ports:
