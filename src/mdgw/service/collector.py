@@ -2,22 +2,18 @@
 
 from __future__ import annotations
 
-import contextlib
-import json
 import logging
 import threading
 import time
-from collections import defaultdict
 from typing import TYPE_CHECKING
 
-from mdgw.bus.zmq_bus import READY_TOPIC, ZMQBus, table_to_ipc
-from mdgw.core.schema import bars_to_logical_table
 from mdgw.ingest.composite import build_configured_feed_handler
 from mdgw.metrics import MetricsRegistry
 from mdgw.service.bar_sink import BufferedBarSink
 from mdgw.service.collector_core import CollectorCore
 from mdgw.service.common import iso_to_seconds, ns_iso, update_dataset_metrics
 from mdgw.service.health_server import ServiceHealthServer
+from mdgw.streaming import StreamingInterface
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -29,8 +25,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MARKET_BAR_TOPIC_PREFIX = "market.bar."
-READY_INTERVAL_S = 0.05
 STATUS_INTERVAL_S = 1.0
 POLL_INTERVAL_S = 0.05
 ERROR_BACKOFF_S = 1.0
@@ -69,9 +63,8 @@ class CollectorService:
         self._last_written_metric = 0.0
         self._written_metric_lock = threading.Lock()
 
-        self._bus: ZMQBus | None = None
+        self._streaming: StreamingInterface | None = None
         self._health_server: ServiceHealthServer | None = None
-        self._publish_endpoint: str | None = None
 
         # `None` means "use [service].wait_for_api_ready". The CLI overrides it
         # with --wait-for-api/--no-wait-for-api.
@@ -80,10 +73,6 @@ class CollectorService:
             if wait_for_api is None
             else wait_for_api
         )
-        self._api_ready = threading.Event()
-        # `ZMQBus` consumes `READY_TOPIC` itself and exposes the observation as
-        # this event; the handler is kept for any non-READY traffic.
-        self._api_ready_signal: threading.Event | None = None
 
         self._stop = threading.Event()
         self._ready = threading.Event()
@@ -92,7 +81,6 @@ class CollectorService:
         self._last_bar_ts: datetime | None = None
 
         self._ingest_thread: threading.Thread | None = None
-        self._ready_thread: threading.Thread | None = None
         self._status_thread: threading.Thread | None = None
 
     # -- lifecycle ---------------------------------------------------------
@@ -108,18 +96,15 @@ class CollectorService:
             raise
 
     def _start_service(self) -> None:
-        self._bus = ZMQBus(zmq_hwm=self.config.bus.zmq_hwm)
-        resolved = self._bus.bind_publisher(self.config.bus.collector_pub_bind)
-        self._publish_endpoint = resolved[0]
-
-        # Observe the api READY handshake on the api PUB. This must not
-        # block startup: the api may not exist yet (standalone collector).
-        self._api_ready.clear()
-        self._api_ready_signal = self._bus.subscribe(
-            self.config.bus.api_pub_connect,
-            topic_prefix=READY_TOPIC,
-            handler=self._on_api_ready,
+        streaming = StreamingInterface(
+            bind=self.config.bus.collector_pub_bind,
+            connect=self.config.bus.api_pub_connect,
+            zmq_hwm=self.config.bus.zmq_hwm,
         )
+        self._streaming = streaming
+        streaming.start()
+        # The module owns the 50 ms READY heartbeat from here until stop().
+        streaming.mark_ready()
 
         self._health_server = ServiceHealthServer(
             service="collector",
@@ -152,11 +137,6 @@ class CollectorService:
         self._started_at = time.monotonic()
         self._ready.set()
 
-        self._ready_thread = threading.Thread(
-            target=self._run_ready_loop,
-            name="mdgw-collector-ready",
-            daemon=True,
-        )
         self._status_thread = threading.Thread(
             target=self._run_status_loop,
             name="mdgw-collector-status",
@@ -167,32 +147,27 @@ class CollectorService:
             name="mdgw-collector-ingest",
             daemon=True,
         )
-        self._ready_thread.start()
         self._status_thread.start()
         self._ingest_thread.start()
         logger.info(
             "collector service started",
             extra={
                 "event": "collector.started",
-                "publish_endpoint": self._publish_endpoint,
+                "publish_endpoint": streaming.endpoints[0],
             },
         )
 
     def stop(self) -> None:
         self._ready.clear()
-        self._api_ready.clear()
-        self._api_ready_signal = None
         self._stop.set()
 
-        for thread in (
-            self._ingest_thread,
-            self._ready_thread,
-            self._status_thread,
-        ):
+        # Stop both publishing threads before the Streaming Interface: they
+        # must not observe a closed socket (publish is a no-op after stop, but
+        # joining first keeps the shutdown deterministic).
+        for thread in (self._ingest_thread, self._status_thread):
             if thread is not None:
                 thread.join(timeout=10)
         self._ingest_thread = None
-        self._ready_thread = None
         self._status_thread = None
 
         close = getattr(self._feed_handler, "close", None)
@@ -202,10 +177,9 @@ class CollectorService:
             except Exception:  # pragma: no cover - defensive shutdown path
                 logger.exception("error closing Feed Handler")
 
-        if self._bus is not None:
-            self._bus.close()
-            self._bus = None
-        self._publish_endpoint = None
+        if self._streaming is not None:
+            self._streaming.stop()
+            self._streaming = None
         if self._health_server is not None:
             self._health_server.stop()
             self._health_server = None
@@ -217,9 +191,10 @@ class CollectorService:
 
     @property
     def publish_endpoint(self) -> str:
-        if self._publish_endpoint is None:
+        streaming = self._streaming
+        if streaming is None or not streaming.endpoints:
             raise RuntimeError(_NOT_STARTED_MESSAGE)
-        return self._publish_endpoint
+        return streaming.endpoints[0]
 
     @property
     def health_url(self) -> str:
@@ -262,56 +237,50 @@ class CollectorService:
                 self._stop.wait(POLL_INTERVAL_S)
 
     def _publish_bars(self, bars: list[Bar]) -> None:
-        bus = self._bus
-        if bus is None:
+        streaming = self._streaming
+        if streaming is None:
             return
-        groups: dict[tuple[str, str], list[Bar]] = defaultdict(list)
-        for bar in bars:
-            groups[bar.interval, bar.instrument_id].append(bar)
-
-        for (interval, instrument_id), group in groups.items():
-            topic = f"{MARKET_BAR_TOPIC_PREFIX}{interval}.{instrument_id}"
-            bus.publish(topic, table_to_ipc(bars_to_logical_table(group)))
-            self.metrics.inc("mdgw_collector_zmq_publishes_total")
+        # `publish_bars` groups internally; the counter delta gives the exact
+        # number of Bar frames actually sent without re-implementing grouping.
+        before = streaming.published_frames
+        streaming.publish_bars(bars)
+        published = streaming.published_frames - before
+        if published:
+            self.metrics.inc(
+                "mdgw_collector_zmq_publishes_total", amount=published
+            )
 
         last = max(bar.close_ts for bar in bars)
         self._last_bar_ts = last
 
     # -- readiness / status ------------------------------------------------
 
-    def _on_api_ready(self, _topic: str, _payload: bytes) -> None:
-        """ZMQ subscriber callback: the api PUB forwarded our READY."""
-        self._api_ready.set()
-
-    def _api_ready_observed(self) -> bool:
-        if self._api_ready.is_set():
-            return True
-        signal = self._api_ready_signal
-        return signal is not None and signal.is_set()
-
     def _wait_for_api_ready(self) -> bool:
         """Wait for the api READY handshake when configured.
 
-        Returns ``True`` immediately when waiting is disabled or the event was
-        already observed. Returns ``False`` after `api_ready_timeout_s` and
+        Returns ``True`` immediately when waiting is disabled or a peer READY
+        was already observed. Returns ``False`` after `api_ready_timeout_s` and
         logs `collector.api_ready_timeout` so a split deployment can proceed.
         """
         if not self._wait_for_api:
             return True
-        if self._api_ready_observed():
-            return True
+
+        streaming = self._streaming
+        if streaming is None:
+            return False
 
         timeout = self.config.service.api_ready_timeout_s
         deadline = time.monotonic() + timeout
-        while not self._api_ready_observed():
+        while not streaming.peer_ready:
             if self._stop.is_set():
                 return False
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            self._api_ready.wait(min(remaining, 0.1))
+            if streaming.wait_until_peer_ready(min(remaining, 0.1)):
+                return True
 
-        if self._api_ready_observed():
+        if streaming.peer_ready:
             return True
         logger.warning(
             "api did not signal readiness before the ingest deadline",
@@ -322,31 +291,17 @@ class CollectorService:
         )
         return False
 
-    def _run_ready_loop(self) -> None:
-        while not self._stop.is_set():
-            bus = self._bus
-            if bus is not None:
-                with contextlib.suppress(RuntimeError):
-                    bus.publish(READY_TOPIC, b"")
-            self._stop.wait(READY_INTERVAL_S)
-
     def _run_status_loop(self) -> None:
         while not self._stop.is_set():
             self._publish_status()
             self._stop.wait(STATUS_INTERVAL_S)
 
     def _publish_status(self) -> None:
-        bus = self._bus
-        if bus is None:
+        streaming = self._streaming
+        if streaming is None:
             return
         try:
-            payload = self.status_payload()
-            bus.publish(
-                "_internal.status",
-                json.dumps(payload, ensure_ascii=False, default=str).encode(
-                    "utf-8"
-                ),
-            )
+            streaming.publish_status(self.status_payload())
         except Exception:  # pragma: no cover - defensive status path
             logger.debug("collector status publish failed", exc_info=True)
 
