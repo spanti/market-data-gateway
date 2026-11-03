@@ -1,8 +1,12 @@
-"""ZMQ in-process bus and Arrow IPC wire codec.
+"""ZMQ in-process bus retained for not-yet-migrated callers.
 
 Every published message is a two-frame multipart message: `[topic][Arrow IPC
 stream]`, matching the Streaming Interface. The ready topic exists only to
 solve the PUB/SUB slow-joiner problem described in DESIGN §2.2.
+
+The Arrow IPC codec and `READY_TOPIC` are owned by `mdgw.streaming` and only
+re-exported here, so there is exactly one implementation. `ZMQBus` itself is
+scheduled for removal once every caller uses `StreamingInterface`.
 """
 
 from __future__ import annotations
@@ -13,13 +17,14 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import pyarrow as pa
 import zmq
+
+from mdgw.streaming import READY_TOPIC, ipc_to_table, table_to_ipc
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
-READY_TOPIC = "_internal.ready"
+__all__ = ["READY_TOPIC", "ZMQBus", "ipc_to_table", "table_to_ipc"]
 
 logger = logging.getLogger(__name__)
 
@@ -33,17 +38,6 @@ class _Subscription:
     ready_event: threading.Event
     sub_id: str
     thread: threading.Thread | None = None
-
-
-def table_to_ipc(table: pa.Table) -> bytes:
-    sink = pa.BufferOutputStream()
-    with pa.ipc.new_stream(sink, table.schema) as writer:
-        writer.write_table(table)
-    return sink.getvalue().to_pybytes()
-
-
-def ipc_to_table(payload: bytes) -> pa.Table:
-    return pa.ipc.open_stream(pa.BufferReader(payload)).read_all()
 
 
 class ZMQBus:
