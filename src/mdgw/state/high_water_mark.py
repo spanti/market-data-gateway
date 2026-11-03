@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from typing import Self
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS data_hwm (
@@ -91,7 +92,7 @@ class HighWaterMarkStore:
                 self._conn.close()
                 self._conn = None
 
-    def __enter__(self) -> "HighWaterMarkStore":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> None:
@@ -99,5 +100,6 @@ class HighWaterMarkStore:
 
     def _connection(self) -> sqlite3.Connection:
         if self._conn is None:
-            raise sqlite3.ProgrammingError("HighWaterMarkStore is closed")
+            msg = "HighWaterMarkStore is closed"
+            raise sqlite3.ProgrammingError(msg)
         return self._conn

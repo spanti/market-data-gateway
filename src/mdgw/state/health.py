@@ -1,7 +1,7 @@
 """Collector health: stale detection and unrecoverable-gap events.
 
 Staleness is tracked per `(feed, instrument_id, interval)` using the Bar's
-`event_ts` (its `close_ts`). The threshold is `max(2 × interval, stale_after_s)`
+`event_ts` (its `close_ts`). The threshold is `max(2 * interval, stale_after_s)`
 so a coarse interval is not declared stale just because it only closes hourly.
 
 `gap_unrecoverable` events are an in-memory, append-only audit list for v1.
@@ -13,11 +13,15 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from datetime import datetime
+from typing import TYPE_CHECKING
 
-from mdgw.core.bar import Bar
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import datetime_to_ns, ns_to_iso, to_utc, utc_now
+
+if TYPE_CHECKING:
+    from datetime import datetime
+
+    from mdgw.core.bar import Bar
 
 GAP_HISTORY_UNSUPPORTED = "history_unsupported"
 GAP_BACKFILL_LIMIT = "backfill_limit_exceeded"
@@ -36,7 +40,7 @@ class GapEvent:
 
 
 def stale_threshold_s(interval: str, stale_after_s: float) -> float:
-    """`max(2 × Bar Interval, configured minimum)`, in seconds."""
+    """`max(2 * Bar Interval, configured minimum)`, in seconds."""
     interval_s = INTERVALS[interval].total_seconds()
     return max(2 * interval_s, float(stale_after_s))
 
@@ -95,7 +99,7 @@ class HealthTracker:
             if previous is None or event_ts > previous:
                 self._last_event[key] = event_ts
 
-    def record_gap(
+    def record_gap(  # ruff: ignore[too-many-arguments] - keyword-only gap fields
         self,
         *,
         instrument_id: str,
@@ -178,12 +182,16 @@ class HealthTracker:
         }
 
 
+def _ts_to_iso(value: datetime | None) -> str | None:
+    return None if value is None else ns_to_iso(datetime_to_ns(value))
+
+
 def _gap_to_dict(event: GapEvent) -> dict:
     return {
         "instrument_id": event.instrument_id,
         "interval": event.interval,
-        "from_ts": None if event.from_ts is None else ns_to_iso(datetime_to_ns(event.from_ts)),
-        "to_ts": None if event.to_ts is None else ns_to_iso(datetime_to_ns(event.to_ts)),
+        "from_ts": _ts_to_iso(event.from_ts),
+        "to_ts": _ts_to_iso(event.to_ts),
         "reason": event.reason,
-        "recorded_at": ns_to_iso(datetime_to_ns(event.recorded_at)),
+        "recorded_at": _ts_to_iso(event.recorded_at),
     }
