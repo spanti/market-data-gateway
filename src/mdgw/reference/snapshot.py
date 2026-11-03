@@ -12,7 +12,6 @@ mutating the old one.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -89,9 +88,8 @@ def export_instrument_snapshot(
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise InstrumentSnapshotError(
-            f"cannot create Instrument Snapshot directory {directory}: {exc}"
-        ) from exc
+        message = f"cannot create Instrument Snapshot directory {directory}: {exc}"
+        raise InstrumentSnapshotError(message) from exc
 
     temporary = directory / f".{path.name}.{uuid4().hex}.tmp"
     try:
@@ -102,12 +100,11 @@ def export_instrument_snapshot(
             use_deprecated_int96_timestamps=False,
             compression="zstd",
         )
-        os.replace(temporary, path)
+        temporary.replace(path)
     except Exception as exc:
         temporary.unlink(missing_ok=True)
-        raise InstrumentSnapshotError(
-            f"failed to write Instrument Snapshot {path}: {exc}"
-        ) from exc
+        message = f"failed to write Instrument Snapshot {path}: {exc}"
+        raise InstrumentSnapshotError(message) from exc
 
     return SnapshotExport(path=path, config_hash=reference.config_hash, created=True)
 
@@ -198,19 +195,20 @@ def instrument_to_json(instrument: Instrument) -> dict[str, Any]:
 
 def _read_snapshot(path: Path) -> list[Instrument]:
     if not path.exists():
-        raise InstrumentSnapshotError(f"Instrument Snapshot does not exist: {path}")
+        message = f"Instrument Snapshot does not exist: {path}"
+        raise InstrumentSnapshotError(message)
     try:
         table = pq.read_table(path)
     except Exception as exc:
-        raise InstrumentSnapshotError(
-            f"cannot read Instrument Snapshot {path}: {exc}"
-        ) from exc
+        message = f"cannot read Instrument Snapshot {path}: {exc}"
+        raise InstrumentSnapshotError(message) from exc
 
     if table.schema != INSTRUMENT_SCHEMA:
-        raise InstrumentSnapshotError(
+        message = (
             f"Instrument Snapshot {path} schema does not match the Instrument "
             f"Data Contract: {table.schema}"
         )
+        raise InstrumentSnapshotError(message)
 
     listing_ns = table.column("listing_ts").cast(pa.int64()).to_pylist()
     delisted_ns = table.column("delisted_ts").cast(pa.int64()).to_pylist()
@@ -249,11 +247,11 @@ def _validate_snapshot_schema(path: Path) -> None:
     try:
         schema = pq.read_schema(path)
     except Exception as exc:
-        raise InstrumentSnapshotError(
-            f"cannot read existing Instrument Snapshot {path}: {exc}"
-        ) from exc
+        message = f"cannot read existing Instrument Snapshot {path}: {exc}"
+        raise InstrumentSnapshotError(message) from exc
     if schema != INSTRUMENT_SCHEMA:
-        raise InstrumentSnapshotError(
+        message = (
             f"existing Instrument Snapshot {path} schema does not match the "
             f"Instrument Data Contract: {schema}"
         )
+        raise InstrumentSnapshotError(message)

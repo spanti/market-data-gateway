@@ -83,10 +83,11 @@ def load_instrument_reference(directory: Path) -> InstrumentReference:
             instrument = _validate_entry(raw, location)
             previous = seen.get(instrument.instrument_id)
             if previous is not None:
-                raise InstrumentReferenceError(
+                message = (
                     f"{location}: duplicate instrument_id "
                     f"{instrument.instrument_id!r} (already defined at {previous})"
                 )
+                raise InstrumentReferenceError(message)
             seen[instrument.instrument_id] = location
             instruments.append(instrument)
 
@@ -101,9 +102,8 @@ def _reference_files(directory: Path) -> list[Path]:
     if not directory.exists():
         return []
     if not directory.is_dir():
-        raise InstrumentReferenceError(
-            f"Instrument Reference Data path is not a directory: {directory}"
-        )
+        message = f"Instrument Reference Data path is not a directory: {directory}"
+        raise InstrumentReferenceError(message)
     return sorted(
         (path for path in directory.iterdir() if path.suffix in {".yaml", ".yml"}),
         key=lambda path: path.name,
@@ -128,39 +128,39 @@ def _read_yaml_list(path: Path) -> list[Any]:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise InstrumentReferenceError(f"{path.name}: cannot read file: {exc}") from exc
+        message = f"{path.name}: cannot read file: {exc}"
+        raise InstrumentReferenceError(message) from exc
 
     try:
         document = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise InstrumentReferenceError(f"{path.name}: invalid YAML: {exc}") from exc
+        message = f"{path.name}: invalid YAML: {exc}"
+        raise InstrumentReferenceError(message) from exc
 
     if not isinstance(document, list):
-        raise InstrumentReferenceError(
-            f"{path.name}: document must be a list of Instrument mappings"
-        )
+        message = f"{path.name}: document must be a list of Instrument mappings"
+        raise InstrumentReferenceError(message)
     return document
 
 
 def _validate_entry(raw: Any, location: str) -> Instrument:
     if not isinstance(raw, Mapping):
-        raise InstrumentReferenceError(
-            f"{location}: entry must be an Instrument mapping"
-        )
+        message = f"{location}: entry must be an Instrument mapping"
+        raise InstrumentReferenceError(message)
     entry = dict(raw)
 
     unknown = sorted(set(entry) - KNOWN_FIELDS)
     if unknown:
-        raise InstrumentReferenceError(
-            f"{location}: unknown field(s): {', '.join(unknown)}"
-        )
+        message = f"{location}: unknown field(s): {', '.join(unknown)}"
+        raise InstrumentReferenceError(message)
     missing = [field for field in REQUIRED_FIELDS if field not in entry]
     if missing:
         if len(missing) == 1:
             detail = f"missing required field {missing[0]!r}"
         else:
             detail = f"missing required field(s): {', '.join(missing)}"
-        raise InstrumentReferenceError(f"{location}: {detail}")
+        message = f"{location}: {detail}"
+        raise InstrumentReferenceError(message)
 
     strings = {
         field: _require_string(entry[field], field, location)
@@ -170,22 +170,25 @@ def _validate_entry(raw: Any, location: str) -> Instrument:
     try:
         parsed = InstrumentId.parse(instrument_id)
     except ValueError as exc:
-        raise InstrumentReferenceError(
+        message = (
             f"{location}: instrument_id {instrument_id!r} is not a valid "
             "InstrumentId (<venue>:<symbol>)"
-        ) from exc
+        )
+        raise InstrumentReferenceError(message) from exc
 
     expected_id = f"{strings['venue']}:{strings['symbol']}"
     if instrument_id != expected_id:
-        raise InstrumentReferenceError(
+        message = (
             f"{location}: instrument_id {instrument_id!r} does not match "
             f"venue:symbol {expected_id!r}"
         )
+        raise InstrumentReferenceError(message)
     if parsed.venue != strings["venue"] or parsed.symbol != strings["symbol"]:
-        raise InstrumentReferenceError(
+        message = (
             f"{location}: instrument_id {instrument_id!r} does not match "
             f"venue:symbol {expected_id!r}"
         )
+        raise InstrumentReferenceError(message)
 
     decimals = {
         field: _parse_decimal(entry[field], field, location)
@@ -199,9 +202,8 @@ def _validate_entry(raw: Any, location: str) -> Instrument:
             entry["delisted_ts"], "delisted_ts", location
         )
         if delisted_ts_ns < listing_ts_ns:
-            raise InstrumentReferenceError(
-                f"{location}: delisted_ts must not be before listing_ts"
-            )
+            message = f"{location}: delisted_ts must not be before listing_ts"
+            raise InstrumentReferenceError(message)
 
     return Instrument(
         instrument_id=instrument_id,
@@ -222,61 +224,62 @@ def _validate_entry(raw: Any, location: str) -> Instrument:
 
 def _require_string(value: Any, field: str, location: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise InstrumentReferenceError(
-            f"{location}: field {field!r} must be a non-empty string"
-        )
+        message = f"{location}: field {field!r} must be a non-empty string"
+        raise InstrumentReferenceError(message)
     return value
 
 
 def _parse_decimal(value: Any, field: str, location: str) -> Decimal:
     """Parse a decimal field without ever routing the value through a float."""
-    if isinstance(value, bool) or isinstance(value, float):
-        raise InstrumentReferenceError(
+    if isinstance(value, (bool, float)):
+        message = (
             f"{location}: field {field!r} must not be a float; quote it as a string"
         )
+        raise InstrumentReferenceError(message)
     if isinstance(value, int):
         text = str(value)
     elif isinstance(value, str):
         text = value.strip()
         if not text:
-            raise InstrumentReferenceError(
+            message = (
                 f"{location}: field {field!r} must be a non-empty decimal string"
             )
+            raise InstrumentReferenceError(message)
     else:
-        raise InstrumentReferenceError(
+        message = (
             f"{location}: field {field!r} must be a string or integer, "
             f"not {type(value).__name__}"
         )
+        raise InstrumentReferenceError(message)
 
     try:
         number = Decimal(text)
     except InvalidOperation as exc:
-        raise InstrumentReferenceError(
-            f"{location}: field {field!r} is not a valid decimal: {value!r}"
-        ) from exc
+        message = f"{location}: field {field!r} is not a valid decimal: {value!r}"
+        raise InstrumentReferenceError(message) from exc
     if not number.is_finite():
-        raise InstrumentReferenceError(
-            f"{location}: field {field!r} must be a finite decimal"
-        )
+        message = f"{location}: field {field!r} must be a finite decimal"
+        raise InstrumentReferenceError(message)
 
-    _exponent = number.as_tuple().exponent
-    integer_digits = len(number.as_tuple().digits) + int(_exponent)
-    if int(_exponent) < -DECIMAL_SCALE or integer_digits > DECIMAL_INTEGER_DIGITS:
-        raise InstrumentReferenceError(
+    exponent = number.as_tuple().exponent
+    integer_digits = len(number.as_tuple().digits) + int(exponent)
+    if int(exponent) < -DECIMAL_SCALE or integer_digits > DECIMAL_INTEGER_DIGITS:
+        message = (
             f"{location}: field {field!r} does not fit decimal128(38, 18): {value!r}"
         )
+        raise InstrumentReferenceError(message)
     return number
 
 
 def _parse_timestamp(value: Any, field: str, location: str) -> int:
     if not isinstance(value, str) or isinstance(value, bool):
-        raise InstrumentReferenceError(
-            f"{location}: field {field!r} must be an ISO-8601 string"
-        )
+        message = f"{location}: field {field!r} must be an ISO-8601 string"
+        raise InstrumentReferenceError(message)
     try:
         return iso_to_ns(value)
     except ValueError as exc:
-        raise InstrumentReferenceError(
+        message = (
             f"{location}: field {field!r} is not a valid ISO-8601 timestamp: "
             f"{value!r}"
-        ) from exc
+        )
+        raise InstrumentReferenceError(message) from exc
