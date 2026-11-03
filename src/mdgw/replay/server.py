@@ -101,17 +101,8 @@ class ReplayServer:
                 streaming.start()
                 streaming.mark_ready()
                 context = zmq.Context()
-                controller = context.socket(zmq.REP)
-                controller.setsockopt(zmq.LINGER, 0)
-                controller.bind(
-                    _endpoint(self._control_bind_host, self._control_port)
-                )
-                self._control_endpoint = controller.getsockopt_string(
-                    zmq.LAST_ENDPOINT
-                )
-                self._service.set_publish(
-                    self._publish_bar, self._publish_event
-                )
+                controller = self._bind_control(context)
+                self._service.set_publish(self._publish_bar, self._publish_event)
             except BaseException:
                 self._control_endpoint = None
                 if controller is not None:
@@ -132,6 +123,18 @@ class ReplayServer:
                 daemon=True,
             )
             self._control_thread.start()
+
+    def _bind_control(self, context: zmq.Context) -> zmq.Socket:
+        """Create, configure and bind the REP control socket."""
+        controller = context.socket(zmq.REP)
+        controller.setsockopt(zmq.LINGER, 0)
+        controller.bind(
+            _endpoint(self._control_bind_host, self._control_port)
+        )
+        self._control_endpoint = controller.getsockopt_string(
+            zmq.LAST_ENDPOINT
+        )
+        return controller
 
     def stop(self) -> None:
         with self._lifecycle_lock:
