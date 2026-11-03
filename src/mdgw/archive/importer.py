@@ -149,6 +149,7 @@ def import_archive(
                 end=end,
                 cutoff_ns=cutoff_ns,
                 ingest_ts=ingest_time,
+                requested_granularity=granularity,
             )
 
     logger.info(
@@ -174,6 +175,7 @@ def _import_period(
     end: date,
     cutoff_ns: int | None,
     ingest_ts: datetime,
+    requested_granularity: str,
 ) -> None:
     filename = period.filename(instrument.symbol, interval)
     try:
@@ -187,6 +189,38 @@ def _import_period(
         _failure(report, instrument, feed, f"{filename}: {exc}")
         return
     if data is None:
+        if requested_granularity == "auto" and period.granularity == "monthly":
+            logger.warning(
+                "monthly archive is missing; falling back to daily files",
+                extra={
+                    "event": "archive.monthly_missing_fallback_daily",
+                    "feed": feed,
+                    "instrument_id": instrument.instrument_id,
+                },
+            )
+            fallback_start = max(start, period.start)
+            fallback_end = min(end, period.end)
+            day = fallback_start
+            while day <= fallback_end:
+                _import_period(
+                    instrument=instrument,
+                    period=ArchivePeriod("daily", day, day),
+                    report=report,
+                    store=store,
+                    hwm=hwm,
+                    aggregator=aggregator,
+                    fetcher=fetcher,
+                    feed=feed,
+                    market_type=market_type,
+                    interval=interval,
+                    start=start,
+                    end=end,
+                    cutoff_ns=cutoff_ns,
+                    ingest_ts=ingest_ts,
+                    requested_granularity=requested_granularity,
+                )
+                day += timedelta(days=1)
+            return
         report.missing_files += 1
         logger.warning(
             "archive file is missing",

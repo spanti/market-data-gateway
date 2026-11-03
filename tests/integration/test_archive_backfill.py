@@ -189,6 +189,50 @@ def _rows(store: ParquetBarStore, interval: str) -> list[dict]:
     ).to_pylist()
 
 
+def _write_cli_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    """Write a minimal config + Instrument Reference Data for CLI tests."""
+    data_root = tmp_path / "data"
+    instruments_dir = tmp_path / "instruments"
+    instruments_dir.mkdir()
+    (instruments_dir / "binance.yaml").write_text(
+        "\n".join(
+            [
+                '- instrument_id: "binance:BTC/USDT"',
+                "  venue: binance",
+                '  symbol: "BTC/USDT"',
+                "  asset_class: crypto",
+                "  instrument_type: spot",
+                "  base: BTC",
+                "  quote: USDT",
+                '  tick_size: "0.01"',
+                '  lot_size: "0.00001"',
+                '  multiplier: "1"',
+                "  timezone: UTC",
+                '  listing_ts: "2017-08-17T04:00:00Z"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "gateway.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[storage]",
+                f'root = "{data_root.as_posix()}"',
+                "[retention]",
+                "enabled = false",
+                "bars_days = 0",
+                "[instruments]",
+                f'path = "{instruments_dir.as_posix()}"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return config_path, data_root
+
+
 def test_import_writes_one_minute_and_parent_intervals(tmp_path: Path) -> None:
     archive_dir = tmp_path / "archive"
     day = date(2024, 1, 1)
@@ -638,3 +682,166 @@ def test_cli_backfill_archive_end_to_end(tmp_path: Path, capsys) -> None:
 def test_cli_backfill_requires_archive_mode() -> None:
     with pytest.raises(SystemExit):
         main(["backfill", "--start", "2024-01-01"])
+
+
+def test_cli_backfill_rejects_unsupported_venue_and_market_type(
+    tmp_path: Path,
+) -> None:
+    config_path, data_root = _write_cli_fixture(tmp_path)
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    base_args = [
+        "backfill",
+        "--archive",
+        "--config",
+        str(config_path),
+        "--start",
+        "2024-01-01",
+        "--archive-dir",
+        str(archive_dir),
+    ]
+
+    for extra in (["--venue", "ctp"], ["--market-type", "futures"]):
+        with pytest.raises(SystemExit) as excinfo:
+            main([*base_args, *extra])
+        assert excinfo.value.code != 0
+
+    assert not data_root.exists()
+
+
+def test_cli_backfill_requires_start(tmp_path: Path) -> None:
+    config_path, data_root = _write_cli_fixture(tmp_path)
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "backfill",
+                "--archive",
+                "--config",
+                str(config_path),
+                "--end",
+                "2024-01-01",
+                "--archive-dir",
+                str(archive_dir),
+            ]
+        )
+
+    assert excinfo.value.code != 0
+    assert not data_root.exists()
+
+
+def test_cli_backfill_rejects_a_missing_archive_dir(tmp_path: Path) -> None:
+    config_path, data_root = _write_cli_fixture(tmp_path)
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "backfill",
+                "--archive",
+                "--config",
+                str(config_path),
+                "--start",
+                "2024-01-01",
+                "--archive-dir",
+                str(tmp_path / "does-not-exist"),
+            ]
+        )
+
+    assert excinfo.value.code != 0
+    assert not data_root.exists()
+
+
+def _write_daily_files(archive_dir: Path, start: date, end: date) -> None:
+    day = start
+    while day <= end:
+        _write_archive(
+            archive_dir,
+            ArchivePeriod("daily", day, day),
+            times=[datetime(day.year, day.month, day.day, 12, 0, tzinfo=UTC)],
+        )
+        day += timedelta(days=1)
+
+
+def test_auto_falls_back_to_daily_files_when_monthly_is_missing(
+    tmp_path: Path, caplog
+) -> None:
+    archive_dir = tmp_path / "archive"
+    start = date(2024, 1, 1)
+    end = date(2024, 1, 31)
+    _write_daily_files(archive_dir, start, end)
+
+    caplog.set_level(logging.WARNING)
+    _, report, _ = _run_import(
+        tmp_path / "data",
+        archive_dir,
+        start=start,
+        end=end,
+        granularity="auto",
+        today=date(2024, 2, 15),
+    )
+
+    assert report.failures == 0
+    assert report.missing_files == 0
+    assert report.files == 31
+    assert report.bars_read == 31
+    assert report.bars_written >= 31
+    assert any(
+        getattr(record, "event", None)
+        == "archive.monthly_missing_fallback_daily"
+        for record in caplog.records
+    )
+
+
+def test_explicit_monthly_missing_file_is_not_fallen_back(
+    tmp_path: Path,
+) -> None:
+    archive_dir = tmp_path / "archive"
+    start = date(2024, 1, 1)
+    end = date(2024, 1, 31)
+    _write_daily_files(archive_dir, start, end)
+
+    _, report, _ = _run_import(
+        tmp_path / "data",
+        archive_dir,
+        start=start,
+        end=end,
+        granularity="monthly",
+        today=date(2024, 2, 15),
+    )
+
+    assert report.missing_files == 1
+    assert report.files == 0
+    assert report.failures == 0
+
+
+def test_auto_does_not_fall_back_when_monthly_checksum_is_bad(
+    tmp_path: Path,
+) -> None:
+    archive_dir = tmp_path / "archive"
+    start = date(2024, 1, 1)
+    end = date(2024, 1, 31)
+    monthly = ArchivePeriod("monthly", start, end)
+    _write_archive(
+        archive_dir,
+        monthly,
+        times=[datetime(2024, 1, 1, 12, 0, tzinfo=UTC)],
+        corrupt_checksum=True,
+    )
+    # Daily files are present, so a wrongful fallback would be visible.
+    _write_daily_files(archive_dir, start, end)
+
+    store, report, _ = _run_import(
+        tmp_path / "data",
+        archive_dir,
+        start=start,
+        end=end,
+        granularity="auto",
+        today=date(2024, 2, 15),
+    )
+
+    assert report.failures == 1
+    assert report.files == 0
+    assert report.bars_written == 0
+    assert _rows(store, "1m") == []

@@ -135,6 +135,10 @@ def archive_url(
     interval: str,
     period: ArchivePeriod,
 ) -> str:
+    if market_type != "spot":
+        raise ArchiveFormatError(
+            f"v1 archive only supports market_type 'spot', got {market_type!r}"
+        )
     filename = archive_filename(symbol, interval, period)
     return (
         f"{base_url.rstrip('/')}/{market_type}/{period.granularity}/klines/"
