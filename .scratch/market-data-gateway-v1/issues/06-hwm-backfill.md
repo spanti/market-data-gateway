@@ -4,10 +4,14 @@
 
 **Blocked by:** 04, 05
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] SQLite HWM 按 `(instrument_id, interval)` 持久化。
-- [ ] 启动/重连从 HWM 补采；无 HWM 时回看 backfill_hours。
-- [ ] 补采使用 FeedHandler 历史接口；缺口超限记 gap_unrecoverable。
-- [ ] stale 检测按 `(feed, instrument, interval)`。
-- [ ] 测试覆盖重启、断线、缺口与源修正。
+- [x] SQLite HWM 按 `(instrument_id, interval)` 持久化。
+- [x] 启动/重连从 HWM 补采；无 HWM 时回看 backfill_hours。
+- [x] 补采使用 FeedHandler 历史接口；缺口超限记 gap_unrecoverable。
+- [x] stale 检测按 `(feed, instrument, interval)`。
+- [x] 测试覆盖重启、断线、缺口与源修正。
+
+## Comments
+
+- Resolved in `integration/market-data-gateway-v1` after the v1 delivery code review and follow-up fixes.

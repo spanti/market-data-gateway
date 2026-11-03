@@ -4,10 +4,14 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 1m→5m/15m/1h/1d 聚合规则正确：open=首根、high/low=极值、close=末根、volume/trade_count=求和。
-- [ ] 只发布整段 1m 已到齐且已收盘的父周期。
-- [ ] 1m 为 external、高周期为 internal 的 aggregation_source 正确。
-- [ ] 1m revision 增加时父周期同步 revision。
-- [ ] API 可按 interval 查询；测试覆盖 UTC 日界、缺口与修正。
+- [x] 1m→5m/15m/1h/1d 聚合规则正确：open=首根、high/low=极值、close=末根、volume/trade_count=求和。
+- [x] 只发布整段 1m 已到齐且已收盘的父周期。
+- [x] 1m 为 external、高周期为 internal 的 aggregation_source 正确。
+- [x] 1m revision 增加时父周期同步 revision。
+- [x] API 可按 interval 查询；测试覆盖 UTC 日界、缺口与修正。
+
+## Comments
+
+- Resolved in `integration/market-data-gateway-v1` after the v1 delivery code review and follow-up fixes.

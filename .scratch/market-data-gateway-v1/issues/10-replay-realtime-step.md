@@ -4,10 +4,14 @@
 
 **Blocked by:** 09
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Replay Clock 与 Speed。
-- [ ] `pause` / `resume` / `seek` / `set_speed` / `step`。
-- [ ] Step Credit：`step(n)` 最多推送 n 条。
-- [ ] 多 Replay Session 隔离。
-- [ ] 测试覆盖状态机与非法操作（例如未 pause 就 seek）。
+- [x] Replay Clock 与 Speed。
+- [x] `pause` / `resume` / `seek` / `set_speed` / `step`。
+- [x] Step Credit：`step(n)` 最多推送 n 条。
+- [x] 多 Replay Session 隔离。
+- [x] 测试覆盖状态机与非法操作（例如未 pause 就 seek）。
+
+## Comments
+
+- Resolved in `integration/market-data-gateway-v1` after the v1 delivery code review and follow-up fixes.
