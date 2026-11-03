@@ -107,10 +107,11 @@ def test_runtime_start_failure_closes_the_feed_handler(
         feed_handler=feed, config=_config(), data_root=tmp_path
     )
 
-    def _fail_start_http() -> None:
-        raise RuntimeError("boom")
+    def _fail_start_http(*_args, **_kwargs) -> None:
+        msg = "boom"
+        raise RuntimeError(msg)
 
-    monkeypatch.setattr(runtime, "_start_http", _fail_start_http)
+    monkeypatch.setattr(runtime._http, "start", _fail_start_http)
 
     with pytest.raises(RuntimeError, match="boom"):
         runtime.start()
