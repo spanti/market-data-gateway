@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 
-from mdgw.core.bar import Bar
 from mdgw.core.time import datetime_to_ns
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from mdgw.core.bar import Bar
 
 UTC_TS = pa.timestamp("ns", tz="UTC")
 PRICE = pa.decimal128(38, 18)
@@ -143,19 +146,19 @@ def _bar_to_dict(bar: Bar) -> dict[str, Any]:
 
 
 def bars_to_logical_table(bars: Iterable[Bar]) -> pa.Table:
-    """通过 PyArrow 的 C++ 批量序列化能力，高效将 Bar 集合转为逻辑表。"""
+    """通过 PyArrow 的 C++ 批量序列化能力, 高效将 Bar 集合转为逻辑表。"""
     # 单次遍历生成字典列表
     pylist = [_bar_to_dict(bar) for bar in bars]
     
     if not pylist:
         return empty_logical_table()
         
-    # 利用 PyArrow 核心的 from_pylist 批量构造，避开了 18 次列循环
+    # 利用 PyArrow 核心的 from_pylist 批量构造, 避开了 18 次列循环
     return pa.Table.from_pylist(pylist, schema=BAR_SCHEMA)
 
 
 def bars_to_physical_table(bars: Iterable[Bar]) -> pa.Table:
-    """生成物理表（剔除了物理存储分区列）。"""
+    """生成物理表(剔除了物理存储分区列)。"""
     logical = bars_to_logical_table(bars)
     return logical.select(PHYSICAL_SCHEMA.names)
 

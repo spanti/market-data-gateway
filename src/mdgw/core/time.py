@@ -8,9 +8,8 @@ future Data Type with finer timestamps never has to go through floats.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-UTC = timezone.utc
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 NANOS_PER_SECOND = 1_000_000_000
 
@@ -23,7 +22,8 @@ _ISO_RE = re.compile(
 
 def to_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
-        raise ValueError("naive datetime is not allowed; timestamps must be UTC")
+        msg = "naive datetime is not allowed; timestamps must be UTC"
+        raise ValueError(msg)
     return value.astimezone(UTC)
 
 
@@ -62,7 +62,8 @@ def iso_to_ns(value: str) -> int:
     """
     match = _ISO_RE.match(value.strip())
     if match is None:
-        raise ValueError(f"invalid ISO-8601 timestamp: {value!r}")
+        msg = f"invalid ISO-8601 timestamp: {value!r}"
+        raise ValueError(msg)
 
     base = datetime.strptime(
         match.group("base").replace(" ", "T"), "%Y-%m-%dT%H:%M:%S"

@@ -38,32 +38,31 @@ def table_to_messages(table: pa.Table) -> list[dict[str, Any]]:
                 table.column(column).cast(pa.int64()),
             )
 
-    messages: list[dict[str, Any]] = []
-    for row in table.to_pylist():
-        messages.append(
-            {
-                "schema_version": row["schema_version"],
-                "data_type": row["data_type"],
-                "instrument_id": row["instrument_id"],
-                "event_ts": ns_to_iso(row["event_ts"]),
-                "ingest_ts": ns_to_iso(row["ingest_ts"]),
-                "feed": row["feed"],
-                "seq": row["seq"],
-                "payload": {
-                    "interval": row["interval"],
-                    "open_ts": ns_to_iso(row["open_ts"]),
-                    "close_ts": ns_to_iso(row["close_ts"]),
-                    "aggregation_source": row["aggregation_source"],
-                    "open": decimal_to_str(row["open"]),
-                    "high": decimal_to_str(row["high"]),
-                    "low": decimal_to_str(row["low"]),
-                    "close": decimal_to_str(row["close"]),
-                    "volume": decimal_to_str(row["volume"]),
-                    "trade_count": row["trade_count"],
-                    "revision": row["revision"],
-                },
-            }
-        )
+    messages: list[dict[str, Any]] = [
+        {
+            "schema_version": row["schema_version"],
+            "data_type": row["data_type"],
+            "instrument_id": row["instrument_id"],
+            "event_ts": ns_to_iso(row["event_ts"]),
+            "ingest_ts": ns_to_iso(row["ingest_ts"]),
+            "feed": row["feed"],
+            "seq": row["seq"],
+            "payload": {
+                "interval": row["interval"],
+                "open_ts": ns_to_iso(row["open_ts"]),
+                "close_ts": ns_to_iso(row["close_ts"]),
+                "aggregation_source": row["aggregation_source"],
+                "open": decimal_to_str(row["open"]),
+                "high": decimal_to_str(row["high"]),
+                "low": decimal_to_str(row["low"]),
+                "close": decimal_to_str(row["close"]),
+                "volume": decimal_to_str(row["volume"]),
+                "trade_count": row["trade_count"],
+                "revision": row["revision"],
+            },
+        }
+        for row in table.to_pylist()
+    ]
     return messages
 
 

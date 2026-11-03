@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from typing import TYPE_CHECKING
 from urllib.parse import quote
+
+if TYPE_CHECKING:
+    from decimal import Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,10 +45,11 @@ class InstrumentId:
     symbol: str
 
     @classmethod
-    def parse(cls, value: str) -> "InstrumentId":
+    def parse(cls, value: str) -> InstrumentId:
         venue, separator, symbol = value.partition(":")
         if not separator or not venue or not symbol:
-            raise ValueError(f"invalid InstrumentId: {value!r}")
+            msg = f"invalid InstrumentId: {value!r}"
+            raise ValueError(msg)
         return cls(venue=venue, symbol=symbol)
 
     @property

@@ -33,7 +33,8 @@ class GatewayError(Exception):
         self.details = dict(details or {})
 
 
-class SchemaVersionMismatch(GatewayError):
+class SchemaVersionMismatch(GatewayError):  # ruff: ignore[error-suffix-on-exception-name] - public API name used outside core
+
     """A Dataset was written under a different Data Contract version."""
 
     code = SCHEMA_VERSION_MISMATCH
