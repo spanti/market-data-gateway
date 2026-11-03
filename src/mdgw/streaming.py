@@ -7,8 +7,8 @@ wire:
 * the two-frame ``[topic][Arrow IPC stream]`` codec;
 * one ZeroMQ context with a PUB socket and (when connecting) a SUB socket and
   subscription thread;
-* the READY handshake and the ``_internal.status`` diagnostic channel;
-* the Replay-only ``{namespace}.control`` event channel;
+* the READY handshake and the ``_internal.status`` diagnostic topic;
+* the Replay-only ``{namespace}.control`` event topic;
 * forwarding and the streaming counters.
 
 Public surface (and nothing else): :class:`StreamingInterface`,
@@ -23,6 +23,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -40,7 +41,7 @@ logger = logging.getLogger(__name__)
 #: READY handshake topic. Always global, never namespaced.
 READY_TOPIC = "_internal.ready"
 
-#: Diagnostic status channel. Always global, never namespaced.
+#: Diagnostic status topic. Always global, never namespaced.
 _STATUS_TOPIC = "_internal.status"
 
 #: Bar topics are ``market.bar.<interval>.<instrument_id>``; namespaces go in
@@ -121,6 +122,12 @@ class _BarSubscription:
     forward: bool
 
 
+class _State(StrEnum):
+    NEW = "new"
+    STARTED = "started"
+    STOPPED = "stopped"
+
+
 class StreamingInterface:
     """One process-local owner of the Streaming Interface wire contract.
 
@@ -151,9 +158,9 @@ class StreamingInterface:
         self._namespace = namespace
         self._zmq_hwm = zmq_hwm
 
-        # "new" -> "started" -> "stopped"; guarded by _lifecycle_lock when
+        # NEW -> STARTED -> STOPPED; guarded by _lifecycle_lock when
         # mutated, read without it where only a benign snapshot is needed.
-        self._state = "new"
+        self._state = _State.NEW
         self._lifecycle_lock = threading.Lock()
         self._publisher: zmq.Socket | None = None
         self._context: zmq.Context | None = None
@@ -162,8 +169,6 @@ class StreamingInterface:
         self._sub_stop: threading.Event | None = None
         self._sub_thread: threading.Thread | None = None
         self._sub_ready = threading.Event()
-        self._await_lock = threading.Lock()
-        self._awaiting_own_ready = False
         self._peer_ready = threading.Event()
 
         self._ready_stop: threading.Event | None = None
@@ -185,9 +190,9 @@ class StreamingInterface:
     def start(self) -> None:
         """Create the context, bind the PUB, and connect the SUB if requested."""
         with self._lifecycle_lock:
-            if self._state == "started":
+            if self._state == _State.STARTED:
                 return
-            if self._state == "stopped":
+            if self._state == _State.STOPPED:
                 msg = "StreamingInterface instances are single-use"
                 raise RuntimeError(msg)
 
@@ -213,7 +218,7 @@ class StreamingInterface:
         # may already be publishing, and a forwarded frame must see a fully
         # usable interface rather than a half-built one.
         self._resolved_endpoints = tuple(resolved)
-        self._state = "started"
+        self._state = _State.STARTED
 
         if self._connect is not None:
             sub_stop = threading.Event()
@@ -228,7 +233,7 @@ class StreamingInterface:
             sub_thread.start()
 
     def _discard_start(self, context: zmq.Context) -> None:
-        self._state = "new"
+        self._state = _State.NEW
         self._resolved_endpoints = ()
         sub_stop, self._sub_stop = self._sub_stop, None
         sub_thread, self._sub_thread = self._sub_thread, None
@@ -245,9 +250,9 @@ class StreamingInterface:
     def stop(self) -> None:
         """Stop the READY heartbeat and subscriber, close sockets, term context."""
         with self._lifecycle_lock:
-            if self._state != "started":
+            if self._state != _State.STARTED:
                 return
-            self._state = "stopped"
+            self._state = _State.STOPPED
             ready_stop = self._ready_stop
             ready_thread = self._ready_thread
             sub_stop = self._sub_stop
@@ -350,32 +355,32 @@ class StreamingInterface:
         ``None`` keeps the instance namespace. An empty effective namespace is
         rejected because Replay control topics must name their Session.
         """
+        if not self._publish_allowed():
+            return
         effective_namespace = (
             self._namespace if namespace is None else namespace
         )
         if not effective_namespace.strip("."):
             msg = "publish_event requires a non-empty namespace"
             raise ValueError(msg)
-        if not self._publish_allowed():
-            return
         topic = _namespaced(effective_namespace, "control")
         payload = _encode_json(event)
         self._send(topic, payload, bar=False)
 
     def _publish_allowed(self) -> bool:
         """Raise before start; return False (no-op) after stop."""
-        if self._state == "stopped":
+        if self._state == _State.STOPPED:
             return False
-        if self._state != "started":
+        if self._state != _State.STARTED:
             msg = "StreamingInterface is not started"
             raise RuntimeError(msg)
         return True
 
     def _send(self, topic: str, payload: bytes, *, bar: bool) -> bool:
         with self._send_lock:
-            if self._state == "stopped":
+            if self._state == _State.STOPPED:
                 return False
-            if self._state != "started" or self._publisher is None:
+            if self._state != _State.STARTED or self._publisher is None:
                 msg = "StreamingInterface is not started"
                 raise RuntimeError(msg)
             self._publisher.send_multipart([topic.encode("utf-8"), payload])
@@ -439,7 +444,7 @@ class StreamingInterface:
             self._status_handler = handler
 
     def _require_subscribable(self) -> None:
-        if self._state != "started":
+        if self._state != _State.STARTED:
             msg = "StreamingInterface is not started"
             raise RuntimeError(msg)
         if self._connect is None:
@@ -449,31 +454,25 @@ class StreamingInterface:
     def _await_own_subscription(self) -> None:
         """Publish READY pings until this instance's own SUB receives one."""
         self._sub_ready.clear()
-        with self._await_lock:
-            self._awaiting_own_ready = True
         deadline = time.monotonic() + _AWAIT_READY_TIMEOUT_S
-        try:
-            while not self._sub_ready.is_set():
-                if self._state != "started":
-                    msg = "StreamingInterface stopped while awaiting readiness"
-                    raise RuntimeError(msg)
-                if time.monotonic() >= deadline:
-                    msg = "own ZMQ subscriber did not become ready in time"
-                    raise TimeoutError(msg)
-                self._send(READY_TOPIC, b"", bar=False)
-                time.sleep(0.01)
-        finally:
-            with self._await_lock:
-                self._awaiting_own_ready = False
+        while not self._sub_ready.is_set():
+            if self._state != _State.STARTED:
+                msg = "StreamingInterface stopped while awaiting readiness"
+                raise RuntimeError(msg)
+            if time.monotonic() >= deadline:
+                msg = "own ZMQ subscriber did not become ready in time"
+                raise TimeoutError(msg)
+            self._send(READY_TOPIC, b"", bar=False)
+            time.sleep(0.01)
 
     # -- readiness ---------------------------------------------------------
 
     def mark_ready(self) -> None:
         """Start the 50 ms READY heartbeat; idempotent until :meth:`stop`."""
         with self._lifecycle_lock:
-            if self._state == "stopped":
+            if self._state == _State.STOPPED:
                 return
-            if self._state != "started":
+            if self._state != _State.STARTED:
                 msg = "StreamingInterface is not started"
                 raise RuntimeError(msg)
             if self._ready_thread is not None:
@@ -491,20 +490,20 @@ class StreamingInterface:
 
     @property
     def peer_ready(self) -> bool:
-        """True once a peer READY was received over ``connect``.
+        """True once a READY was received over ``connect``.
 
-        A READY received while this instance is waiting on its own SUB socket
-        (``subscribe_bars(await_ready=True)``) does not count: it proves the
-        subscription is wired, not that a peer is ready.
+        Any READY frame received on the SUB socket counts, including the ping
+        this instance sends to prove its own subscription is wired during
+        ``subscribe_bars(await_ready=True)``.
         """
-        return self._state == "started" and self._peer_ready.is_set()
+        return self._state == _State.STARTED and self._peer_ready.is_set()
 
     def wait_until_peer_ready(self, timeout: float | None = None) -> bool:
         """Wait for a peer READY; False on timeout or without ``connect``."""
-        if self._state == "new":
+        if self._state == _State.NEW:
             msg = "StreamingInterface is not started"
             raise RuntimeError(msg)
-        if self._state == "stopped" or self._connect is None:
+        if self._state == _State.STOPPED or self._connect is None:
             return False
         return self._peer_ready.wait(timeout)
 
@@ -582,10 +581,7 @@ class StreamingInterface:
 
     def _consume_ready(self) -> None:
         self._sub_ready.set()
-        with self._await_lock:
-            awaiting_own = self._awaiting_own_ready
-        if not awaiting_own:
-            self._peer_ready.set()
+        self._peer_ready.set()
 
     def _handle_bar_frame(self, topic: str, payload: bytes) -> None:
         with self._subscriptions_lock:

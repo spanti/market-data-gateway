@@ -144,6 +144,7 @@ def test_module_imports_only_the_allowed_layers() -> None:
         "__future__",
         "collections",
         "dataclasses",
+        "enum",
         "json",
         "logging",
         "threading",
@@ -234,6 +235,24 @@ def test_publishing_after_stop_is_silent_and_peer_is_not_ready() -> None:
     interface.publish_event({"event": "end_of_session"})
 
     assert interface.peer_ready is False
+
+
+def test_publish_event_without_namespace_raises_before_start() -> None:
+    from mdgw.streaming import StreamingInterface
+
+    nameless = StreamingInterface(bind=_inproc_endpoint())
+    with pytest.raises(RuntimeError):
+        nameless.publish_event({})
+
+
+def test_publish_event_without_namespace_is_silent_after_stop() -> None:
+    from mdgw.streaming import StreamingInterface
+
+    nameless = StreamingInterface(bind=_inproc_endpoint())
+    nameless.start()
+    nameless.stop()
+
+    nameless.publish_event({})  # lifecycle precedes namespace validation
 
 
 def test_stop_releases_the_bound_port() -> None:
@@ -447,6 +466,31 @@ def test_unsubscribe_bars_keeps_the_subscription_reusable() -> None:
     assert received == [BAR_TOPIC]
 
 
+def test_subscribe_bars_await_ready_times_out_and_rolls_back() -> None:
+    from mdgw.streaming import StreamingInterface
+
+    # Bind and connect to different endpoints so no READY can come back.
+    interface = StreamingInterface(
+        bind=_inproc_endpoint(), connect=_inproc_endpoint()
+    )
+    interface.start()
+    try:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            interface.subscribe_bars(
+                lambda _topic, _table: None, await_ready=True
+            )
+        # The spec fixes this deadline at 2.0 seconds.
+        assert time.monotonic() - started >= 2.0
+
+        # The failed subscription was rolled back, so a plain subscription
+        # succeeds without a second await_ready handshake.
+        assert interface.unsubscribe_bars() is False
+        interface.subscribe_bars(lambda _topic, _table: None)
+    finally:
+        interface.stop()
+
+
 def test_status_roundtrip_uses_json_and_does_not_count_as_a_bar() -> None:
     from mdgw.streaming import StreamingInterface
 
@@ -471,6 +515,43 @@ def test_status_roundtrip_uses_json_and_does_not_count_as_a_bar() -> None:
     ]
     assert interface.published_frames == 0
     assert interface.received_frames == 0
+
+
+def test_ready_status_and_event_frames_are_not_bar_traffic() -> None:
+    from mdgw.streaming import StreamingInterface
+
+    publisher = StreamingInterface(bind="tcp://127.0.0.1:0")
+    publisher.start()
+    bars: list[str] = []
+    statuses: list[dict[str, object]] = []
+    subscriber = StreamingInterface(
+        bind=_inproc_endpoint(), connect=publisher.endpoints[0]
+    )
+    subscriber.start()
+    try:
+        subscriber.subscribe_bars(lambda topic, _table: bars.append(topic))
+        subscriber.subscribe_status(statuses.append)
+
+        publisher.mark_ready()
+        assert subscriber.wait_until_peer_ready(2.0) is True
+
+        publisher.publish_status({"role": "collector"})
+        _wait_until(lambda: statuses == [{"role": "collector"}])
+
+        publisher.publish_event(
+            {"event": "end_of_session"}, namespace="replay.rpl-test"
+        )
+        # The event topic is not a Bar topic; give the SUB time to deliver it.
+        time.sleep(0.2)
+    finally:
+        subscriber.stop()
+        publisher.stop()
+
+    assert statuses == [{"role": "collector"}]
+    assert bars == []
+    assert subscriber.received_frames == 0
+    assert subscriber.decode_errors == 0
+    assert publisher.published_frames == 0
 
 
 def test_forward_true_replays_the_original_frame_bytes() -> None:
