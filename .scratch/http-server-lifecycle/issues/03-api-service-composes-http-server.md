@@ -10,7 +10,7 @@
 - [ ] 应用仍携带 metrics、status、ready provider 与 `service_role="api"`；WebSocket hub 由 `ApiService` 构建并交给关闭钩子。
 - [ ] `base_url` 与 `http_port` 保持原有名称、类型、语义，内部委托给 `HttpServer`。
 - [ ] 新增进程内集成测试：`http_port=0`、`api_pub_bind=tcp://127.0.0.1:0`、无 collector 进程。
-- [ ] 测试断言 `/healthz` 返回 200、`/readyz` 返回 200（`collector_required` 默认 false）、`/api/v1/status` 报告 `service: "api"`。
+- [ ] 测试断言 `/healthz` 返回 200、`/readyz` 返回 200（`collector_required` 默认 false）、`/status` 与 `/healthz` 报告 `service: "api"`、`/api/v1/status` 报告 `dataset: "bars"`。
 - [ ] 测试结束调用 `stop()`，断言 HTTP 线程已退出，测试进程可继续复用端口。
 - [ ] 既有 collector → api 多进程测试与 Streaming Interface 测试保持通过。
 - [ ] 离线测试套件无新增失败（基线已知 5 个 Typer/Click 退出码失败，与本次无关）；不修改端点行为或配置默认值。

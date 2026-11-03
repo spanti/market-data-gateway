@@ -43,7 +43,7 @@ Status: ready-for-agent
 14. 作为运维人员，我想要每个 Service Role 的 HTTP 线程名保持可区分，这样线程转储与日志仍然能定位到具体角色。
 15. 作为网关维护者，我想要 `GatewayRuntime.base_url`、`ApiService.base_url`、`ApiService.http_port`、`ServiceHealthServer.base_url`、`ServiceHealthServer.bound_port` 的名称、类型与语义不变，这样现有调用方与测试不需要改写。
 16. 作为测试作者，我想要用一个普通 `web.Application` 直接测试 `HttpServer` 的 start/stop/回滚/派发，这样不需要构造完整网关或子进程。
-17. 作为测试作者，我想要 `ApiService` 能在同一进程内以端口 0 启动、访问 `/healthz`、`/readyz`、`/api/v1/status` 并干净停止，这样 API Service Role 不再只能靠子进程覆盖。
+17. 作为测试作者，我想要 `ApiService` 能在同一进程内以端口 0 启动、访问 `/healthz`、`/readyz`、`/status`、`/api/v1/status` 并干净停止，这样 API Service Role 不再只能靠子进程覆盖。
 18. 作为测试作者，我想要 `HttpServer` 的测试只断言公共接口行为（端口、响应、线程存活、错误类型），不断言私有字段，这样重构实现时测试不必跟着改。
 19. 作为网关维护者，我想要既有的 `GatewayRuntime` 端到端测试继续守护 HTTP 行为，这样迁移期间外部行为有回归保护。
 20. 作为网关维护者，我想要原先的启动失败回滚测试改为命中新接缝，这样它验证的是生产代码而不是测试专用垫片。
@@ -119,7 +119,7 @@ Status: ready-for-agent
   9. `call_soon_threadsafe` 可从另一线程派发；`stop()` 后抛 `RuntimeError`；
   10. 从服务器线程调用 `stop()` 抛 `RuntimeError` 而不是死锁。
 - **既有接缝**：`GatewayRuntime` 端到端（DESIGN §9.1）继续守护 HTTP 行为；现有 `tests/integration` 中的 Bars / status / streaming 测试不改语义。
-- **既有接缝**：`ApiService` 的公共 `start` / `stop` / `base_url`。新增一个进程内集成测试：端口 0、无 collector、断言 `/healthz` 200、`/readyz` 200（`collector_required` 默认 false）、`/api/v1/status` 报告 `service: "api"`，随后干净停止且 HTTP 线程退出。
+- **既有接缝**：`ApiService` 的公共 `start` / `stop` / `base_url`。新增一个进程内集成测试：端口 0、无 collector、断言 `/healthz` 200、`/readyz` 200（`collector_required` 默认 false）、`/status` 与 `/healthz` 报告 `service: "api"`、`/api/v1/status` 报告 `dataset: "bars"`，随后干净停止且 HTTP 线程退出。
 - **既有接缝**：`ServiceHealthServer` 的公共接口。不新增专用测试；其转发行为由 `HttpServer` 测试与既有 collector / replay 多进程测试共同覆盖。
 
 ### 测试改动
