@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
-from mdgw.config import FeedConfig
 from mdgw.core.bar import RawBar
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import iso_to_ns, ns_to_datetime, to_utc, utc_now
+from mdgw.ingest.composite import CompositeFeedHandler
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator, Sequence
+    from datetime import datetime
+
+    from mdgw.config import FeedConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +39,7 @@ class FakeFeedHandler:
     makes `supports_history` true unless explicitly overridden.
     """
 
-    def __init__(
+    def __init__(  # ruff: ignore[too-many-arguments] - keyword-only test knobs
         self,
         *,
         instrument_id: str,
@@ -49,7 +55,9 @@ class FakeFeedHandler:
         self.name = name
         self.interval = interval
         self.supports_history = (
-            bool(supports_history) if supports_history is not None else history is not None
+            bool(supports_history)
+            if supports_history is not None
+            else history is not None
         )
 
     @property
@@ -68,9 +76,8 @@ class FakeFeedHandler:
         end: datetime,
     ) -> Iterable[RawBar]:
         if not self.supports_history:
-            raise NotImplementedError(
-                f"Feed Handler {self.name!r} does not support history"
-            )
+            msg = f"Feed Handler {self.name!r} does not support history"
+            raise NotImplementedError(msg)
         if InstrumentId.parse(instrument_id).value != self.instrument_id:
             return ()
         if interval != self.interval:
@@ -105,7 +112,8 @@ def _decimal(value: Decimal | str) -> Decimal:
         return value
     if isinstance(value, str):
         return Decimal(value)
-    raise TypeError(f"fake Bar values must be Decimal or str, got {type(value)!r}")
+    msg = f"fake Bar values must be Decimal or str, got {type(value)!r}"
+    raise TypeError(msg)
 
 
 class OneShotFakeFeedHandler(FakeFeedHandler):
@@ -134,8 +142,6 @@ def build_fake_feed_handler(feed_config: FeedConfig) -> FakeFeedHandler:
     Bars. Without `fake_start_ts` the run ends at the current whole minute, so
     every Bar is closed when the collector starts.
     """
-    from mdgw.ingest.composite import CompositeFeedHandler
-
     bar_inputs = _generated_bar_inputs(feed_config)
     handlers: list[FakeFeedHandler] = []
     for symbol in feed_config.symbols:
@@ -175,7 +181,7 @@ def _generated_bar_inputs(feed_config: FeedConfig) -> list[BarInput]:
             high=price,
             low=price,
             close=price,
-            volume=Decimal("1"),
+            volume=Decimal(1),
             trade_count=1,
         )
         for index in range(count)

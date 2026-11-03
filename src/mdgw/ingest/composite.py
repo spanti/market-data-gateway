@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
-from datetime import datetime
+from typing import TYPE_CHECKING
 
-from mdgw.core.bar import RawBar
 from mdgw.core.instrument import InstrumentId
+from mdgw.ingest.ccxt_feed import build_feed_handler
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator, Sequence
+    from datetime import datetime
+
+    from mdgw.core.bar import RawBar
 
 
 class CompositeFeedHandler:
@@ -23,7 +28,8 @@ class CompositeFeedHandler:
         name: str | None = None,
     ) -> None:
         if not handlers:
-            raise ValueError("CompositeFeedHandler requires at least one handler")
+            msg = "CompositeFeedHandler requires at least one handler"
+            raise ValueError(msg)
         self._handlers = tuple(handlers)
         self.name = name or "+".join(handler.name for handler in self._handlers)
         self.instrument_ids = tuple(
@@ -66,8 +72,8 @@ def build_configured_feed_handler(feeds: Sequence) -> object:
     by the thin `CompositeFeedHandler`.
     """
     if not feeds:
-        raise ValueError("at least one [[feeds]] entry is required")
-    from mdgw.ingest.ccxt_feed import build_feed_handler
+        msg = "at least one [[feeds]] entry is required"
+        raise ValueError(msg)
 
     handlers = [build_feed_handler(feed) for feed in feeds]
     if len(handlers) == 1:

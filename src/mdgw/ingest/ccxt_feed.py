@@ -14,6 +14,7 @@ Closed-Bar rule:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import queue
@@ -23,13 +24,17 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import NamedTuple
+from itertools import starmap
+from typing import TYPE_CHECKING, NamedTuple
 
-from mdgw.config import FeedConfig
 from mdgw.core.bar import RawBar
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import UTC, datetime_to_ns, to_utc, utc_now
+
+if TYPE_CHECKING:
+    from mdgw.config import FeedConfig
+    from mdgw.ingest.feed_handler import FeedHandler
 
 logger = logging.getLogger(__name__)
 
@@ -61,9 +66,11 @@ class TokenBucket:
         sleep=time.sleep,
     ) -> None:
         if rate_per_s <= 0:
-            raise ValueError("rate_per_s must be positive")
+            msg = "rate_per_s must be positive"
+            raise ValueError(msg)
         if capacity <= 0:
-            raise ValueError("capacity must be positive")
+            msg = "capacity must be positive"
+            raise ValueError(msg)
         self.rate_per_s = float(rate_per_s)
         self.capacity = float(capacity)
         self._tokens = self.capacity
@@ -74,9 +81,9 @@ class TokenBucket:
 
     def acquire(self, tokens: float = 1.0) -> None:
         if tokens <= 0:
-            raise ValueError("tokens must be positive")
-        if tokens > self.capacity:
-            tokens = self.capacity
+            msg = "tokens must be positive"
+            raise ValueError(msg)
+        tokens = min(tokens, self.capacity)
         while True:
             with self._lock:
                 now = self._clock()
@@ -163,14 +170,16 @@ def _iter_raw_rows(rows) -> Iterable:
 
 
 def _row_timestamp_ms(row) -> int:
-    if isinstance(row, Mapping):
-        value = row.get("timestamp", row.get("ts"))
-    else:
-        value = row[0]
+    value = (
+        row.get("timestamp", row.get("ts"))
+        if isinstance(row, Mapping)
+        else row[0]
+    )
     if isinstance(value, bool) or not isinstance(value, int):
         if isinstance(value, float) and value.is_integer():
             return int(value)
-        raise TypeError(f"ccxt Bar timestamp must be integer milliseconds: {value!r}")
+        msg = f"ccxt Bar timestamp must be integer milliseconds: {value!r}"
+        raise TypeError(msg)
     return value
 
 
@@ -191,19 +200,20 @@ def _row_values(row) -> _BarValues:
         raw_values = [row.get(name) for name in _BAR_VALUE_NAMES]
     else:
         raw_values = list(row[1:6])
-    values = [
-        _to_decimal(value, name)
-        for value, name in zip(raw_values, _BAR_VALUE_NAMES, strict=True)
-    ]
+    values = list(
+        starmap(_to_decimal, zip(raw_values, _BAR_VALUE_NAMES, strict=True))
+    )
     return _BarValues(*values)
 
 
 def _to_decimal(value, field: str) -> Decimal:
     if isinstance(value, bool) or value is None:
-        raise TypeError(f"ccxt Bar {field} must be numeric: {value!r}")
+        msg = f"ccxt Bar {field} must be numeric: {value!r}"
+        raise TypeError(msg)
     result = Decimal(str(value))
     if not result.is_finite():
-        raise ValueError(f"ccxt Bar {field} must be finite: {value!r}")
+        msg = f"ccxt Bar {field} must be finite: {value!r}"
+        raise ValueError(msg)
     return result
 
 
@@ -224,7 +234,7 @@ def _row_closed_flag(row) -> bool | None:
 def _coerce_bool(value) -> bool | None:
     if isinstance(value, bool):
         return value
-    if isinstance(value, (int, float)) and value in (0, 1):
+    if isinstance(value, (int, float)) and value in {0, 1}:
         return bool(value)
     if isinstance(value, str):
         lowered = value.strip().lower()
@@ -344,7 +354,7 @@ class _HistoryWindow:
 class CcxtFeedHandler:
     """Feed Handler backed by a ccxt.pro exchange."""
 
-    def __init__(
+    def __init__(  # ruff: ignore[too-many-arguments] - keyword-only tuning knobs
         self,
         *,
         config: FeedConfig,
@@ -397,10 +407,11 @@ class CcxtFeedHandler:
         self._watch_for_symbols = self._capability(exchange, "watchOHLCVForSymbols")
         self._watch_one = self._capability(exchange, "watchOHLCV")
         if not (self._watch_for_symbols or self._watch_one):
-            raise ValueError(
+            msg = (
                 f"exchange {config.venue!r} supports neither watchOHLCV nor "
                 "watchOHLCVForSymbols"
             )
+            raise ValueError(msg)
 
     # -- FeedHandler Protocol ------------------------------------------------
 
@@ -433,15 +444,16 @@ class CcxtFeedHandler:
         if parsed not in self._instrument_to_symbol or interval != BASE_INTERVAL:
             return ()
         if not self.supports_history:
-            raise NotImplementedError(
-                f"Feed Handler {self.name!r} does not support history"
-            )
+            msg = f"Feed Handler {self.name!r} does not support history"
+            raise NotImplementedError(msg)
         if self._closed:
-            raise RuntimeError("Feed Handler is closed")
+            msg = "Feed Handler is closed"
+            raise RuntimeError(msg)
         self._ensure_worker()
         loop = self._loop
         if loop is None:
-            raise RuntimeError(f"Feed Handler {self.name!r} worker is not running")
+            msg = f"Feed Handler {self.name!r} worker is not running"
+            raise RuntimeError(msg)
         future = asyncio.run_coroutine_threadsafe(
             self._fetch_history_async(
                 self._instrument_to_symbol[parsed], to_utc(start), to_utc(end)
@@ -477,10 +489,8 @@ class CcxtFeedHandler:
         task = self._watch_task
         if task is not None:
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
-            except (asyncio.CancelledError, Exception):
-                pass
         await self._close_exchange()
 
     async def _close_exchange(self) -> None:
@@ -519,7 +529,8 @@ class CcxtFeedHandler:
             self._thread = thread
             thread.start()
         if not self._ready.wait(timeout=5.0):
-            raise RuntimeError(f"ccxt Feed Handler {self.name!r} failed to start")
+            msg = f"ccxt Feed Handler {self.name!r} failed to start"
+            raise RuntimeError(msg)
 
     def _thread_main(self) -> None:
         loop = asyncio.new_event_loop()
@@ -548,7 +559,7 @@ class CcxtFeedHandler:
                 backoff = self._reconnect_backoff_s
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except Exception as exc:  # ruff: ignore[blind-except] - keep reconnecting
                 if self._closed:
                     return
                 logger.warning(
@@ -773,11 +784,14 @@ def build_feed_handler(
     if feed_config.kind == "fake":
         # Imported lazily: the fake factory itself imports the composite
         # adapter, which must not create an import cycle at module load.
-        from mdgw.ingest.fake import build_fake_feed_handler
+        from mdgw.ingest.fake import (  # ruff: ignore[import-outside-top-level]
+            build_fake_feed_handler,
+        )
 
         return build_fake_feed_handler(feed_config)
     if feed_config.kind != "ccxt":
-        raise ValueError(f"unsupported Feed Handler kind: {feed_config.kind!r}")
+        msg = f"unsupported Feed Handler kind: {feed_config.kind!r}"
+        raise ValueError(msg)
     if exchange is None:
         exchange = _create_exchange(feed_config)
     return CcxtFeedHandler(config=feed_config, exchange=exchange)
@@ -785,15 +799,17 @@ def build_feed_handler(
 
 def _create_exchange(feed_config: FeedConfig):
     try:
-        import ccxt.pro as ccxt_pro
+        # Imported lazily so a missing ccxt.pro surfaces as a configuration
+        # error rather than breaking module import.
+        import ccxt.pro as ccxt_pro  # ruff: ignore[import-outside-top-level]
     except ImportError as exc:  # pragma: no cover - dependency environment
-        raise RuntimeError(
-            "ccxt is required for kind='ccxt' Feed Handlers"
-        ) from exc
+        msg = "ccxt is required for kind='ccxt' Feed Handlers"
+        raise RuntimeError(msg) from exc
 
     exchange_class = getattr(ccxt_pro, feed_config.venue, None)
     if exchange_class is None:
-        raise ValueError(f"unknown ccxt Venue: {feed_config.venue!r}")
+        msg = f"unknown ccxt Venue: {feed_config.venue!r}"
+        raise ValueError(msg)
     return exchange_class(
         {
             "enableRateLimit": feed_config.enable_rate_limit,

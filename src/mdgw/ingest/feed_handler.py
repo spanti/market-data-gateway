@@ -7,11 +7,13 @@ whether it can serve history for Backfill.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
-from datetime import datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
-from mdgw.core.bar import RawBar
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
+    from datetime import datetime
+
+    from mdgw.core.bar import RawBar
 
 
 class FeedHandler(Protocol):
