@@ -142,7 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=_parse_date,
         default=None,
         metavar="YYYY-MM-DD",
-        help="first UTC date to import (inclusive; defaults to --end)",
+        help="first UTC date to import (inclusive; required)",
     )
     backfill.add_argument(
         "--end",
@@ -480,6 +480,18 @@ def _run_archive_backfill(
         )
     if args.interval != "1m":
         parser.error("--interval only supports '1m' in v1")
+    if args.venue != "binance":
+        parser.error("archive backfill only supports --venue binance in v1")
+    if args.market_type != "spot":
+        parser.error(
+            "archive backfill only supports --market-type spot in v1"
+        )
+    if args.start is None:
+        parser.error("--start is required for archive backfill")
+    if args.archive_dir is not None and not args.archive_dir.is_dir():
+        parser.error(
+            f"--archive-dir is not a directory: {args.archive_dir}"
+        )
 
     config = _load_config(args)
     level = getattr(args, "log_level", None) or config.service.log_level
@@ -488,7 +500,7 @@ def _run_archive_backfill(
 
     today = utc_now().date()
     end = args.end or (today - timedelta(days=1))
-    start = args.start or end
+    start = args.start
     if end < start:
         print(
             f"error: --end {end} precedes --start {start}",

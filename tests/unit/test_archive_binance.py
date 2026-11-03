@@ -111,6 +111,15 @@ def test_daily_and_monthly_urls_and_filenames() -> None:
     )
 
 
+def test_archive_url_rejects_non_spot_market_types() -> None:
+    daily = ArchivePeriod("daily", DAY, DAY)
+
+    with pytest.raises(ArchiveFormatError, match="spot"):
+        archive_url(
+            "https://data.binance.vision", "futures", SYMBOL, "1m", daily
+        )
+
+
 def test_plan_daily_never_requests_the_current_or_future_day() -> None:
     periods = plan_archive_periods(
         date(2024, 4, 1),
