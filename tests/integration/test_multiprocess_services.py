@@ -161,6 +161,9 @@ publish_port = {replay_publish_port}
 
 [storage]
 root = "{root.as_posix()}"
+# These tests assert that Bars become visible through the REST API; use the
+# documented immediate-flush setting instead of the one-hour production buffer.
+flush_max_age_s = 0
 
 [collector]
 backfill_hours = 24

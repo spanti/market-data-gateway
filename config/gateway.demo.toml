@@ -58,7 +58,9 @@ format_version = "2.6"
 compression = "zstd"
 row_group_size = 1000000
 flush_max_bytes = 67108864
-flush_max_age_s = 3600
+# The offline demo has only a handful of Bars, so flush by age quickly instead
+# of waiting the production default of one hour.
+flush_max_age_s = 5
 
 [retention]
 enabled = false
@@ -68,6 +70,7 @@ bars_days = 0
 backfill_hours = 24
 stale_after_s = 120
 state_db_name = "state.db"
+write_queue_size = 10000
 
 [aggregation]
 base_interval = "1m"

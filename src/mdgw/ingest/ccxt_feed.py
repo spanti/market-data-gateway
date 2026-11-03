@@ -257,6 +257,7 @@ class _ClosedBarRule:
     def __init__(self) -> None:
         self._pending: dict[str, _RawRow] = {}
         self._last_open_ts: dict[str, datetime] = {}
+        self._last_values: dict[str, tuple] = {}
 
     def accept(self, symbol: str, row: _RawRow) -> _RawRow | None:
         """Return the row once it is closed, or None while it is still forming."""
@@ -273,19 +274,34 @@ class _ClosedBarRule:
             return None
         return self._newer(symbol, pending)
 
-    def remember(self, symbol: str, open_ts: datetime) -> bool:
-        """Advance the per-symbol high-water mark; True when `open_ts` is newer."""
+    def remember(
+        self, symbol: str, open_ts: datetime, values: tuple | None = None
+    ) -> bool:
+        """Return True when this Bar should be emitted.
+
+        A strictly newer `open_ts` always passes. A repeat of the last
+        `open_ts` is dropped only when its values are unchanged; a source
+        correction with the same `open_ts` must still reach the pipeline so the
+        revision merge can persist it.
+        """
         last = self._last_open_ts.get(symbol)
-        if last is not None and open_ts <= last:
-            return False
-        self._last_open_ts[symbol] = open_ts
-        return True
+        if last is None or open_ts > last:
+            self._last_open_ts[symbol] = open_ts
+            if values is not None:
+                self._last_values[symbol] = values
+            return True
+        if open_ts == last and values is not None:
+            previous = self._last_values.get(symbol)
+            if previous is None or values != previous:
+                self._last_values[symbol] = values
+                return True
+        return False
 
     def last_open_ts(self, symbol: str) -> datetime | None:
         return self._last_open_ts.get(symbol)
 
     def _newer(self, symbol: str, row: _RawRow) -> _RawRow | None:
-        return row if self.remember(symbol, row.open_ts) else None
+        return row if self.remember(symbol, row.open_ts, row.values) else None
 
 
 # -- REST history window -----------------------------------------------------
@@ -720,7 +736,16 @@ class CcxtFeedHandler:
             )
             bars = await self._fetch_history_async(symbol, start, now)
             for bar in bars:
-                if self._closed_bar_rule.remember(symbol, bar.open_ts):
+                values = (
+                    bar.open,
+                    bar.high,
+                    bar.low,
+                    bar.close,
+                    bar.volume,
+                )
+                if self._closed_bar_rule.remember(
+                    symbol, bar.open_ts, values
+                ):
                     self._enqueue(bar)
 
     # -- helpers -------------------------------------------------------------

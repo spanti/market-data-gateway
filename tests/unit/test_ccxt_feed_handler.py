@@ -214,6 +214,36 @@ def test_explicitly_closed_bar_is_emitted_once() -> None:
     assert [bar.open_ts for bar in bars] == [base + timedelta(minutes=1)]
 
 
+def test_closed_bar_correction_at_the_same_open_ts_is_emitted() -> None:
+    exchange = FakeExchange()
+    handler = CcxtFeedHandler(config=_config(), exchange=exchange)
+    base = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+    try:
+        exchange.push_for_symbols(
+            {SYMBOL: [_row(base, close=100.5, closed=True)]}
+        )
+        first = _collect(handler, 1)
+
+        # The Venue corrects an already-closed Bar. It must not be swallowed
+        # by the per-symbol high-water mark.
+        exchange.push_for_symbols(
+            {SYMBOL: [_row(base, close=101.5, closed=True)]}
+        )
+        corrected = _collect(handler, 1)
+
+        # An unchanged repeat of the correction is still deduplicated.
+        exchange.push_for_symbols(
+            {SYMBOL: [_row(base, close=101.5, closed=True)]}
+        )
+        assert _collect(handler, 1, timeout=0.4) == []
+    finally:
+        handler.close()
+
+    assert [bar.close for bar in first] == [Decimal("100.5")]
+    assert [bar.open_ts for bar in corrected] == [base]
+    assert corrected[0].close == Decimal("101.5")
+
+
 def test_explicitly_forming_bar_is_never_emitted() -> None:
     exchange = FakeExchange()
     handler = CcxtFeedHandler(config=_config(), exchange=exchange)

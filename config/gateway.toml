@@ -61,6 +61,8 @@ schema_version = 1
 format_version = "2.6"
 compression = "zstd"
 row_group_size = 1000000
+# Flush the collector write buffer on whichever limit is reached first.
+# Setting either value to 0 (or less) flushes after every ingest batch.
 flush_max_bytes = 67108864
 flush_max_age_s = 3600
 
@@ -75,6 +77,9 @@ backfill_hours = 24
 stale_after_s = 120
 # SQLite HWM database under the storage root.
 state_db_name = "state.db"
+# Bounded queue between ingest and the collector writer. When full, the
+# oldest Bar is dropped and counted in the lag/dropped metrics.
+write_queue_size = 10000
 
 [aggregation]
 base_interval = "1m"

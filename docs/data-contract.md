@@ -369,28 +369,42 @@ therefore:
 1. keep only the row with the maximum `revision` per identity;
 2. never assume one row per identity in the raw Dataset.
 
-The gateway applies this rule when replaying (`ReplayBarSource` keeps the
-highest revision and uses `ingest_ts` to break equal-revision ties) and when
-backfilling. Downstream consumers must do the same before treating Bars as a
-unique series.
+The gateway applies this rule on every persistence path: live ingest and
+Backfill merge against the existing identity (including Bars still buffered for
+writing), and readers such as `ReplayBarSource` keep the highest revision and
+use `ingest_ts` to break equal-revision ties. Downstream consumers must do the
+same before treating Bars as a unique series.
 
 Aggregated parent Bars follow the rule too: a changed child can move the
 parent to `parent_revision + 1`.
 
 ## 10. History freshness
 
-Historical REST reads see only flushed Data Files. The contract reserves a
-write buffer bounded by `[storage].flush_max_bytes` (64 MiB) and
-`[storage].flush_max_age_s` (3600 s); a buffered deployment can therefore omit
-recent Bars from `/api/v1/bars` even though they are already in the live
-stream. The reference collector in this checkout writes each ingest batch
-immediately, so in practice its history is fresh right after ingest; treat the
-buffer as a deployment option, not a promise that every Bar is visible.
+Historical REST reads see only flushed Data Files. The collector Service Role
+writes through a bounded queue (default 10,000 Bars; `[collector].write_queue_size`)
+and an independent writer thread. The writer flushes on the first of:
+
+- `[storage].flush_max_bytes` (default 64 MiB), estimated from the queued Bars;
+- `[storage].flush_max_age_s` (default 3600 s), measured from the oldest queued
+  Bar.
+
+Setting either value to `0` or less flushes after every ingest batch. A full
+queue drops its oldest Bar and increments the collector's dropped/lag counters;
+that Bar was already published on the Streaming Interface but is absent from
+history, and Backfill can recover it. On shutdown the remaining queue is
+flushed before the data High-Water Mark store is closed.
+
+Bars are therefore already on the live stream before they appear in history.
+The data High-Water Mark and health/freshness tracking advance only after a
+flush succeeds, so buffered Bars never look durable. The single-process
+`GatewayRuntime` uses the immediate sink and its history is fresh right after
+`ingest()`.
 
 `GET /api/v1/status` reports the Dataset status, including `last_flushed_ts`
 (per Dataset and per interval), so a client can decide whether the history is
-fresh enough. For real-time data, consume the Streaming Interface instead of
-polling history.
+fresh enough. The collector `/status` and `/metrics` additionally expose the
+write-queue depth, dropped/lag counters, and the last flush timestamp/duration.
+For real-time data, consume the Streaming Interface instead of polling history.
 
 ## 11. pandas notes
 

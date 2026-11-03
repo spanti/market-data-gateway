@@ -231,6 +231,9 @@ class CollectorConfig(_ConfigModel):
     backfill_hours: float = Field(default=24.0, ge=0)
     stale_after_s: float = Field(default=120.0, ge=0)
     state_db_name: str = "state.db"
+    # Bounded live-write queue between ingest and the collector writer thread.
+    # A full queue drops its oldest Bar and increments the lag/dropped metric.
+    write_queue_size: int = Field(default=10_000, ge=1)
 
     @field_validator("state_db_name")
     @classmethod

@@ -74,3 +74,24 @@ def test_wait_for_api_defaults_to_config_and_can_be_overridden(
     started = time.monotonic()
     assert overridden._wait_for_api_ready() is True
     assert time.monotonic() - started < 1.0
+
+
+def test_status_and_metrics_expose_the_buffered_writer(tmp_path: Path) -> None:
+    service = _service(tmp_path, _config(wait_for_api_ready=False))
+
+    payload = service.status_payload()
+    assert payload["write_queue_depth"] == 0
+    assert payload["write_dropped_bars"] == 0
+    assert payload["write_lag_bars"] == 0
+    assert payload["write_last_flush_ts"] is None
+    assert payload["write_sink"]["mode"] == "buffered"
+    assert payload["write_sink"]["queue_capacity"] == 10_000
+
+    text = service.render_metrics()
+    for line in (
+        "mdgw_collector_write_queue_depth 0",
+        "mdgw_collector_write_dropped_total 0",
+        "mdgw_collector_write_lag_total 0",
+        "mdgw_collector_last_flush_ts_seconds 0",
+    ):
+        assert line in text

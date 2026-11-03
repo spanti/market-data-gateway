@@ -17,8 +17,9 @@ from mdgw.core.schema import bars_to_logical_table
 from mdgw.ingest.composite import build_configured_feed_handler
 from mdgw.ingest.feed_handler import FeedHandler
 from mdgw.metrics import MetricsRegistry
+from mdgw.service.bar_sink import BufferedBarSink
 from mdgw.service.collector_core import CollectorCore
-from mdgw.service.common import ns_iso, update_dataset_metrics
+from mdgw.service.common import iso_to_seconds, ns_iso, update_dataset_metrics
 from mdgw.service.health_server import ServiceHealthServer
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,12 @@ class CollectorService:
             feed_handler=self._feed_handler,
             config=config,
             data_root=data_root,
+            sink_factory=lambda store: BufferedBarSink(
+                store,
+                queue_size=config.collector.write_queue_size,
+                flush_max_bytes=config.storage.flush_max_bytes,
+                flush_max_age_s=config.storage.flush_max_age_s,
+            ),
         )
         self.metrics = MetricsRegistry()
 
@@ -344,6 +351,7 @@ class CollectorService:
 
     def status_payload(self) -> dict:
         health = self.core.health_snapshot()
+        sink = self.core.sink.stats()
         return {
             "service": "collector",
             "role": "collector",
@@ -356,6 +364,12 @@ class CollectorService:
             "bars_written": self.core.bars_written,
             "stale_count": health.get("stale_count", 0),
             "gap_unrecoverable_count": health.get("gap_unrecoverable_count", 0),
+            "write_queue_depth": sink.get("queue_depth", 0),
+            "write_dropped_bars": sink.get("dropped_bars", 0),
+            "write_lag_bars": sink.get("lag_bars", 0),
+            "write_last_flush_ts": sink.get("last_flush_ts"),
+            "write_last_flush_duration_s": sink.get("last_flush_duration_s"),
+            "write_sink": sink,
             "health": health,
         }
 
@@ -381,6 +395,32 @@ class CollectorService:
             "mdgw_collector_gap_unrecoverable_count",
             health.get("gap_unrecoverable_count", 0),
             help="Unrecoverable gap events",
+        )
+        sink = self.core.sink.stats()
+        self.metrics.set(
+            "mdgw_collector_write_queue_depth",
+            sink.get("queue_depth", 0),
+            help="Bars waiting in the collector write queue",
+        )
+        self.metrics.set(
+            "mdgw_collector_write_dropped_total",
+            sink.get("dropped_bars", 0),
+            help="Bars dropped because the write queue was full",
+        )
+        self.metrics.set(
+            "mdgw_collector_write_lag_total",
+            sink.get("lag_bars", 0),
+            help="Cumulative write-queue lag (dropped Bars)",
+        )
+        self.metrics.set(
+            "mdgw_collector_last_flush_ts_seconds",
+            iso_to_seconds(sink.get("last_flush_ts")),
+            help="Last successful write-buffer flush timestamp",
+        )
+        self.metrics.set(
+            "mdgw_collector_last_flush_duration_seconds",
+            sink.get("last_flush_duration_s") or 0.0,
+            help="Duration of the last successful write-buffer flush",
         )
         update_dataset_metrics(self.metrics, self.core.store)
         return self.metrics.render()

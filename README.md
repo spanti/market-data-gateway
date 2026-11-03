@@ -126,9 +126,12 @@ python benchmarks/bench_replay.py
 
 - **Bar-only.** No trades, quotes, order book or tick data.
 - **History freshness.** Historical reads only see flushed Data Files. The
-  reference collector writes each ingest batch immediately, but a buffered
-  deployment can lag; consult `last_flushed_ts` in `/api/v1/status` and use the
-  live stream when freshness matters.
+  collector Service Role buffers writes (64 MiB or 1 hour, whichever comes
+  first; set `flush_max_bytes` or `flush_max_age_s` to `0` for immediate flush)
+  and advances its data High-Water Mark only after a successful flush. Bars are
+  live on the Streaming Interface before they appear in history; consult
+  `last_flushed_ts` in `/api/v1/status` and use the live stream when freshness
+  matters. `GatewayRuntime` writes immediately.
 - **Archive import and collector share state.** Run `mdgw backfill --archive`
   while the collector is stopped (or otherwise coordinate them): both use the
   same Dataset and High Water Mark database.

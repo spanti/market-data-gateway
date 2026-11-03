@@ -18,7 +18,7 @@ before there is something to write.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from mdgw.core.bar import Bar
@@ -27,6 +27,11 @@ from mdgw.core.time import datetime_to_ns, to_utc
 from mdgw.store.parquet_dataset import ParquetBarStore
 
 BASE_INTERVAL = "1m"
+
+# Resolve the Bars already known for a `(instrument, interval, open_ts)` key.
+# The live collector supplies a reader that also sees unflushed buffered Bars;
+# Backfill and archive import fall back to the Parquet Dataset.
+ExistingBarReader = Callable[[str, str, int, int], dict[int, Bar]]
 
 
 @dataclass
@@ -79,36 +84,56 @@ def merge_bar_batch(
     base_bars: Sequence[Bar],
     read_start_ns: int,
     read_end_ns: int,
+    existing_reader: ExistingBarReader | None = None,
 ) -> MergeResult:
     """Merge base-interval Bars with what is stored and rebuild their parents.
 
     `read_start_ns`/`read_end_ns` bound the existing-Bar lookup; `read_end_ns`
     is exclusive. Parent lookups start at the epoch-aligned boundary so a
     parent window that begins before `read_start_ns` is still found.
+
+    `existing_reader` lets the live collector include Bars that are buffered but
+    not yet flushed. Duplicates inside one batch are collapsed too, so a Feed
+    Handler that repeats the same closed Bar cannot append it twice.
     """
-    existing_base = read_existing_bars(
-        store, instrument_id, BASE_INTERVAL, read_start_ns, read_end_ns
+    read_existing = existing_reader or (
+        lambda target_instrument, target_interval, start_ns, end_ns: (
+            read_existing_bars(
+                store, target_instrument, target_interval, start_ns, end_ns
+            )
+        )
+    )
+    existing_base = read_existing(
+        instrument_id, BASE_INTERVAL, read_start_ns, read_end_ns
     )
 
     aggregation_inputs: list[Bar] = []
     base_writes: list[Bar] = []
+    staged: dict[int, Bar] = {}
     skipped = 0
     revisions = 0
     for bar in base_bars:
         key = datetime_to_ns(to_utc(bar.open_ts))
-        previous = existing_base.get(key)
+        previous = staged.get(key)
+        staged_in_batch = previous is not None
         if previous is None:
+            previous = existing_base.get(key)
+        if previous is None:
+            staged[key] = bar
             aggregation_inputs.append(bar)
             base_writes.append(bar)
         elif same_bar_content(bar, previous):
             # Feed the stored revision so a fresh Aggregator rebuilds the same
-            # parents without treating the Bar as new.
-            aggregation_inputs.append(previous)
+            # parents without treating the Bar as new. A duplicate already
+            # staged in this batch was fed once and must not be fed again.
+            if not staged_in_batch:
+                aggregation_inputs.append(previous)
             skipped += 1
         else:
             corrected = with_revision(
                 bar, next_revision(previous.revision, bar.revision)
             )
+            staged[key] = corrected
             aggregation_inputs.append(corrected)
             base_writes.append(corrected)
             revisions += 1
@@ -120,8 +145,8 @@ def merge_bar_batch(
     for interval, group in group_bars_by_interval(aggregator.add_many(aggregation_inputs)).items():
         width_ns = interval_ns(interval)
         parent_start_ns = (read_start_ns // width_ns) * width_ns
-        existing_parents = read_existing_bars(
-            store, instrument_id, interval, parent_start_ns, read_end_ns
+        existing_parents = read_existing(
+            instrument_id, interval, parent_start_ns, read_end_ns
         )
         for bar in group:
             previous = existing_parents.get(datetime_to_ns(to_utc(bar.open_ts)))
@@ -229,6 +254,7 @@ def _row_to_bar(row: dict) -> Bar:
 
 __all__ = [
     "BASE_INTERVAL",
+    "ExistingBarReader",
     "MergeResult",
     "group_bars_by_interval",
     "interval_ns",

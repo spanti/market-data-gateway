@@ -75,24 +75,37 @@ class TickingFeedHandler:
     name = "ticking"
     supports_history = False
 
-    def __init__(self, instrument_ids: tuple[str, ...], start: datetime) -> None:
+    def __init__(
+        self,
+        instrument_ids: tuple[str, ...],
+        start: datetime,
+        *,
+        open: Decimal = Decimal("100.5"),
+        high: Decimal = Decimal("101.5"),
+        low: Decimal = Decimal("99.5"),
+        close: Decimal = Decimal("100.9"),
+        volume: Decimal = Decimal("3.25"),
+        trade_count: int = 7,
+    ) -> None:
         self.instrument_ids = instrument_ids
         self._next = start
+        self._values = (open, high, low, close, volume, trade_count)
 
     def iter_bars(self):
         open_ts = self._next
         self._next += timedelta(minutes=1)
+        open, high, low, close, volume, trade_count = self._values
         for instrument_id in self.instrument_ids:
             yield RawBar(
                 instrument_id=instrument_id,
                 interval="1m",
                 open_ts=open_ts,
-                open=Decimal("100.5"),
-                high=Decimal("101.5"),
-                low=Decimal("99.5"),
-                close=Decimal("100.9"),
-                volume=Decimal("3.25"),
-                trade_count=7,
+                open=open,
+                high=high,
+                low=low,
+                close=close,
+                volume=volume,
+                trade_count=trade_count,
                 revision=0,
             )
 
@@ -185,7 +198,18 @@ def _collect_zmq_until(
 
 
 def test_external_zmq_sub_gets_arrow_ipc_for_exact_topic(tmp_path: Path) -> None:
-    feed = FakeFeedHandler(instrument_id=BTC, bars=[_bar_input(0)])
+    # A fresh Bar per retry: the slow-joiner loop must not depend on the
+    # gateway republishing identical content (live dedupe skips that).
+    feed = TickingFeedHandler(
+        (BTC,),
+        start=datetime(2024, 1, 1, tzinfo=UTC),
+        open=Decimal("65000.1"),
+        high=Decimal("65010.0"),
+        low=Decimal("64990.0"),
+        close=Decimal("65005.5"),
+        volume=Decimal("12.34"),
+        trade_count=128,
+    )
     context = zmq.Context()
     subscriber = context.socket(zmq.SUB)
     subscriber.setsockopt(zmq.LINGER, 0)
@@ -217,8 +241,10 @@ def test_external_zmq_sub_gets_arrow_ipc_for_exact_topic(tmp_path: Path) -> None
     assert table.num_rows == 1
     assert table.column("instrument_id").to_pylist() == [BTC]
     assert table.column("open").to_pylist() == [Decimal("65000.1")]
+    assert table.column("volume").to_pylist() == [Decimal("12.34")]
+    open_ts = table.column("open_ts").to_pylist()[0]
     assert table.column("event_ts").to_pylist() == [
-        datetime(2024, 1, 1, 0, 1, tzinfo=UTC)
+        open_ts + timedelta(minutes=1)
     ]
 
 

@@ -17,6 +17,7 @@ from typing import Callable
 
 from mdgw.aggregate import BarAggregator
 from mdgw.backfill import BackfillReport, run_backfill
+from mdgw.backfill_common import interval_ns, merge_bar_batch
 from mdgw.config import GatewayConfig
 from mdgw.core.bar import Bar
 from mdgw.core.errors import UnknownInstrumentError
@@ -29,6 +30,7 @@ from mdgw.reference import (
     export_instrument_snapshot,
     load_instrument_reference,
 )
+from mdgw.service.bar_sink import BarSink, ImmediateBarSink
 from mdgw.state.health import GapEvent, HealthTracker
 from mdgw.state.high_water_mark import HighWaterMarkStore
 from mdgw.store.parquet_dataset import ParquetBarStore
@@ -51,6 +53,8 @@ class CollectorCore:
         aggregator: BarAggregator | None = None,
         health: HealthTracker | None = None,
         asset_class_for: AssetClassResolver | None = None,
+        sink: BarSink | None = None,
+        sink_factory: Callable[[ParquetBarStore], BarSink] | None = None,
     ) -> None:
         self.feed_handler = feed_handler
         self.config = config
@@ -68,6 +72,19 @@ class CollectorCore:
         )
         self.health = health or HealthTracker(
             stale_after_s=config.collector.stale_after_s
+        )
+        # `GatewayRuntime` uses the default immediate sink; the collector
+        # Service Role injects a buffered sink through `sink_factory`.
+        if sink is None:
+            sink = (
+                sink_factory(self.store)
+                if sink_factory is not None
+                else ImmediateBarSink(self.store)
+            )
+        self.sink = sink
+        self.sink.bind(
+            on_persisted=self._on_persisted,
+            asset_class_for=self.asset_class_for,
         )
         # `GatewayRuntime` passes its own resolver because tests replace the
         # runtime's Instrument Store after start.
@@ -98,9 +115,14 @@ class CollectorCore:
             raise
 
     def close_state(self) -> None:
-        if self.hwm is not None:
-            self.hwm.close()
-            self.hwm = None
+        # The sink flushes any buffered Bars before the HWM is closed, so
+        # shutdown cannot lose a Bar that was already accepted for writing.
+        try:
+            self.sink.close()
+        finally:
+            if self.hwm is not None:
+                self.hwm.close()
+                self.hwm = None
 
     # -- collector behavior ------------------------------------------------
 
@@ -127,45 +149,64 @@ class CollectorCore:
         # aggregator advances any window or retention water mark. Rejecting a
         # batch must leave the Aggregation state untouched so the same Bars can
         # be retried once the reference data is fixed.
-        asset_classes: dict[str, str] = {}
         for bar in base_bars:
-            if bar.instrument_id not in asset_classes:
-                asset_classes[bar.instrument_id] = self.asset_class_for(
-                    bar.instrument_id
-                )
+            self.asset_class_for(bar.instrument_id)
 
-        aggregated = self.aggregator.add_many(base_bars)
-        bars = base_bars + aggregated
+        # Every persistence path uses the same `(instrument, interval,
+        # open_ts)` merge: identical content is skipped, corrections get a
+        # higher revision, and parents are rebuilt in the same transaction.
+        # The sink contributes unflushed Bars to the lookup so buffering cannot
+        # append the same Bar twice.
+        by_instrument: dict[str, list[Bar]] = defaultdict(list)
+        for bar in base_bars:
+            by_instrument[bar.instrument_id].append(bar)
 
-        by_asset_class: dict[str, list[Bar]] = defaultdict(list)
-        for bar in bars:
-            by_asset_class[asset_classes[bar.instrument_id]].append(bar)
-        for asset_class, group in sorted(by_asset_class.items()):
-            self.store.write_bars(group, asset_class=asset_class)
+        base_interval_ns = interval_ns(self.config.aggregation.base_interval)
+        written: list[Bar] = []
+        for instrument_id, group in by_instrument.items():
+            open_ns = [datetime_to_ns(bar.open_ts) for bar in group]
+            result = merge_bar_batch(
+                store=self.store,
+                aggregator=self.aggregator,
+                instrument_id=instrument_id,
+                base_bars=group,
+                read_start_ns=min(open_ns),
+                read_end_ns=max(open_ns) + base_interval_ns,
+                existing_reader=self.sink.existing_bars,
+            )
+            written.extend(result.written)
 
-        # HWM and freshness are updated only after the write succeeded, so a
-        # failed flush cannot make a Bar look persisted.
-        self.advance_hwm(bars)
-        for bar in bars:
-            self.health.record_bar(bar)
-        self.register_expected_keys()
+        if written:
+            # HWM, health and freshness advance from the sink's
+            # `_on_persisted` callback only after the Store write succeeds.
+            self.sink.write_bars(written)
 
         self.bars_ingested += len(base_bars)
-        self.bars_written += len(bars)
+        self.bars_written += len(written)
         self.last_ingest_ts = ingest_ts
 
         instrument_ids = sorted({bar.instrument_id for bar in base_bars})
         logger.info(
             "collector ingested %d base Bar(s), wrote %d Bar(s)",
             len(base_bars),
-            len(bars),
+            len(written),
             extra={
                 "event": "collector.batch_ingested",
                 "feed": self.feed_handler.name,
                 "instrument_id": ",".join(instrument_ids),
             },
         )
-        return len(base_bars), bars
+        return len(base_bars), written
+
+    def _on_persisted(self, bars: list[Bar] | tuple[Bar, ...]) -> None:
+        """Advance data HWM and freshness after Bars were durably written."""
+        persisted = list(bars)
+        if not persisted:
+            return
+        self.advance_hwm(persisted)
+        for bar in persisted:
+            self.health.record_bar(bar)
+        self.register_expected_keys()
 
     def backfill(self, now: datetime | None = None) -> BackfillReport:
         """Backfill closed 1m Bars from the HWM (or the configured window)."""
