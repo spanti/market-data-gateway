@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Subscribe to the live Streaming Interface over WebSocket.
 
-This uses the optional `websockets` dependency that ships with the client
-extra (`pip install "mdgw-client[ws]"`). Topics are *prefix* subscriptions, so
+This uses the optional `websockets` dependency (`pip install websockets`).
+Topics are *prefix* subscriptions, so
 `market.bar.` matches every Bar and `market.bar.1m.binance:` matches every
 instrument at 1m.
 
