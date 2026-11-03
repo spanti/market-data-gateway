@@ -7,17 +7,32 @@ solve the PUB/SUB slow-joiner problem described in DESIGN §2.2.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
-from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import zmq
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
 READY_TOPIC = "_internal.ready"
 
-import logging
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _Subscription:
+    endpoint: str
+    topic_prefixes: tuple[str, ...]
+    handler: Callable[[str, bytes], None]
+    stop_event: threading.Event
+    ready_event: threading.Event
+    sub_id: str
+    thread: threading.Thread | None = None
 
 
 def table_to_ipc(table: pa.Table) -> bytes:
@@ -42,7 +57,7 @@ class ZMQBus:
         self._pub_lock = threading.Lock()
         self._bound_endpoints: tuple[str, ...] = ()
 
-        self._subscribers: list[tuple[threading.Thread, threading.Event, threading.Event]] = []
+        self._subscribers: list[_Subscription] = []
         self._sub_lock = threading.Lock()
 
         self._closed = False
@@ -57,15 +72,17 @@ class ZMQBus:
         """
         endpoints = [endpoint] if isinstance(endpoint, str) else list(endpoint)
         if not endpoints:
-            raise ValueError("at least one publisher endpoint is required")
+            msg = "at least one publisher endpoint is required"
+            raise ValueError(msg)
 
         with self._pub_lock:
             if self._publisher is not None:
-                raise RuntimeError("Publisher is already bound")
+                msg = "Publisher is already bound"
+                raise RuntimeError(msg)
 
             publisher = self._context.socket(zmq.PUB)
             publisher.setsockopt(zmq.SNDHWM, self._zmq_hwm)
-            # 进程内通信时，设置 Linger=0 确保关闭时不阻塞
+            # 进程内通信时, 设置 Linger=0 确保关闭时不阻塞
             publisher.setsockopt(zmq.LINGER, 0)
             resolved: list[str] = []
             try:
@@ -101,62 +118,66 @@ class ZMQBus:
         prefixes = (topic_prefix, *tuple(extra_prefixes))
         sub_id = f"{endpoint}-{','.join(prefixes)}"
 
-        thread = threading.Thread(
+        subscription = _Subscription(
+            endpoint=endpoint,
+            topic_prefixes=prefixes,
+            handler=handler,
+            stop_event=stop_event,
+            ready_event=ready_event,
+            sub_id=sub_id,
+        )
+        subscription.thread = threading.Thread(
             target=self._run_subscriber,
-            args=(
-                endpoint,
-                prefixes,
-                handler,
-                stop_event,
-                ready_event,
-                sub_id,
-            ),
+            args=(subscription,),
             name="mdgw-zmq-subscriber",
             daemon=True,
         )
 
         with self._sub_lock:
             if self._closed:
-                raise RuntimeError("Bus is closed")
-            self._subscribers.append((thread, stop_event, ready_event))
-            thread.start()
+                msg = "Bus is closed"
+                raise RuntimeError(msg)
+            self._subscribers.append(subscription)
+            subscription.thread.start()
         return ready_event
 
     def publish(self, topic: str, payload: bytes) -> None:
         with self._pub_lock:
             if self._publisher is None:
-                raise RuntimeError("Publisher is not bound")
+                msg = "Publisher is not bound"
+                raise RuntimeError(msg)
             if self._closed:
                 return
             self._publisher.send_multipart([topic.encode("utf-8"), payload])
 
-    def wait_for_subscriber(self, ready_events: list[threading.Event] | threading.Event, timeout: float = 2.0) -> None:
-        """Publish readiness pings until specified SUB socket(s) are actually receiving."""
-        events = [ready_events] if isinstance(ready_events, threading.Event) else ready_events
+    def wait_for_subscriber(
+        self,
+        ready_events: list[threading.Event] | threading.Event,
+        timeout: float = 2.0,
+    ) -> None:
+        """Publish readiness pings until given SUB socket(s) are receiving."""
+        events = (
+            [ready_events]
+            if isinstance(ready_events, threading.Event)
+            else ready_events
+        )
         if not events:
             return
         deadline = time.monotonic() + timeout
 
         while not all(event.is_set() for event in events):
             if time.monotonic() >= deadline:
-                raise TimeoutError("no ZMQ subscriber became ready")
+                msg = "no ZMQ subscriber became ready"
+                raise TimeoutError(msg)
             try:
                 self.publish(READY_TOPIC, b"")
             except RuntimeError:
                 break
             time.sleep(0.01)
 
-    def _run_subscriber(
-        self,
-        endpoint: str,
-        topic_prefixes: Iterable[str],
-        handler: Callable[[str, bytes], None],
-        stop_event: threading.Event,
-        ready_event: threading.Event,
-        sub_id: str,
-    ) -> None:
+    def _run_subscriber(self, subscription: _Subscription) -> None:
         socket = self._context.socket(zmq.SUB)
-        for prefix in topic_prefixes:
+        for prefix in subscription.topic_prefixes:
             socket.setsockopt(zmq.SUBSCRIBE, prefix.encode("utf-8"))
         socket.setsockopt(zmq.SUBSCRIBE, READY_TOPIC.encode("utf-8"))
         socket.setsockopt(zmq.RCVHWM, self._zmq_hwm)
@@ -164,8 +185,8 @@ class ZMQBus:
         poller = zmq.Poller()
         poller.register(socket, zmq.POLLIN)
         try:
-            socket.connect(endpoint)
-            while not stop_event.is_set():
+            socket.connect(subscription.endpoint)
+            while not subscription.stop_event.is_set():
                 socks = dict(poller.poll(20))
                 if socket not in socks or socks[socket] != zmq.POLLIN:
                     continue
@@ -174,12 +195,15 @@ class ZMQBus:
                 topic = topic_bytes.decode("utf-8")
                 if topic == READY_TOPIC:
                     # Receiving a ping proves subscription forwarding finished.
-                    ready_event.set()
+                    subscription.ready_event.set()
                     continue
                 try:
-                    handler(topic, payload)
-                except Exception as e:
-                    logger.error(f"[Sub-{sub_id}] Error in message handler: {e}", exc_info=True)
+                    subscription.handler(topic, payload)
+                except Exception:
+                    logger.exception(
+                        "[Sub-%s] Error in message handler",
+                        subscription.sub_id,
+                    )
         finally:
             poller.unregister(socket)
             socket.close()
@@ -190,9 +214,9 @@ class ZMQBus:
                 return
             self._closed = True
             
-            for _, stop_event, _ in self._subscribers:
-                stop_event.set()
-                
+            for subscription in self._subscribers:
+                subscription.stop_event.set()
+
             subscribers_to_join = list(self._subscribers)
             self._subscribers.clear()
 
@@ -201,7 +225,8 @@ class ZMQBus:
                 self._publisher = None
             self._bound_endpoints = ()
 
-        for thread, _, _ in subscribers_to_join:
-            thread.join(timeout=2.0)
+        for subscription in subscribers_to_join:
+            if subscription.thread is not None:
+                subscription.thread.join(timeout=2.0)
 
         self._context.term()
