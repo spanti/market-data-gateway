@@ -13,6 +13,7 @@ htmlcov/
 
 # Runtime data
 data/
+data-demo/
 
 # Editor
 .vscode/
