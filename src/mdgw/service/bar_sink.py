@@ -23,7 +23,11 @@ from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Protocol
 
-from mdgw.backfill_common import read_existing_bars, same_bar_content
+from mdgw.backfill_common import (
+    interval_ns,
+    read_existing_bars,
+    same_bar_content,
+)
 from mdgw.core.bar import Bar
 from mdgw.core.time import datetime_to_ns, utc_now
 from mdgw.service.common import ns_iso
@@ -68,6 +72,10 @@ class BarSink(Protocol):
         self, instrument_id: str, interval: str, start_ns: int, end_ns: int
     ) -> dict[int, Bar]: ...
 
+    def hwm_cap(
+        self, instrument_id: str, interval: str, candidate_open_ns: int
+    ) -> int | None: ...
+
     def write_bars(self, bars: Sequence[Bar]) -> None: ...
 
     def flush(self) -> None: ...
@@ -105,6 +113,11 @@ class ImmediateBarSink:
         return read_existing_bars(
             self._store, instrument_id, interval, start_ns, end_ns
         )
+
+    def hwm_cap(
+        self, instrument_id: str, interval: str, candidate_open_ns: int
+    ) -> int | None:
+        return candidate_open_ns
 
     def write_bars(self, bars: Sequence[Bar]) -> None:
         if not bars:
@@ -182,6 +195,10 @@ class BufferedBarSink:
             OrderedDict()
         )
         self._pending_bytes = 0
+        # (instrument_id, interval) -> dropped open_ts values. While a dropped
+        # identity has not been persisted again, the data HWM is capped below
+        # it so Backfill re-fetches the hole instead of skipping it.
+        self._dropped: dict[tuple[str, str], set[int]] = {}
         self._condition = threading.Condition()
         self._thread: threading.Thread | None = None
         self._stop = False
@@ -270,9 +287,35 @@ class BufferedBarSink:
             dropped_key, (dropped, _) = self._pending.popitem(last=False)
             self._pending_bytes -= estimate_bar_bytes(dropped)
             self.dropped_bars += 1
+            self._record_dropped_locked(dropped)
             self._log_drop_locked(dropped)
         self._pending[key] = (bar, now)
         self._pending_bytes += size
+
+    def _record_dropped_locked(self, bar: Bar) -> None:
+        key = (bar.instrument_id, bar.interval)
+        self._dropped.setdefault(key, set()).add(
+            datetime_to_ns(bar.open_ts)
+        )
+
+    def _clear_dropped_locked(self, bar: Bar) -> None:
+        key = (bar.instrument_id, bar.interval)
+        dropped = self._dropped.get(key)
+        if not dropped:
+            return
+        dropped.discard(datetime_to_ns(bar.open_ts))
+        if not dropped:
+            del self._dropped[key]
+
+    def hwm_cap(
+        self, instrument_id: str, interval: str, candidate_open_ns: int
+    ) -> int | None:
+        """Return the highest HWM that still leaves a dropped gap recoverable."""
+        with self._condition:
+            dropped = self._dropped.get((instrument_id, interval))
+            if not dropped:
+                return candidate_open_ns
+            return min(dropped) - interval_ns(interval)
 
     def _log_drop_locked(self, bar: Bar) -> None:
         total = self.dropped_bars
@@ -326,7 +369,9 @@ class BufferedBarSink:
             # test); persist synchronously rather than losing the queue.
             with self._condition:
                 snapshot = list(self._pending.items())
-            self._flush_snapshot(snapshot)
+            if self._flush_snapshot(snapshot):
+                with self._condition:
+                    self._remove_flushed_locked(snapshot)
 
     # -- writer thread -----------------------------------------------------
 
@@ -408,6 +453,10 @@ class BufferedBarSink:
             return False
 
         with self._condition:
+            # The Store write succeeded, so any of these identities that were
+            # dropped earlier are durable again and no longer cap the HWM.
+            for bar in bars:
+                self._clear_dropped_locked(bar)
             self._last_flush_failed = False
             self._last_flush_ts = utc_now()
             self._last_flush_duration_s = duration
@@ -446,6 +495,9 @@ class BufferedBarSink:
                 "pending_bytes": self._pending_bytes,
                 "dropped_bars": self.dropped_bars,
                 "lag_bars": self.dropped_bars,
+                "dropped_identities": sum(
+                    len(values) for values in self._dropped.values()
+                ),
                 "flushes": self._flushes,
                 "flush_failures": self._flush_failures,
                 "persisted_bars": self._persisted_bars,

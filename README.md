@@ -131,7 +131,9 @@ python benchmarks/bench_replay.py
   and advances its data High-Water Mark only after a successful flush. Bars are
   live on the Streaming Interface before they appear in history; consult
   `last_flushed_ts` in `/api/v1/status` and use the live stream when freshness
-  matters. `GatewayRuntime` writes immediately.
+  matters. A Bar dropped by a full queue is counted in lag and caps the HWM
+  below itself, so the next Backfill recovers it. `GatewayRuntime` writes
+  immediately.
 - **Archive import and collector share state.** Run `mdgw backfill --archive`
   while the collector is stopped (or otherwise coordinate them): both use the
   same Dataset and High Water Mark database.

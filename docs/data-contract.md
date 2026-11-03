@@ -391,8 +391,11 @@ and an independent writer thread. The writer flushes on the first of:
 Setting either value to `0` or less flushes after every ingest batch. A full
 queue drops its oldest Bar and increments the collector's dropped/lag counters;
 that Bar was already published on the Streaming Interface but is absent from
-history, and Backfill can recover it. On shutdown the remaining queue is
-flushed before the data High-Water Mark store is closed.
+history. While the dropped identity is outstanding, the data High-Water Mark is
+capped below it at `min(dropped open_ts) - interval`, so the next Backfill
+re-fetches from before the hole and recovers the Bar. Persisting that identity
+again through the sink clears the drop and lets the HWM advance. On shutdown the
+remaining queue is flushed before the data High-Water Mark store is closed.
 
 Bars are therefore already on the live stream before they appear in history.
 The data High-Water Mark and health/freshness tracking advance only after a

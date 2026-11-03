@@ -58,6 +58,10 @@ class CollectorService:
             ),
         )
         self.metrics = MetricsRegistry()
+        # `bars_written` now counts Bars that actually reached disk (including
+        # buffered writer flushes), so the process metric is advanced by delta.
+        self._last_written_metric = 0.0
+        self._written_metric_lock = threading.Lock()
 
         self._bus: ZMQBus | None = None
         self._health_server: ServiceHealthServer | None = None
@@ -247,9 +251,6 @@ class CollectorService:
                 self.metrics.inc(
                     "mdgw_collector_bars_ingested_total", amount=count
                 )
-                self.metrics.inc(
-                    "mdgw_collector_bars_written_total", amount=len(bars)
-                )
             if count == 0:
                 self._stop.wait(POLL_INTERVAL_S)
 
@@ -397,6 +398,18 @@ class CollectorService:
             help="Unrecoverable gap events",
         )
         sink = self.core.sink.stats()
+        with self._written_metric_lock:
+            written = float(self.core.bars_written)
+            if written > self._last_written_metric:
+                self.metrics.inc(
+                    "mdgw_collector_bars_written_total",
+                    amount=written - self._last_written_metric,
+                    help=(
+                        "Bars persisted to the Dataset "
+                        "(including aggregated parents)"
+                    ),
+                )
+                self._last_written_metric = written
         self.metrics.set(
             "mdgw_collector_write_queue_depth",
             sink.get("queue_depth", 0),

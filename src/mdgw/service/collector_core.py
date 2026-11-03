@@ -182,7 +182,6 @@ class CollectorCore:
             self.sink.write_bars(written)
 
         self.bars_ingested += len(base_bars)
-        self.bars_written += len(written)
         self.last_ingest_ts = ingest_ts
 
         instrument_ids = sorted({bar.instrument_id for bar in base_bars})
@@ -203,6 +202,7 @@ class CollectorCore:
         persisted = list(bars)
         if not persisted:
             return
+        self.bars_written += len(persisted)
         self.advance_hwm(persisted)
         for bar in persisted:
             self.health.record_bar(bar)
@@ -258,11 +258,16 @@ class CollectorCore:
         for bar in bars:
             grouped[(bar.instrument_id, bar.interval)].append(bar)
         for (instrument_id, interval), group in grouped.items():
-            self.hwm.set(
-                instrument_id,
-                interval,
-                max(datetime_to_ns(bar.open_ts) for bar in group),
-            )
+            candidate = max(datetime_to_ns(bar.open_ts) for bar in group)
+            # A Bar dropped by the bounded write queue may never have reached
+            # disk. Cap the HWM below it so the next Backfill re-fetches that
+            # hole instead of starting after it. The HWM store is monotonic, so
+            # a cap cannot undo an already-persisted value.
+            cap = self.sink.hwm_cap(instrument_id, interval, candidate)
+            effective = candidate if cap is None or cap >= candidate else cap
+            if effective < 0 and self.hwm.get(instrument_id, interval) is None:
+                continue
+            self.hwm.set(instrument_id, interval, effective)
 
     def asset_class_for(self, instrument_id: str) -> str:
         """Resolve the asset class from the Instrument Snapshot only."""
