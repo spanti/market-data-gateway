@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import json
 import logging
 import threading
 import time
@@ -12,24 +11,23 @@ from typing import TYPE_CHECKING
 from mdgw.api.http_server import HttpServer
 from mdgw.api.server import create_app
 from mdgw.api.ws_hub import WebSocketHub
-from mdgw.bus.zmq_bus import READY_TOPIC, ZMQBus, ipc_to_table
 from mdgw.core.envelope import table_to_messages
 from mdgw.metrics import MetricsRegistry
 from mdgw.reference import load_instrument_store
 from mdgw.service.common import ns_iso, update_dataset_metrics
 from mdgw.store.parquet_dataset import ParquetBarStore
+from mdgw.streaming import StreamingInterface
 
 if TYPE_CHECKING:
     from datetime import datetime
     from pathlib import Path
 
+    import pyarrow as pa
+
     from mdgw.config import GatewayConfig
 
 logger = logging.getLogger(__name__)
 
-MARKET_BAR_TOPIC_PREFIX = "market.bar."
-INTERNAL_STATUS_TOPIC = "_internal.status"
-READY_INTERVAL_S = 0.05
 _NOT_STARTED_MESSAGE = "ApiService.start() must be called first"
 
 
@@ -53,19 +51,15 @@ class ApiService:
         self.instrument_store = load_instrument_store(self.store.root)
         self.metrics = MetricsRegistry()
 
-        self._bus: ZMQBus | None = None
-        self._publish_endpoint: str | None = None
-        self._ready_event: threading.Event | None = None
+        self._streaming: StreamingInterface | None = None
 
         self._hub: WebSocketHub | None = None
         self._http = HttpServer()
 
         self._stop = threading.Event()
-        self._ready_thread: threading.Thread | None = None
         self._started = False
         self._started_at: float | None = None
 
-        self._collector_ready = False
         self._collector_status: dict | None = None
         self._last_bar_ts: datetime | None = None
         self._messages_received = 0
@@ -83,15 +77,14 @@ class ApiService:
             raise
 
     def _start_service(self) -> None:
-        self._bus = ZMQBus(zmq_hwm=self.config.bus.zmq_hwm)
-        resolved = self._bus.bind_publisher(self.config.bus.api_pub_bind)
-        self._publish_endpoint = resolved[0]
-        self._ready_event = self._bus.subscribe(
-            self.config.bus.collector_pub_connect,
-            topic_prefix=MARKET_BAR_TOPIC_PREFIX,
-            extra_prefixes=(INTERNAL_STATUS_TOPIC,),
-            handler=self._on_message,
+        self._stop.clear()
+        streaming = StreamingInterface(
+            bind=self.config.bus.api_pub_bind,
+            connect=self.config.bus.collector_pub_connect,
+            zmq_hwm=self.config.bus.zmq_hwm,
         )
+        self._streaming = streaming
+        streaming.start()
 
         self.metrics.inc(
             "mdgw_api_messages_received_total",
@@ -104,38 +97,35 @@ class ApiService:
             help="Bar messages re-published to external ZMQ consumers",
         )
 
+        # `forward=True` re-publishes the collector's original frame bytes on
+        # this api's PUB before the handler runs; external consumers therefore
+        # do not need the collector's address and no re-encoding happens.
+        streaming.subscribe_bars(self._on_bar, forward=True)
+        streaming.subscribe_status(self._on_status)
+
         self._start_http()
-        self._stop.clear()
         self._started = True
         self._started_at = time.monotonic()
-        self._ready_thread = threading.Thread(
-            target=self._run_ready_loop,
-            name="mdgw-api-ready",
-            daemon=True,
-        )
-        self._ready_thread.start()
         logger.info(
             "api service started",
             extra={
                 "event": "api.started",
                 "http": self.base_url,
-                "publish_endpoint": self._publish_endpoint,
+                "publish_endpoint": streaming.endpoints[0],
             },
         )
 
     def stop(self) -> None:
         self._stop.set()
-        if self._ready_thread is not None:
-            self._ready_thread.join(timeout=5)
-            self._ready_thread = None
+        # Stop accepting HTTP/WS traffic before tearing down the streaming
+        # fan-out the handlers feed.
         self._stop_http()
-        if self._bus is not None:
-            self._bus.close()
-            self._bus = None
-        self._publish_endpoint = None
-        self._ready_event = None
+        streaming = self._streaming
+        self._streaming = None
         self._started = False
         self._started_at = None
+        if streaming is not None:
+            streaming.stop()
 
     # -- properties --------------------------------------------------------
 
@@ -157,50 +147,28 @@ class ApiService:
 
     @property
     def publish_endpoint(self) -> str:
-        if self._publish_endpoint is None:
+        streaming = self._streaming
+        if streaming is None or not streaming.endpoints:
             raise RuntimeError(_NOT_STARTED_MESSAGE)
-        return self._publish_endpoint
+        return streaming.endpoints[0]
 
     # -- collector subscription -------------------------------------------
 
-    def _on_message(self, topic: str, payload: bytes) -> None:
-        """Runs on the ZMQ subscriber thread; never touches aiohttp objects."""
-        self._collector_ready = True
-        if topic == INTERNAL_STATUS_TOPIC:
-            try:
-                status = json.loads(payload.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
-                return
-            if isinstance(status, dict):
-                self._collector_status = status
-            return
-        if not topic.startswith(MARKET_BAR_TOPIC_PREFIX):
-            return
-
-        try:
-            table = ipc_to_table(payload)
-        except Exception:  # ruff: ignore[blind-except]  # pragma: no cover - malformed external frame
-            logger.warning(
-                "discarding malformed collector Bar frame",
-                extra={"event": "api.malformed_frame"},
-            )
-            return
-
+    def _on_bar(self, topic: str, table: pa.Table) -> None:
+        """Runs on the streaming subscriber thread; never touches aiohttp."""
         self._messages_received += 1
         self.metrics.inc("mdgw_api_messages_received_total")
-        bus = self._bus
-        if bus is not None:
-            try:
-                bus.publish(topic, payload)
-                self._messages_forwarded += 1
-                self.metrics.inc("mdgw_api_messages_forwarded_total")
-            except RuntimeError:  # pragma: no cover - shutdown race
-                pass
+        # The module already forwarded the raw frame before calling us.
+        self._messages_forwarded += 1
+        self.metrics.inc("mdgw_api_messages_forwarded_total")
+
         if table.num_rows:
             with contextlib.suppress(KeyError, ValueError):  # pragma: no cover
                 self._last_bar_ts = max(
                     row for row in table.column("close_ts").to_pylist()
                 )
+
+        self._mark_ready_when_collector_ready()
 
         hub = self._hub
         if hub is None:
@@ -209,25 +177,37 @@ class ApiService:
         with contextlib.suppress(RuntimeError):  # pragma: no cover - stopped server
             self._http.call_soon_threadsafe(hub.publish, topic, messages)
 
-    def _run_ready_loop(self) -> None:
-        # Only advertise READY once the collector handshake was observed. That
-        # proves this api's SUB forwarding is live, so a collector waiting on
-        # this READY can safely start publishing the first Bars. An api without
-        # a collector never publishes READY (it has no live stream to offer).
-        while not self._stop.is_set():
-            bus = self._bus
-            if bus is not None and self._collector_is_ready():
-                with contextlib.suppress(RuntimeError):
-                    bus.publish(READY_TOPIC, b"")
-            self._stop.wait(READY_INTERVAL_S)
+    def _on_status(self, status: dict) -> None:
+        """Runs on the streaming subscriber thread; never touches aiohttp."""
+        self._collector_status = status
+        self._mark_ready_when_collector_ready()
 
     # -- readiness / status ------------------------------------------------
 
+    def _mark_ready_when_collector_ready(self) -> None:
+        """Advertise READY once the collector handshake was observed.
+
+        That proves this api's SUB forwarding is live, so a collector waiting
+        on this READY can safely publish the first Bars. The heartbeat is
+        idempotent; status frames arrive every second and the collector's
+        READY heartbeat sets `peer_ready` immediately, so either handler can
+        perform the hand-off on a threading caller.
+        """
+        if self._stop.is_set():
+            return
+        if not self._collector_is_ready():
+            return
+        streaming = self._streaming
+        if streaming is None:
+            return
+        with contextlib.suppress(RuntimeError):  # pragma: no cover - shutdown race
+            streaming.mark_ready()
+
     def _collector_is_ready(self) -> bool:
-        if self._collector_ready:
-            return True
-        ready_event = self._ready_event
-        return ready_event is not None and ready_event.is_set()
+        streaming = self._streaming
+        if streaming is None:
+            return False
+        return streaming.peer_ready or streaming.received_frames > 0
 
     def ready_payload(self) -> dict:
         collector_ready = self._collector_is_ready()
@@ -260,13 +240,19 @@ class ApiService:
             http_port = self._http.bound_port
         except RuntimeError:
             http_port = None
+        streaming = self._streaming
+        publish_endpoint = (
+            streaming.endpoints[0]
+            if streaming is not None and streaming.endpoints
+            else None
+        )
         return {
             "service": "api",
             "role": "api",
             "uptime_s": self._uptime_s(),
             "http": {"host": self.config.server.host, "port": http_port},
             "zmq": {
-                "publish_endpoint": self._publish_endpoint,
+                "publish_endpoint": publish_endpoint,
                 "collector_endpoint": self.config.bus.collector_pub_connect,
             },
             "messages_received": self._messages_received,
