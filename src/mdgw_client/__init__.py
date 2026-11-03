@@ -1,8 +1,8 @@
 """A thin, framework-neutral client SDK for the Market Data Gateway.
 
 ``mdgw_client`` depends only on ``pyarrow``, ``pyzmq`` and the standard
-library. WebSocket support is an optional extra (``mdgw-client[ws]``). It does
-not import any ``mdgw`` module.
+library. WebSocket support requires the optional ``websockets`` dependency
+(``pip install websockets``). It does not import any ``mdgw`` module.
 
 Typical use::
 

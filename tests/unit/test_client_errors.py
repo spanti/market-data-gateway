@@ -126,6 +126,28 @@ def test_replay_is_unavailable_without_both_endpoints() -> None:
     client.close()
 
 
+def test_ws_unavailable_hint_names_the_installable_dependency(monkeypatch) -> None:
+    import builtins
+
+    from mdgw_client.live import _import_ws_connect
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "websockets" or name.startswith("websockets."):
+            raise ImportError("websockets is not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(ClientError) as excinfo:
+        _import_ws_connect()
+
+    assert excinfo.value.code == "ws_unavailable"
+    assert "websockets" in excinfo.value.message
+    assert "mdgw-client[ws]" not in excinfo.value.message
+
+
 def test_history_keeps_decimal_exact_in_the_arrow_table() -> None:
     # A tiny direct check that the SDK never coerces decimals on read paths.
     import pyarrow as pa

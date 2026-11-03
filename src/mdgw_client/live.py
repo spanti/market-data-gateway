@@ -59,7 +59,7 @@ def _import_ws_connect() -> Callable[..., Any]:
         raise ClientError(
             WS_UNAVAILABLE,
             "the WebSocket transport requires the optional 'websockets' "
-            "dependency; install it with: pip install 'mdgw-client[ws]'",
+            "dependency; install it with: pip install websockets",
         ) from exc
     return connect
 
