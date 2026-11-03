@@ -24,11 +24,10 @@ import threading
 from bisect import bisect_left
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from enum import Enum
-from typing import Any
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any
 
 from mdgw.bus.zmq_bus import table_to_ipc
-from mdgw.core.bar import Bar
 from mdgw.core.errors import (
     InvalidInstrumentError,
     InvalidIntervalError,
@@ -40,12 +39,15 @@ from mdgw.core.schema import INTERVALS, bars_to_logical_table
 from mdgw.core.time import datetime_to_ns, iso_to_ns, ns_to_iso
 from mdgw.replay.clock import ReplayClock, validate_speed
 from mdgw.replay.source import ReplayBarSource
-from mdgw.store.parquet_dataset import ParquetBarStore
 from mdgw.store.session_locks import (
     create_session_lock,
     refresh_session_lock,
     release_session_lock,
 )
+
+if TYPE_CHECKING:
+    from mdgw.core.bar import Bar
+    from mdgw.store.parquet_dataset import ParquetBarStore
 
 logger = logging.getLogger(__name__)
 
@@ -63,34 +65,42 @@ class BarSubscription:
 
     def __post_init__(self) -> None:
         if self.data_type != DATA_TYPE:
-            raise InvalidParameterError(
-                f"unsupported data_type {self.data_type!r}; v1 supports only {DATA_TYPE!r}"
+            msg = (
+                f"unsupported data_type {self.data_type!r}; "
+                f"v1 supports only {DATA_TYPE!r}"
             )
+            raise InvalidParameterError(msg)
         if not isinstance(self.instrument_id, str) or not self.instrument_id:
-            raise InvalidParameterError("'instrument_id' must be a non-empty string")
+            msg = "'instrument_id' must be a non-empty string"
+            raise InvalidParameterError(msg)
         if not isinstance(self.interval, str) or self.interval not in INTERVALS:
-            raise InvalidIntervalError(
+            msg = (
                 f"unsupported Bar Interval {self.interval!r}; "
                 f"supported: {sorted(INTERVALS)}"
             )
+            raise InvalidIntervalError(msg)
         try:
             InstrumentId.parse(self.instrument_id)
         except ValueError as exc:
             raise InvalidInstrumentError(str(exc)) from exc
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, Any]) -> "BarSubscription":
+    def from_mapping(cls, payload: Mapping[str, Any]) -> BarSubscription:
         if not isinstance(payload, Mapping):
-            raise InvalidParameterError("each subscription must be a JSON object")
+            msg = "each subscription must be a JSON object"
+            raise InvalidParameterError(msg)
         data_type = payload.get("data_type", DATA_TYPE)
         instrument_id = payload.get("instrument_id")
         interval = payload.get("interval")
         if not isinstance(data_type, str):
-            raise InvalidParameterError("'data_type' must be a string")
+            msg = "'data_type' must be a string"
+            raise InvalidParameterError(msg)
         if not isinstance(instrument_id, str):
-            raise InvalidParameterError("'instrument_id' is required")
+            msg = "'instrument_id' is required"
+            raise InvalidParameterError(msg)
         if not isinstance(interval, str):
-            raise InvalidParameterError("'interval' is required")
+            msg = "'interval' is required"
+            raise InvalidParameterError(msg)
         return cls(
             instrument_id=instrument_id,
             interval=interval,
@@ -120,28 +130,37 @@ class ReplaySessionSpec:
         subscriptions = tuple(self.subscriptions)
         object.__setattr__(self, "subscriptions", subscriptions)
         if not subscriptions:
-            raise InvalidParameterError("'subscriptions' must not be empty")
+            msg = "'subscriptions' must not be empty"
+            raise InvalidParameterError(msg)
         if not all(isinstance(item, BarSubscription) for item in subscriptions):
-            raise InvalidParameterError("'subscriptions' must contain BarSubscription values")
-        if not isinstance(self.replay_mode, str) or self.replay_mode not in SUPPORTED_REPLAY_MODES:
-            raise InvalidParameterError(
+            msg = "'subscriptions' must contain BarSubscription values"
+            raise InvalidParameterError(msg)
+        if (
+            not isinstance(self.replay_mode, str)
+            or self.replay_mode not in SUPPORTED_REPLAY_MODES
+        ):
+            msg = (
                 f"unsupported replay_mode {self.replay_mode!r}; "
                 f"supported: {sorted(SUPPORTED_REPLAY_MODES)}"
             )
+            raise InvalidParameterError(msg)
         # Validates and normalizes (rejects bool, non-finite and <= 0).
         object.__setattr__(self, "speed", validate_speed(self.speed))
         if self.start_ts_ns >= self.end_ts_ns:
-            raise InvalidRangeError("'start_ts' must be earlier than 'end_ts'")
+            msg = "'start_ts' must be earlier than 'end_ts'"
+            raise InvalidRangeError(msg)
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, Any]) -> "ReplaySessionSpec":
+    def from_mapping(cls, payload: Mapping[str, Any]) -> ReplaySessionSpec:
         """Parse and validate a `create_session` control request."""
         if not isinstance(payload, Mapping):
-            raise InvalidParameterError("control request must be a JSON object")
+            msg = "control request must be a JSON object"
+            raise InvalidParameterError(msg)
 
         raw_subscriptions = payload.get("subscriptions")
         if not isinstance(raw_subscriptions, (list, tuple)) or not raw_subscriptions:
-            raise InvalidParameterError("'subscriptions' must be a non-empty list")
+            msg = "'subscriptions' must be a non-empty list"
+            raise InvalidParameterError(msg)
         subscriptions = tuple(
             BarSubscription.from_mapping(item) for item in raw_subscriptions
         )
@@ -149,9 +168,8 @@ class ReplaySessionSpec:
         raw_start = payload.get("start_ts")
         raw_end = payload.get("end_ts")
         if not isinstance(raw_start, str) or not isinstance(raw_end, str):
-            raise InvalidParameterError(
-                "'start_ts' and 'end_ts' are required ISO-8601 strings"
-            )
+            msg = "'start_ts' and 'end_ts' are required ISO-8601 strings"
+            raise InvalidParameterError(msg)
         try:
             start_ts_ns = iso_to_ns(raw_start)
             end_ts_ns = iso_to_ns(raw_end)
@@ -160,13 +178,13 @@ class ReplaySessionSpec:
 
         replay_mode = payload.get("replay_mode", "asap")
         if not isinstance(replay_mode, str):
-            raise InvalidParameterError("'replay_mode' must be a string")
+            msg = "'replay_mode' must be a string"
+            raise InvalidParameterError(msg)
 
-        speed = payload["speed"] if "speed" in payload else 1.0
+        speed = payload.get("speed", 1.0)
         if isinstance(speed, bool) or not isinstance(speed, (int, float)):
-            raise InvalidParameterError(
-                "'speed' must be a finite number greater than 0"
-            )
+            msg = "'speed' must be a finite number greater than 0"
+            raise InvalidParameterError(msg)
 
         return cls(
             subscriptions=subscriptions,
@@ -177,7 +195,7 @@ class ReplaySessionSpec:
         )
 
 
-class SessionState(str, Enum):
+class SessionState(StrEnum):
     CREATED = "created"
     RUNNING = "running"
     FINISHED = "finished"
@@ -185,7 +203,7 @@ class SessionState(str, Enum):
 
     @property
     def terminal(self) -> bool:
-        return self in (SessionState.FINISHED, SessionState.STOPPED)
+        return self in {SessionState.FINISHED, SessionState.STOPPED}
 
 
 Publish = Callable[[str, bytes], None]
@@ -221,6 +239,8 @@ class ReplaySession:
         self._finished = threading.Event()
         self._heartbeat_stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._heartbeat_thread: threading.Thread | None = None
+        self._reason = "exhausted"
 
         # Cursor / clock / Step Credit state, guarded by `_cond`.
         self._cond = threading.Condition()
@@ -256,7 +276,8 @@ class ReplaySession:
     def start(self) -> None:
         with self._state_lock:
             if self._thread is not None:
-                raise RuntimeError(f"Replay Session {self.session_id!r} already started")
+                msg = f"Replay Session {self.session_id!r} already started"
+                raise RuntimeError(msg)
             self._thread = threading.Thread(
                 target=self._run,
                 name=f"mdgw-replay-{self.session_id}",
@@ -311,32 +332,36 @@ class ReplaySession:
             self._cond.notify_all()
         return True
 
-    def step(self, credits: int) -> bool:
+    def step(self, credit_count: int) -> bool:
         """Grant n Step Credits. Legal in `step` mode only; never blocks."""
-        if isinstance(credits, bool) or not isinstance(credits, int) or credits <= 0:
-            raise InvalidParameterError("'credits' must be a positive integer")
+        if (
+            isinstance(credit_count, bool)
+            or not isinstance(credit_count, int)
+            or credit_count <= 0
+        ):
+            msg = "'credits' must be a positive integer"
+            raise InvalidParameterError(msg)
         with self._cond:
             self._require_active("step")
             self._require_mode("step", {"step"})
-            self._credits += credits
+            self._credits += credit_count
             self._cond.notify_all()
         return True
 
     def seek(self, ts_ns: int) -> bool:
         """Move the cursor to the first Bar with `close_ts >= ts_ns`."""
         if isinstance(ts_ns, bool) or not isinstance(ts_ns, int):
-            raise InvalidParameterError("'ts' must be an ISO-8601 timestamp")
+            msg = "'ts' must be an ISO-8601 timestamp"
+            raise InvalidParameterError(msg)
         with self._cond:
             self._require_active("seek")
             self._require_mode("seek", {"realtime", "step"})
             if not self._paused:
-                raise InvalidParameterError(
-                    "seek requires the session to be paused"
-                )
+                msg = "seek requires the session to be paused"
+                raise InvalidParameterError(msg)
             if not self.spec.start_ts_ns <= ts_ns <= self.spec.end_ts_ns:
-                raise InvalidRangeError(
-                    "'ts' must be between the session's start_ts and end_ts"
-                )
+                msg = "'ts' must be between the session's start_ts and end_ts"
+                raise InvalidRangeError(msg)
             self._apply_seek_locked(ts_ns)
             self._cond.notify_all()
         return True
@@ -365,16 +390,14 @@ class ReplaySession:
     def _require_active(self, op: str) -> None:
         state = self._state
         if state.terminal:
-            raise InvalidParameterError(
-                f"{op} is not allowed on a {state.value} Replay Session"
-            )
+            msg = f"{op} is not allowed on a {state.value} Replay Session"
+            raise InvalidParameterError(msg)
 
     def _require_mode(self, op: str, modes: set[str]) -> None:
         mode = self.spec.replay_mode
         if mode not in modes:
-            raise InvalidParameterError(
-                f"{op} is not supported in {mode!r} replay mode"
-            )
+            msg = f"{op} is not supported in {mode!r} replay mode"
+            raise InvalidParameterError(msg)
 
     def _apply_seek_locked(self, ts_ns: int) -> None:
         # A seek discards credits granted before it; credits granted after it
@@ -396,82 +419,16 @@ class ReplaySession:
             self._state = state
 
     def _run(self) -> None:
-        reason = "exhausted"
-        heartbeat_thread: threading.Thread | None = None
         try:
-            self._set_state(SessionState.RUNNING)
-            create_session_lock(
-                self._store.dataset_root,
-                self.session_id,
-                subscriptions=[
-                    subscription.as_lock_record()
-                    for subscription in self.spec.subscriptions
-                ],
-            )
-            heartbeat_thread = threading.Thread(
-                target=self._heartbeat_loop,
-                name=f"mdgw-replay-heartbeat-{self.session_id}",
-                daemon=True,
-            )
-            heartbeat_thread.start()
-
-            try:
-                bars = (
-                    []
-                    if self._cancel.is_set()
-                    else self._source.read(
-                        self.spec.subscriptions,
-                        start_ts_ns=self.spec.start_ts_ns,
-                        end_ts_ns=self.spec.end_ts_ns,
-                    )
-                )
-            except Exception:  # pragma: no cover - defensive, surfaced via log
-                logger.exception(
-                    "Replay Session %s failed while reading its Bars",
-                    self.session_id,
-                )
-                bars = []
-
-            with self._cond:
-                self._bars = bars
-                self._close_ts_ns = [
-                    datetime_to_ns(bar.close_ts) for bar in bars
-                ]
-                self._cursor = 0
-                # Start the clock *after* the read; reading time must not
-                # consume replay time. A session paused during the read stays
-                # paused at `start_ts`.
-                self._clock.start(self.spec.start_ts_ns)
-                self._clock_started = True
-                if self._paused and not self._clock.paused:
-                    self._clock.pause()
-                if self._pending_seek_ns is not None:
-                    pending = self._pending_seek_ns
-                    self._pending_seek_ns = None
-                    # Credits granted *after* the seek are intentionally
-                    # preserved; the seek already reset the credits it saw.
-                    self._cursor = bisect_left(self._close_ts_ns, pending)
-                    self._clock.seek(pending)
-
-            if self._cancel.is_set():
-                reason = "stopped"
-            elif self.spec.replay_mode == "step":
-                reason = self._run_step(bars)
-            elif self.spec.replay_mode == "realtime":
-                reason = self._run_realtime(bars)
-            else:
-                reason = self._run_asap(bars)
-
-            if self._cancel.is_set():
-                reason = "stopped"
-
-            self._publish_end_of_session(reason)
+            self._run_worker()
         except Exception:  # pragma: no cover - defensive
             logger.exception("Replay Session %s failed", self.session_id)
         finally:
             self._heartbeat_stop.set()
-            if heartbeat_thread is not None:
-                heartbeat_thread.join(timeout=max(1.0, self._heartbeat_s * 2))
+            if self._heartbeat_thread is not None:
+                self._heartbeat_thread.join(
+                    timeout=max(1.0, self._heartbeat_s * 2)
+                )
             try:
                 release_session_lock(self._store.dataset_root, self.session_id)
             except Exception:  # pragma: no cover - defensive cleanup
@@ -479,9 +436,80 @@ class ReplaySession:
                     "Failed to release Replay Session lock %s", self.session_id
                 )
             self._set_state(
-                SessionState.STOPPED if reason == "stopped" else SessionState.FINISHED
+                SessionState.STOPPED
+                if self._reason == "stopped"
+                else SessionState.FINISHED
             )
             self._finished.set()
+
+    def _run_worker(self) -> None:
+        self._set_state(SessionState.RUNNING)
+        create_session_lock(
+            self._store.dataset_root,
+            self.session_id,
+            subscriptions=[
+                subscription.as_lock_record()
+                for subscription in self.spec.subscriptions
+            ],
+        )
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name=f"mdgw-replay-heartbeat-{self.session_id}",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+        try:
+            bars = (
+                []
+                if self._cancel.is_set()
+                else self._source.read(
+                    self.spec.subscriptions,
+                    start_ts_ns=self.spec.start_ts_ns,
+                    end_ts_ns=self.spec.end_ts_ns,
+                )
+            )
+        except Exception:  # pragma: no cover - defensive, surfaced via log
+            logger.exception(
+                "Replay Session %s failed while reading its Bars",
+                self.session_id,
+            )
+            bars = []
+
+        with self._cond:
+            self._bars = bars
+            self._close_ts_ns = [
+                datetime_to_ns(bar.close_ts) for bar in bars
+            ]
+            self._cursor = 0
+            # Start the clock *after* the read; reading time must not
+            # consume replay time. A session paused during the read stays
+            # paused at `start_ts`.
+            self._clock.start(self.spec.start_ts_ns)
+            self._clock_started = True
+            if self._paused and not self._clock.paused:
+                self._clock.pause()
+            if self._pending_seek_ns is not None:
+                pending = self._pending_seek_ns
+                self._pending_seek_ns = None
+                # Credits granted *after* the seek are intentionally
+                # preserved; the seek already reset the credits it saw.
+                self._cursor = bisect_left(self._close_ts_ns, pending)
+                self._clock.seek(pending)
+
+        if self._cancel.is_set():
+            self._reason = "stopped"
+        elif self.spec.replay_mode == "step":
+            self._reason = self._run_step(bars)
+        elif self.spec.replay_mode == "realtime":
+            self._reason = self._run_realtime(bars)
+        else:
+            self._reason = self._run_asap(bars)
+
+        if self._cancel.is_set():
+            self._reason = "stopped"
+
+        self._publish_end_of_session(self._reason)
 
     # -- push loops --------------------------------------------------------
 

@@ -13,20 +13,23 @@ import json
 import logging
 import threading
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import zmq
 
 from mdgw.bus.zmq_bus import READY_TOPIC
 from mdgw.core.errors import (
     INTERNAL_ERROR,
-    INVALID_PARAMETER,
     GatewayError,
     InvalidParameterError,
 )
 from mdgw.core.time import iso_to_ns
-from mdgw.replay.service import ReplayService
 from mdgw.replay.session import ReplaySessionSpec
+
+if TYPE_CHECKING:
+    from typing import Self
+
+    from mdgw.replay.service import ReplayService
 
 logger = logging.getLogger(__name__)
 
@@ -156,11 +159,11 @@ class ReplayServer:
             self._publish_endpoint = None
             self._control_endpoint = None
 
-    def __enter__(self) -> "ReplayServer":
+    def __enter__(self) -> Self:
         self.start()
         return self
 
-    def __exit__(self, *exc_info: Any) -> None:
+    def __exit__(self, *exc_info: object) -> None:
         self.stop()
 
     # -- publishing --------------------------------------------------------
@@ -224,10 +227,12 @@ class ReplayServer:
         try:
             request = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise InvalidParameterError(f"control request is not valid JSON: {exc}") from exc
+            msg = f"control request is not valid JSON: {exc}"
+            raise InvalidParameterError(msg) from exc
 
         if not isinstance(request, Mapping):
-            raise InvalidParameterError("control request must be a JSON object")
+            msg = "control request must be a JSON object"
+            raise InvalidParameterError(msg)
         return self._handle_request(request)
 
     def _handle_request(self, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -241,7 +246,7 @@ class ReplayServer:
                 "publish_endpoint": self._publish_endpoint,
             }
 
-        if op in ("stop", "pause", "resume"):
+        if op in {"stop", "pause", "resume"}:
             session_id = _require_session_id(request, op)
             if op == "stop":
                 self._service.stop_session(session_id)
@@ -255,9 +260,11 @@ class ReplayServer:
             session_id = _require_session_id(request, op)
             raw_ts = request.get("ts")
             if not isinstance(raw_ts, str) or not raw_ts:
-                raise InvalidParameterError(
-                    "'ts' is required for the seek op and must be an ISO-8601 string"
+                msg = (
+                    "'ts' is required for the seek op and must be "
+                    "an ISO-8601 string"
                 )
+                raise InvalidParameterError(msg)
             try:
                 ts_ns = iso_to_ns(raw_ts)
             except ValueError as exc:
@@ -269,35 +276,39 @@ class ReplayServer:
             session_id = _require_session_id(request, op)
             speed = request.get("speed")
             if isinstance(speed, bool) or not isinstance(speed, (int, float)):
-                raise InvalidParameterError(
-                    "'speed' is required for the set_speed op and must be a number"
+                msg = (
+                    "'speed' is required for the set_speed op and "
+                    "must be a number"
                 )
+                raise InvalidParameterError(msg)
             self._service.set_speed_session(session_id, speed)
             return {"ok": True, "session_id": session_id}
 
         if op == "step":
             session_id = _require_session_id(request, op)
-            credits = request.get("credits")
+            credit_count = request.get("credits")
             if (
-                isinstance(credits, bool)
-                or not isinstance(credits, int)
-                or credits <= 0
+                isinstance(credit_count, bool)
+                or not isinstance(credit_count, int)
+                or credit_count <= 0
             ):
-                raise InvalidParameterError(
-                    "'credits' is required for the step op and must be a positive integer"
+                msg = (
+                    "'credits' is required for the step op and "
+                    "must be a positive integer"
                 )
-            self._service.step_session(session_id, credits)
+                raise InvalidParameterError(msg)
+            self._service.step_session(session_id, credit_count)
             return {"ok": True, "session_id": session_id}
 
-        raise InvalidParameterError(f"unsupported control op: {op!r}")
+        msg = f"unsupported control op: {op!r}"
+        raise InvalidParameterError(msg)
 
 
 def _require_session_id(request: Mapping[str, Any], op: str) -> str:
     session_id = request.get("session_id")
     if not isinstance(session_id, str) or not session_id:
-        raise InvalidParameterError(
-            f"'session_id' is required for the {op} op"
-        )
+        msg = f"'session_id' is required for the {op} op"
+        raise InvalidParameterError(msg)
     return session_id
 
 

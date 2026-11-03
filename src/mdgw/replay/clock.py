@@ -18,11 +18,16 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from mdgw.core.errors import InvalidParameterError
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 NANOS_PER_SECOND = 1_000_000_000
+
+_SPEED_ERROR = "'speed' must be a finite number greater than 0"
 
 
 def validate_speed(speed: float) -> float:
@@ -32,14 +37,10 @@ def validate_speed(speed: float) -> float:
     is a client bug, not a request for 1x replay.
     """
     if isinstance(speed, bool) or not isinstance(speed, (int, float)):
-        raise InvalidParameterError(
-            "'speed' must be a finite number greater than 0"
-        )
+        raise InvalidParameterError(_SPEED_ERROR)
     value = float(speed)
     if not math.isfinite(value) or value <= 0:
-        raise InvalidParameterError(
-            "'speed' must be a finite number greater than 0"
-        )
+        raise InvalidParameterError(_SPEED_ERROR)
     return value
 
 

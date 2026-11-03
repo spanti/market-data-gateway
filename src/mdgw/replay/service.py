@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mdgw.core.errors import (
@@ -17,9 +17,13 @@ from mdgw.core.errors import (
     SessionNotFoundError,
     UnknownInstrumentError,
 )
-from mdgw.reference import InstrumentStore
 from mdgw.replay.session import Publish, ReplaySession, ReplaySessionSpec
-from mdgw.store.parquet_dataset import ParquetBarStore
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from mdgw.reference import InstrumentStore
+    from mdgw.store.parquet_dataset import ParquetBarStore
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +41,8 @@ def default_session_id_factory() -> str:
 class ReplayService:
     """Creates, tracks and stops Replay Sessions inside one process."""
 
-    def __init__(
+    # The keyword-only configuration knobs are part of this public constructor.
+    def __init__(  # ruff: ignore[too-many-arguments]
         self,
         store: ParquetBarStore,
         *,
@@ -48,9 +53,11 @@ class ReplayService:
         instrument_store: InstrumentStore | None = None,
     ) -> None:
         if max_sessions < 1:
-            raise ValueError("max_sessions must be at least 1")
+            msg = "max_sessions must be at least 1"
+            raise ValueError(msg)
         if heartbeat_s <= 0:
-            raise ValueError("heartbeat_s must be positive")
+            msg = "heartbeat_s must be positive"
+            raise ValueError(msg)
         self._store = store
         self._max_sessions = max_sessions
         self._heartbeat_s = heartbeat_s
@@ -77,20 +84,24 @@ class ReplayService:
         """Start a Session and return its id without waiting for the read."""
         with self._lock:
             if self._closed:
-                raise InvalidParameterError("Replay Service is closed")
+                msg = "Replay Service is closed"
+                raise InvalidParameterError(msg)
             self._validate_instruments(spec)
             active = [
-                session for session in self._sessions.values() if not session.is_terminal
+                session
+                for session in self._sessions.values()
+                if not session.is_terminal
             ]
             if len(active) >= self._max_sessions:
-                raise InvalidParameterError(
-                    f"maximum of {self._max_sessions} concurrent Replay Sessions reached"
+                msg = (
+                    f"maximum of {self._max_sessions} concurrent "
+                    "Replay Sessions reached"
                 )
+                raise InvalidParameterError(msg)
             session_id = self._session_id_factory()
             if session_id in self._sessions:
-                raise InvalidParameterError(
-                    f"Replay Session id collision: {session_id!r}"
-                )
+                msg = f"Replay Session id collision: {session_id!r}"
+                raise InvalidParameterError(msg)
             session = ReplaySession(
                 session_id,
                 spec,
@@ -134,8 +145,8 @@ class ReplayService:
     def set_speed_session(self, session_id: str, speed: float) -> bool:
         return self._get(session_id).set_speed(speed)
 
-    def step_session(self, session_id: str, credits: int) -> bool:
-        return self._get(session_id).step(credits)
+    def step_session(self, session_id: str, credit_count: int) -> bool:
+        return self._get(session_id).step(credit_count)
 
     def session_info(self, session_id: str) -> dict[str, object]:
         return self._get(session_id).info()
@@ -158,7 +169,10 @@ class ReplayService:
         return self._get(session_id).bars_sent
 
     def session_summaries(self) -> list[dict[str, object]]:
-        """Return a status view of every tracked Session for `/metrics` and `/status`."""
+        """Return a status view of every tracked Session.
+
+        Used by `/metrics` and `/status`.
+        """
         with self._lock:
             sessions = list(self._sessions.items())
         return [
@@ -191,8 +205,9 @@ class ReplayService:
             return
         for subscription in spec.subscriptions:
             if store.get(subscription.instrument_id) is None:
+                msg = f"unknown Instrument {subscription.instrument_id!r}"
                 raise UnknownInstrumentError(
-                    f"unknown Instrument {subscription.instrument_id!r}",
+                    msg,
                     details={"instrument_id": subscription.instrument_id},
                 )
 
@@ -205,5 +220,6 @@ class ReplayService:
         with self._lock:
             session = self._sessions.get(session_id)
         if session is None:
-            raise SessionNotFoundError(f"unknown Replay Session: {session_id!r}")
+            msg = f"unknown Replay Session: {session_id!r}"
+            raise SessionNotFoundError(msg)
         return session

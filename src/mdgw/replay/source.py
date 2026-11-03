@@ -12,16 +12,17 @@ pages are a ticket-14 performance concern, not a correctness one.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from mdgw.core.bar import Bar
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import datetime_to_ns
-from mdgw.store.parquet_dataset import ParquetBarStore
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids an import cycle
+    from collections.abc import Sequence
+
     from mdgw.replay.session import BarSubscription
+    from mdgw.store.parquet_dataset import ParquetBarStore
 
 
 def interval_ns(interval: str) -> int:
@@ -67,7 +68,7 @@ class ReplayBarSource:
 
     def read(
         self,
-        subscriptions: Sequence["BarSubscription"],
+        subscriptions: Sequence[BarSubscription],
         *,
         start_ts_ns: int,
         end_ts_ns: int,
