@@ -10,16 +10,19 @@ No HTTP or aiohttp objects are involved here.
 
 from __future__ import annotations
 
+import ast
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from uuid import uuid4
 
 import pyarrow as pa
 import pytest
 import zmq
 
+import mdgw.streaming
 from mdgw.core.bar import Bar
 
 UTC = timezone.utc
@@ -118,6 +121,42 @@ def test_public_exports_are_exactly_the_documented_seams() -> None:
     for name in streaming.__all__:
         assert hasattr(streaming, name)
     assert streaming.READY_TOPIC == "_internal.ready"
+
+
+def test_module_imports_only_the_allowed_layers() -> None:
+    tree = ast.parse(
+        Path(mdgw.streaming.__file__).read_text(encoding="utf-8")
+    )
+    roots: set[str] = set()
+    first_party: set[str] = set()
+    for node in ast.walk(tree):
+        modules: list[str] = []
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            modules.append(node.module)
+        elif isinstance(node, ast.Import):
+            modules.extend(alias.name for alias in node.names)
+        for module in modules:
+            roots.add(module.split(".")[0])
+            if module == "mdgw" or module.startswith("mdgw."):
+                first_party.add(module)
+
+    assert roots <= {
+        "__future__",
+        "collections",
+        "dataclasses",
+        "json",
+        "logging",
+        "threading",
+        "time",
+        "typing",
+        "pyarrow",
+        "zmq",
+        "mdgw",
+    }
+    assert all(
+        module == "mdgw.core" or module.startswith("mdgw.core.")
+        for module in first_party
+    )
 
 
 def test_start_resolves_endpoints_in_bind_order() -> None:
