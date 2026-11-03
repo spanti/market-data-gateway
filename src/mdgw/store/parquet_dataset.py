@@ -11,15 +11,15 @@ import statistics
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Sequence
+from contextlib import suppress
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from mdgw.core.bar import Bar
 from mdgw.core.errors import SchemaVersionMismatch
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import (
@@ -40,7 +40,6 @@ from mdgw.store.maintenance import (
 from mdgw.store.manifest import (
     DATASET_DESCRIPTOR_NAME,
     DATASET_NAME,
-    MANIFEST_NAME,
     active_manifest_entries,
     instrument_id_for_partition,
     read_dataset_descriptor,
@@ -49,6 +48,11 @@ from mdgw.store.manifest import (
     write_manifest,
 )
 from mdgw.store.session_locks import DEFAULT_LOCK_TIMEOUT_S
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from collections.abc import Sequence
+
+    from mdgw.core.bar import Bar
 
 DATASET_SCHEMA_VERSION = 1
 FILE_NAMING = "data-<start_ns>-<end_ns>-<uuid>.parquet"
@@ -65,7 +69,7 @@ PHYSICAL_READ_COLUMNS: tuple[str, ...] = tuple(
 class ParquetBarStore:
     """Writes immutable Data Files and reads them back through pyarrow.dataset."""
 
-    def __init__(
+    def __init__(  # ruff: ignore[too-many-arguments] - keyword-only store tuning knobs
         self,
         root: Path,
         *,
@@ -91,14 +95,12 @@ class ParquetBarStore:
         for bar in bars:
             instrument = InstrumentId.parse(bar.instrument_id)
             groups[
-                (
-                    asset_class,
-                    instrument.venue,
-                    instrument.file_symbol,
-                    bar.interval,
-                    bar.open_ts.year,
-                    bar.open_ts.month,
-                )
+                asset_class,
+                instrument.venue,
+                instrument.file_symbol,
+                bar.interval,
+                bar.open_ts.year,
+                bar.open_ts.month,
             ].append(bar)
 
         written: list[dict] = []
@@ -129,8 +131,8 @@ class ParquetBarStore:
             "month": f"{month:02d}",
         }
         directory = self.dataset_root
-        for field in PARTITION_COLUMNS:
-            directory = directory / f"{field}={partition[field]}"
+        for partition_field in PARTITION_COLUMNS:
+            directory /= f"{partition_field}={partition[partition_field]}"
         directory.mkdir(parents=True, exist_ok=True)
 
         start_ns = min(datetime_to_ns(bar.open_ts) for bar in bars)
@@ -193,14 +195,15 @@ class ParquetBarStore:
 
         found = descriptor.get("schema_version")
         if found != self.schema_version:
-            raise SchemaVersionMismatch(
+            msg = (
                 f"Dataset schema_version {found!r} does not match "
                 f"the expected {self.schema_version}"
             )
+            raise SchemaVersionMismatch(msg)
 
     # -- reads -------------------------------------------------------------
 
-    def iter_batches(
+    def iter_batches(  # ruff: ignore[too-many-arguments] - keyword-only query filters
         self,
         *,
         instrument_id: str | None = None,
@@ -521,10 +524,9 @@ def _filter_batch(
 
 def _close_parquet_files(files: Sequence[tuple[pq.ParquetFile, str]]) -> None:
     for parquet_file, _ in files:
-        try:
+        # Best-effort close on an error path: never mask the original failure.
+        with suppress(Exception):  # pragma: no cover - defensive close path
             parquet_file.close()
-        except Exception:  # pragma: no cover - defensive close path
-            pass
 
 
 def _median_file_size(entries: Sequence[dict]) -> int | float | None:

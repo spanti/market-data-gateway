@@ -13,6 +13,7 @@ import json
 import os
 import re
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,7 +41,8 @@ def sessions_directory(dataset_root: Path) -> Path:
 
 def lock_path(dataset_root: Path, session_id: str) -> Path:
     if not _SESSION_ID_RE.match(session_id):
-        raise ValueError(f"invalid Replay Session id: {session_id!r}")
+        msg = f"invalid Replay Session id: {session_id!r}"
+        raise ValueError(msg)
     return sessions_directory(dataset_root) / f"{session_id}{LOCK_SUFFIX}"
 
 
@@ -82,7 +84,8 @@ def refresh_session_lock(
     path = lock_path(dataset_root, session_id)
     payload = _read_lock_payload(path)
     if payload is None:
-        raise FileNotFoundError(f"Replay Session lock does not exist: {path}")
+        msg = f"Replay Session lock does not exist: {path}"
+        raise FileNotFoundError(msg)
     payload["heartbeat_ns"] = now_ns
     _write_lock(path, payload, now_ns)
     return _lock_from_payload(path, payload)
@@ -173,7 +176,7 @@ def _write_lock(path: Path, payload: dict[str, Any], now_ns: int) -> None:
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     temporary.replace(path)
-    try:
+    # Some file systems reject nanosecond mtimes; the heartbeat in the payload
+    # still carries the authoritative timestamp.
+    with suppress(OSError):  # pragma: no cover - platform dependent
         os.utime(path, ns=(now_ns, now_ns))
-    except OSError:  # pragma: no cover - some file systems reject ns mtimes
-        pass

@@ -75,7 +75,9 @@ def _coerce_partition_value(field: str, value: Any) -> str:
     return str(value)
 
 
-def normalize_manifest_entry(entry: dict[str, Any], dataset_root: Path) -> dict[str, Any]:
+def normalize_manifest_entry(
+    entry: dict[str, Any], dataset_root: Path
+) -> dict[str, Any]:
     """Return a Manifest entry with all fields required by this ticket.
 
     Missing fields from ticket 01/02 Manifests are derived from the file name

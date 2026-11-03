@@ -11,14 +11,16 @@ import os
 import re
 import time
 from collections import defaultdict
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from contextlib import suppress
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import pyarrow.dataset as pds
 import pyarrow.parquet as pq
+from pyarrow import ArrowException
 
 from mdgw.core.schema import PHYSICAL_SCHEMA
 from mdgw.core.time import datetime_to_ns, to_utc, utc_now
@@ -75,13 +77,49 @@ class GCReport:
     failures: tuple[str, ...] = ()
 
 
+@dataclass(slots=True)
+class _CompactionOutcome:
+    merged_partitions: list[str] = field(default_factory=list)
+    new_files: list[str] = field(default_factory=list)
+    removed_files: list[str] = field(default_factory=list)
+    skipped_locked: list[str] = field(default_factory=list)
+    skipped_single: list[str] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+    pending_inactive: set[str] = field(default_factory=set)
+
+
+@dataclass(slots=True)
+class _GCOutcome:
+    removed_partitions: list[str] = field(default_factory=list)
+    skipped_current_month: list[str] = field(default_factory=list)
+    skipped_locked: list[str] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+    to_remove: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _CompactionContext:
+    store: ParquetBarStore
+    entries: list[dict[str, Any]]
+    cutoff_ns: int
+    locks: list[SessionLock]
+    outcome: _CompactionOutcome
+
+
+@dataclass(slots=True)
+class _GCContext:
+    now: datetime
+    cutoff_ns: int
+    locks: list[SessionLock]
+    outcome: _GCOutcome
+
+
 def parse_duration(value: str) -> timedelta:
     """Parse operator durations such as `24h`, `7d`, `30m` or `0s`."""
     match = _DURATION_RE.match(value.strip())
     if match is None:
-        raise ValueError(
-            f"invalid duration {value!r}; expected a number followed by s/m/h/d/w"
-        )
+        msg = f"invalid duration {value!r}; expected a number followed by s/m/h/d/w"
+        raise ValueError(msg)
     seconds = int(match.group("amount")) * _DURATION_UNITS[match.group("unit").lower()]
     return timedelta(seconds=seconds)
 
@@ -119,13 +157,14 @@ def partition_is_locked(
 
 
 def compact_store(
-    store: "ParquetBarStore",
+    store: ParquetBarStore,
     *,
     older_than: timedelta | str | int,
     now_ns: int | None = None,
     timeout_s: int = DEFAULT_LOCK_TIMEOUT_S,
 ) -> CompactionReport:
     """Compact the store by merging eligible files older than the specified duration.
+
     Args:
         store: The ParquetBarStore instance to compact.
         older_than: Duration specifying which files are eligible for compaction.
@@ -142,101 +181,21 @@ def compact_store(
     cutoff_ns = now_ns - older_than_ns
     locks = active_session_locks(dataset_root, timeout_s=timeout_s, now_ns=now_ns)
 
-    with store._lock:  # noqa: SLF001 - shared writer/compaction lock
+    with store._lock:  # shared writer/compaction lock
         manifest = read_manifest(dataset_root)
-        entries = [
-            normalize_manifest_entry(raw, dataset_root)
-            for raw in manifest.get("files", [])
-        ]
-        groups: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
-        for entry in entries:
-            if not entry["active"]:
-                continue
-            if not (dataset_root / entry["path"]).exists():
-                continue
-            groups[partition_key(entry["partition"])].append(entry)
-
-        merged_partitions: list[str] = []
-        new_files: list[str] = []
-        skipped_locked: list[str] = []
-        skipped_single: list[str] = []
-        failures: list[str] = []
-        pending_inactive: set[str] = set()
-
-        for key in sorted(groups):
-            group = groups[key]
-            partition = group[0]["partition"]
-            label = partition_label(partition)
-
-            if partition_is_locked(partition, locks):
-                skipped_locked.append(label)
-                continue
-
-            eligible = [
-                entry for entry in group if entry["created_ns"] <= cutoff_ns
-            ]
-            if len(eligible) < 2:
-                skipped_single.append(label)
-                continue
-
-            try:
-                new_entry = _write_compacted_file(store, partition, eligible)
-            except Exception as exc:  # defensive: leave the Manifest untouched
-                failures.append(f"{label}: {exc}")
-                continue
-
-            eligible_paths = {entry["path"] for entry in eligible}
-            for entry in entries:
-                if entry["path"] in eligible_paths:
-                    entry["active"] = False
-            entries.append(new_entry)
-            pending_inactive.update(eligible_paths)
-            merged_partitions.append(label)
-            new_files.append(new_entry["path"])
-
-        if not new_files:
-            return CompactionReport(
-                older_than_ns=older_than_ns,
-                skipped_locked=tuple(skipped_locked),
-                skipped_single=tuple(skipped_single),
-                failures=tuple(failures),
-            )
+        entries = _load_entries(manifest, dataset_root)
+        outcome = _compact_entries(store, entries, cutoff_ns, locks)
+        if not outcome.new_files:
+            return _compaction_report(older_than_ns, outcome)
 
         manifest["files"] = entries
-        try:
-            write_manifest(dataset_root, manifest)
-        except Exception:
-            for relative_path in new_files:
-                (dataset_root / relative_path).unlink(missing_ok=True)
-            raise
-
-        removed_files: list[str] = []
-        for relative_path in sorted(pending_inactive):
-            path = dataset_root / relative_path
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                removed_files.append(relative_path)
-            except OSError as exc:
-                # The inactive record stays in the Manifest and the failure is
-                # reported so an operator can retry.
-                failures.append(f"{relative_path}: {exc}")
-            else:
-                removed_files.append(relative_path)
-
-        return CompactionReport(
-            older_than_ns=older_than_ns,
-            merged_partitions=tuple(merged_partitions),
-            new_files=tuple(new_files),
-            removed_files=tuple(removed_files),
-            skipped_locked=tuple(skipped_locked),
-            skipped_single=tuple(skipped_single),
-            failures=tuple(failures),
-        )
+        _write_manifest_or_rollback(dataset_root, manifest, outcome.new_files)
+        _remove_superseded_files(dataset_root, outcome)
+        return _compaction_report(older_than_ns, outcome)
 
 
 def gc_store(
-    store: "ParquetBarStore",
+    store: ParquetBarStore,
     *,
     bars_days: int,
     apply: bool,
@@ -267,85 +226,231 @@ def gc_store(
     cutoff_ns = now_ns - bars_days * NANOS_PER_DAY
     locks = active_session_locks(dataset_root, timeout_s=timeout_s, now_ns=now_ns)
 
-    with store._lock:  # noqa: SLF001 - shared writer/GC lock
+    with store._lock:  # shared writer/GC lock
         manifest = read_manifest(dataset_root)
-        entries = [
-            normalize_manifest_entry(raw, dataset_root)
-            for raw in manifest.get("files", [])
-        ]
+        entries = _load_entries(manifest, dataset_root)
+        outcome = _collect_expired_partitions(
+            entries, dataset_root, now, cutoff_ns, locks
+        )
+        if dry_run or not outcome.to_remove:
+            return _gc_report(dry_run, bars_days, outcome)
 
-        months: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-        for entry in entries:
-            if not entry["active"]:
-                continue
-            if not (dataset_root / entry["path"]).exists():
-                continue
-            partition = entry["partition"]
-            months[(partition["year"], partition["month"])].append(entry)
-
-        removed_partitions: list[str] = []
-        skipped_current: list[str] = []
-        skipped_locked: list[str] = []
-        to_remove: list[dict[str, Any]] = []
-
-        for year, month in sorted(months):
-            label = f"{year}-{month}"
-            if not (year.isdigit() and month.isdigit()):
-                continue
-            if (int(year), int(month)) == (now.year, now.month):
-                skipped_current.append(label)
-                continue
-            if _month_end_ns(int(year), int(month)) > cutoff_ns:
-                continue
-            group = months[(year, month)]
-            if any(partition_is_locked(entry["partition"], locks) for entry in group):
-                skipped_locked.append(label)
-                continue
-            removed_partitions.append(label)
-            to_remove.extend(group)
-
-        removed_files = [entry["path"] for entry in to_remove]
-        if dry_run or not to_remove:
-            return GCReport(
-                dry_run=dry_run,
-                bars_days=bars_days,
-                removed_partitions=tuple(removed_partitions),
-                removed_files=tuple(removed_files),
-                skipped_current_month=tuple(skipped_current),
-                skipped_locked=tuple(skipped_locked),
-            )
-
-        removed_paths = set(removed_files)
-        for entry in entries:
-            if entry["path"] in removed_paths:
-                entry["active"] = False
+        _deactivate_entries(entries, {entry["path"] for entry in outcome.to_remove})
         manifest["files"] = entries
         write_manifest(dataset_root, manifest)
-
-        failures: list[str] = []
-        for relative_path in removed_files:
-            try:
-                (dataset_root / relative_path).unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                failures.append(f"{relative_path}: {exc}")
-
+        _unlink_removed_files(dataset_root, outcome)
         _prune_empty_directories(dataset_root)
+        return _gc_report(dry_run, bars_days, outcome)
 
-        return GCReport(
-            dry_run=dry_run,
-            bars_days=bars_days,
-            removed_partitions=tuple(removed_partitions),
-            removed_files=tuple(removed_files),
-            skipped_current_month=tuple(skipped_current),
-            skipped_locked=tuple(skipped_locked),
-            failures=tuple(failures),
-        )
+
+def _load_entries(
+    manifest: dict[str, Any], dataset_root: Path
+) -> list[dict[str, Any]]:
+    return [
+        normalize_manifest_entry(raw, dataset_root)
+        for raw in manifest.get("files", [])
+    ]
+
+
+def _active_existing_entries(
+    entries: list[dict[str, Any]], dataset_root: Path
+) -> list[dict[str, Any]]:
+    return [
+        entry
+        for entry in entries
+        if entry["active"] and (dataset_root / entry["path"]).exists()
+    ]
+
+
+def _group_by_partition(
+    entries: list[dict[str, Any]],
+) -> dict[tuple[str, ...], list[dict[str, Any]]]:
+    groups: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
+    for entry in entries:
+        groups[partition_key(entry["partition"])].append(entry)
+    return groups
+
+
+def _compact_entries(
+    store: ParquetBarStore,
+    entries: list[dict[str, Any]],
+    cutoff_ns: int,
+    locks: list[SessionLock],
+) -> _CompactionOutcome:
+    context = _CompactionContext(
+        store=store,
+        entries=entries,
+        cutoff_ns=cutoff_ns,
+        locks=locks,
+        outcome=_CompactionOutcome(),
+    )
+    groups = _group_by_partition(_active_existing_entries(entries, store.dataset_root))
+    for key in sorted(groups):
+        _compact_group(groups[key], context)
+    return context.outcome
+
+
+def _compact_group(
+    group: list[dict[str, Any]], context: _CompactionContext
+) -> None:
+    partition = group[0]["partition"]
+    label = partition_label(partition)
+
+    if partition_is_locked(partition, context.locks):
+        context.outcome.skipped_locked.append(label)
+        return
+
+    eligible = [
+        entry for entry in group if entry["created_ns"] <= context.cutoff_ns
+    ]
+    if len(eligible) < 2:
+        context.outcome.skipped_single.append(label)
+        return
+
+    try:
+        new_entry = _write_compacted_file(context.store, partition, eligible)
+    except (OSError, ArrowException, ValueError) as exc:
+        # Defensive: leave the Manifest untouched when a Data File cannot merge.
+        context.outcome.failures.append(f"{label}: {exc}")
+        return
+
+    eligible_paths = {entry["path"] for entry in eligible}
+    for entry in context.entries:
+        if entry["path"] in eligible_paths:
+            entry["active"] = False
+    context.entries.append(new_entry)
+    context.outcome.pending_inactive.update(eligible_paths)
+    context.outcome.merged_partitions.append(label)
+    context.outcome.new_files.append(new_entry["path"])
+
+
+def _write_manifest_or_rollback(
+    dataset_root: Path, manifest: dict[str, Any], new_files: list[str]
+) -> None:
+    try:
+        write_manifest(dataset_root, manifest)
+    except Exception:
+        for relative_path in new_files:
+            (dataset_root / relative_path).unlink(missing_ok=True)
+        raise
+
+
+def _remove_superseded_files(
+    dataset_root: Path, outcome: _CompactionOutcome
+) -> None:
+    for relative_path in sorted(outcome.pending_inactive):
+        path = dataset_root / relative_path
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            outcome.removed_files.append(relative_path)
+        except OSError as exc:
+            # The inactive record stays in the Manifest and the failure is
+            # reported so an operator can retry.
+            outcome.failures.append(f"{relative_path}: {exc}")
+        else:
+            outcome.removed_files.append(relative_path)
+
+
+def _compaction_report(
+    older_than_ns: int, outcome: _CompactionOutcome
+) -> CompactionReport:
+    return CompactionReport(
+        older_than_ns=older_than_ns,
+        merged_partitions=tuple(outcome.merged_partitions),
+        new_files=tuple(outcome.new_files),
+        removed_files=tuple(outcome.removed_files),
+        skipped_locked=tuple(outcome.skipped_locked),
+        skipped_single=tuple(outcome.skipped_single),
+        failures=tuple(outcome.failures),
+    )
+
+
+def _group_by_month(
+    entries: list[dict[str, Any]],
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    months: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for entry in entries:
+        partition = entry["partition"]
+        months[partition["year"], partition["month"]].append(entry)
+    return months
+
+
+def _collect_expired_partitions(
+    entries: list[dict[str, Any]],
+    dataset_root: Path,
+    now: datetime,
+    cutoff_ns: int,
+    locks: list[SessionLock],
+) -> _GCOutcome:
+    context = _GCContext(
+        now=now,
+        cutoff_ns=cutoff_ns,
+        locks=locks,
+        outcome=_GCOutcome(),
+    )
+    months = _group_by_month(_active_existing_entries(entries, dataset_root))
+    for (year, month), group in sorted(months.items()):
+        _collect_expired_month(group, year, month, context)
+    return context.outcome
+
+
+def _collect_expired_month(
+    group: list[dict[str, Any]],
+    year: str,
+    month: str,
+    context: _GCContext,
+) -> None:
+    label = f"{year}-{month}"
+    if not (year.isdigit() and month.isdigit()):
+        return
+    if (int(year), int(month)) == (context.now.year, context.now.month):
+        context.outcome.skipped_current_month.append(label)
+        return
+    if _month_end_ns(int(year), int(month)) > context.cutoff_ns:
+        return
+    if any(partition_is_locked(entry["partition"], context.locks) for entry in group):
+        context.outcome.skipped_locked.append(label)
+        return
+    context.outcome.removed_partitions.append(label)
+    context.outcome.to_remove.extend(group)
+
+
+def _deactivate_entries(
+    entries: list[dict[str, Any]], removed_paths: set[str]
+) -> None:
+    for entry in entries:
+        if entry["path"] in removed_paths:
+            entry["active"] = False
+
+
+def _unlink_removed_files(dataset_root: Path, outcome: _GCOutcome) -> None:
+    for entry in outcome.to_remove:
+        relative_path = entry["path"]
+        try:
+            (dataset_root / relative_path).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            outcome.failures.append(f"{relative_path}: {exc}")
+
+
+def _gc_report(
+    dry_run: bool, bars_days: int, outcome: _GCOutcome
+) -> GCReport:
+    return GCReport(
+        dry_run=dry_run,
+        bars_days=bars_days,
+        removed_partitions=tuple(outcome.removed_partitions),
+        removed_files=tuple(entry["path"] for entry in outcome.to_remove),
+        skipped_current_month=tuple(outcome.skipped_current_month),
+        skipped_locked=tuple(outcome.skipped_locked),
+        failures=tuple(outcome.failures),
+    )
 
 
 def _write_compacted_file(
-    store: "ParquetBarStore",
+    store: ParquetBarStore,
     partition: dict[str, Any],
     eligible: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -389,8 +494,8 @@ def _write_compacted_file(
 
 def _partition_directory(dataset_root: Path, partition: dict[str, Any]) -> Path:
     directory = dataset_root
-    for field in PARTITION_FIELDS:
-        directory = directory / f"{field}={partition[field]}"
+    for partition_field in PARTITION_FIELDS:
+        directory /= f"{partition_field}={partition[partition_field]}"
     return directory
 
 
@@ -399,7 +504,7 @@ def _month_end_ns(year: int, month: int) -> int:
         next_year, next_month = year + 1, 1
     else:
         next_year, next_month = year, month + 1
-    return datetime_to_ns(datetime(next_year, next_month, 1, tzinfo=timezone.utc))
+    return datetime_to_ns(datetime(next_year, next_month, 1, tzinfo=UTC))
 
 
 def _prune_empty_directories(dataset_root: Path) -> None:
@@ -407,7 +512,5 @@ def _prune_empty_directories(dataset_root: Path) -> None:
         path = Path(directory)
         if path == dataset_root or path.name == SESSIONS_DIR_NAME:
             continue
-        try:
+        with suppress(OSError):
             path.rmdir()
-        except OSError:
-            pass
