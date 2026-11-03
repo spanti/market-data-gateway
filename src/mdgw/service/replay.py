@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import logging
 import time
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from mdgw.config import GatewayConfig
 from mdgw.metrics import MetricsRegistry
 from mdgw.reference import InstrumentStore, load_instrument_store
 from mdgw.replay.server import ReplayServer
@@ -14,7 +13,14 @@ from mdgw.replay.service import ReplayService
 from mdgw.service.health_server import ServiceHealthServer
 from mdgw.store.parquet_dataset import ParquetBarStore
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mdgw.config import GatewayConfig
+
 logger = logging.getLogger(__name__)
+
+_NOT_STARTED_MESSAGE = "ReplayServiceRole.start() must be called first"
 
 
 class ReplayServiceRole:
@@ -49,69 +55,72 @@ class ReplayServiceRole:
         if self._started:
             return
         try:
-            # Replay reads the Instrument Snapshot exported by the collector,
-            # never the YAML truth source (DESIGN §5.1). A missing snapshot is
-            # reported through /status and the log instead of silently
-            # disabling Instrument validation without a trace.
-            self.instrument_store = load_instrument_store(self.store.root)
-            if self.instrument_store is None:
-                logger.warning(
-                    "Instrument Snapshot missing; Replay Sessions cannot "
-                    "validate Instruments",
-                    extra={
-                        "event": "replay.instrument_snapshot_missing",
-                        "directory": str(self.store.root / "instruments"),
-                    },
-                )
-            else:
-                logger.info(
-                    "loaded Instrument Snapshot",
-                    extra={
-                        "event": "replay.instrument_snapshot_loaded",
-                        "snapshot": str(self.instrument_store.snapshot_path),
-                        "instruments": len(self.instrument_store),
-                    },
-                )
-
-            self.service = ReplayService(
-                self.store,
-                max_sessions=self.config.replay.max_sessions,
-                heartbeat_s=self.config.replay.heartbeat_s,
-                instrument_store=self.instrument_store,
-            )
-            self.server = ReplayServer(
-                self.service,
-                control_bind_host=self.config.replay.control_bind_host,
-                control_port=self.config.replay.control_port,
-                publish_bind_host=self.config.replay.publish_bind_host,
-                publish_port=self.config.replay.publish_port,
-            )
-            self.server.start()
-
-            self._health = ServiceHealthServer(
-                service="replay",
-                host=self.config.service.health_host,
-                port=self.config.service.replay_health_port,
-                ready=self._ready_payload,
-                metrics_render=self.render_metrics,
-                status=self.status_payload,
-            )
-            self._health.start()
-            self._started = True
-            self._started_at = time.monotonic()
-
-            logger.info(
-                "replay service started",
-                extra={
-                    "event": "replay.started",
-                    "status": "ready",
-                    "control_endpoint": self.server.control_endpoint,
-                    "publish_endpoint": self.server.publish_endpoint,
-                },
-            )
+            self._start_service()
         except Exception:
             self.stop()
             raise
+
+    def _start_service(self) -> None:
+        # Replay reads the Instrument Snapshot exported by the collector,
+        # never the YAML truth source (DESIGN §5.1). A missing snapshot is
+        # reported through /status and the log instead of silently
+        # disabling Instrument validation without a trace.
+        self.instrument_store = load_instrument_store(self.store.root)
+        if self.instrument_store is None:
+            logger.warning(
+                "Instrument Snapshot missing; Replay Sessions cannot "
+                "validate Instruments",
+                extra={
+                    "event": "replay.instrument_snapshot_missing",
+                    "directory": str(self.store.root / "instruments"),
+                },
+            )
+        else:
+            logger.info(
+                "loaded Instrument Snapshot",
+                extra={
+                    "event": "replay.instrument_snapshot_loaded",
+                    "snapshot": str(self.instrument_store.snapshot_path),
+                    "instruments": len(self.instrument_store),
+                },
+            )
+
+        self.service = ReplayService(
+            self.store,
+            max_sessions=self.config.replay.max_sessions,
+            heartbeat_s=self.config.replay.heartbeat_s,
+            instrument_store=self.instrument_store,
+        )
+        self.server = ReplayServer(
+            self.service,
+            control_bind_host=self.config.replay.control_bind_host,
+            control_port=self.config.replay.control_port,
+            publish_bind_host=self.config.replay.publish_bind_host,
+            publish_port=self.config.replay.publish_port,
+        )
+        self.server.start()
+
+        self._health = ServiceHealthServer(
+            service="replay",
+            host=self.config.service.health_host,
+            port=self.config.service.replay_health_port,
+            ready=self._ready_payload,
+            metrics_render=self.render_metrics,
+            status=self.status_payload,
+        )
+        self._health.start()
+        self._started = True
+        self._started_at = time.monotonic()
+
+        logger.info(
+            "replay service started",
+            extra={
+                "event": "replay.started",
+                "status": "ready",
+                "control_endpoint": self.server.control_endpoint,
+                "publish_endpoint": self.server.publish_endpoint,
+            },
+        )
 
     def stop(self) -> None:
         if self.server is not None:
@@ -130,19 +139,19 @@ class ReplayServiceRole:
     @property
     def control_endpoint(self) -> str:
         if self.server is None or self.server.control_endpoint is None:
-            raise RuntimeError("ReplayServiceRole.start() must be called first")
+            raise RuntimeError(_NOT_STARTED_MESSAGE)
         return self.server.control_endpoint
 
     @property
     def publish_endpoint(self) -> str:
         if self.server is None or self.server.publish_endpoint is None:
-            raise RuntimeError("ReplayServiceRole.start() must be called first")
+            raise RuntimeError(_NOT_STARTED_MESSAGE)
         return self.server.publish_endpoint
 
     @property
     def health_url(self) -> str:
         if self._health is None:
-            raise RuntimeError("ReplayServiceRole.start() must be called first")
+            raise RuntimeError(_NOT_STARTED_MESSAGE)
         return self._health.base_url
 
     # -- readiness / status ------------------------------------------------

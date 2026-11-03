@@ -19,19 +19,22 @@ import logging
 import threading
 import time
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Sequence
-from datetime import datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from mdgw.backfill_common import (
     interval_ns,
     read_existing_bars,
     same_bar_content,
 )
-from mdgw.core.bar import Bar
 from mdgw.core.time import datetime_to_ns, utc_now
 from mdgw.service.common import ns_iso
-from mdgw.store.parquet_dataset import ParquetBarStore
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+    from datetime import datetime
+
+    from mdgw.core.bar import Bar
+    from mdgw.store.parquet_dataset import ParquetBarStore
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,8 @@ FLUSH_ERROR_BACKOFF_S = 1.0
 CLOSE_JOIN_TIMEOUT_S = 30.0
 _DECIMAL_BYTES = 16
 _BAR_FIXED_BYTES = 128
+_BIND_REQUIRED_MESSAGE = "BarSink.bind() must be called before write_bars()"
+_CLOSED_MESSAGE = "BufferedBarSink is closed"
 
 
 def _bar_identity(bar: Bar) -> tuple[str, str, int]:
@@ -114,8 +119,8 @@ class ImmediateBarSink:
             self._store, instrument_id, interval, start_ns, end_ns
         )
 
-    def hwm_cap(
-        self, instrument_id: str, interval: str, candidate_open_ns: int
+    def hwm_cap(  # ruff: ignore[no-self-use] - BarSink Protocol method
+        self, instrument_id: str, interval: str, candidate_open_ns: int  # ruff: ignore[unused-method-argument] - BarSink Protocol signature
     ) -> int | None:
         return candidate_open_ns
 
@@ -133,7 +138,7 @@ class ImmediateBarSink:
 
     def _write(self, bars: Sequence[Bar]) -> float:
         if self._asset_class_for is None:
-            raise RuntimeError("BarSink.bind() must be called before write_bars()")
+            raise RuntimeError(_BIND_REQUIRED_MESSAGE)
         groups: dict[str, list[Bar]] = defaultdict(list)
         for bar in bars:
             groups[self._asset_class_for(bar.instrument_id)].append(bar)
@@ -142,10 +147,10 @@ class ImmediateBarSink:
             self._store.write_bars(group, asset_class=asset_class)
         return time.monotonic() - started
 
-    def flush(self) -> None:
+    def flush(self) -> None:  # ruff: ignore[no-self-use] - BarSink Protocol method
         return None
 
-    def close(self) -> None:
+    def close(self) -> None:  # ruff: ignore[no-self-use] - BarSink Protocol method
         return None
 
     def stats(self) -> dict:
@@ -256,10 +261,10 @@ class BufferedBarSink:
         if not bars:
             return
         if self._asset_class_for is None:
-            raise RuntimeError("BarSink.bind() must be called before write_bars()")
+            raise RuntimeError(_BIND_REQUIRED_MESSAGE)
         with self._condition:
             if self._closed:
-                raise RuntimeError("BufferedBarSink is closed")
+                raise RuntimeError(_CLOSED_MESSAGE)
             self._ensure_thread_locked()
             now = self._clock()
             for bar in bars:
@@ -284,7 +289,7 @@ class BufferedBarSink:
             return
 
         if len(self._pending) >= self._queue_size:
-            dropped_key, (dropped, _) = self._pending.popitem(last=False)
+            _, (dropped, _) = self._pending.popitem(last=False)
             self._pending_bytes -= estimate_bar_bytes(dropped)
             self.dropped_bars += 1
             self._record_dropped_locked(dropped)
@@ -481,8 +486,7 @@ class BufferedBarSink:
                 continue
             del self._pending[key]
             self._pending_bytes -= estimate_bar_bytes(bar)
-        if self._pending_bytes < 0:
-            self._pending_bytes = 0
+        self._pending_bytes = max(self._pending_bytes, 0)
 
     # -- observability -----------------------------------------------------
 
@@ -507,9 +511,9 @@ class BufferedBarSink:
 
 
 __all__ = [
+    "DEFAULT_WRITE_QUEUE_SIZE",
     "BarSink",
     "BufferedBarSink",
-    "DEFAULT_WRITE_QUEUE_SIZE",
     "ImmediateBarSink",
     "estimate_bar_bytes",
 ]

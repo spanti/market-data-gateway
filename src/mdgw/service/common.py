@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from typing import TYPE_CHECKING
 
 from mdgw.core.time import datetime_to_ns, iso_to_ns, ns_to_iso
-from mdgw.metrics import MetricsRegistry
-from mdgw.store.parquet_dataset import ParquetBarStore
+
+if TYPE_CHECKING:
+    from datetime import datetime
+
+    from mdgw.metrics import MetricsRegistry
+    from mdgw.store.parquet_dataset import ParquetBarStore
 
 
 def update_dataset_metrics(
@@ -15,7 +19,7 @@ def update_dataset_metrics(
     """Set Dataset gauges used by collector and api `/metrics`."""
     try:
         dataset = store.status()
-    except Exception:  # pragma: no cover - defensive metrics path
+    except Exception:  # ruff: ignore[blind-except]  # pragma: no cover - defensive metrics path
         dataset = {}
     metrics.set(
         "mdgw_dataset_active_file_count",

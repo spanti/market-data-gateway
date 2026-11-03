@@ -9,16 +9,19 @@ without real subprocesses.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import logging
 import os
-import subprocess
+import subprocess  # ruff: ignore[suspicious-subprocess-import] - spawns `mdgw run` children
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +29,7 @@ DEFAULT_RESTART_BACKOFF_S = (0.5, 1.0, 2.0, 5.0, 10.0)
 DEFAULT_POLL_INTERVAL_S = 0.2
 DEFAULT_READY_TIMEOUT_S = 30.0
 DEFAULT_TERMINATE_TIMEOUT_S = 10.0
+_NO_SPECS_MESSAGE = "Supervisor requires at least one ChildSpec"
 
 
 class ChildProcess(Protocol):
@@ -59,7 +63,7 @@ class _Child:
 class Supervisor:
     """Run a fixed list of Service Role children and monitor them."""
 
-    def __init__(
+    def __init__(  # ruff: ignore[too-many-arguments] - keyword-only policy knobs
         self,
         specs: Sequence[ChildSpec],
         *,
@@ -70,7 +74,7 @@ class Supervisor:
         terminate_timeout_s: float = DEFAULT_TERMINATE_TIMEOUT_S,
     ) -> None:
         if not specs:
-            raise ValueError("Supervisor requires at least one ChildSpec")
+            raise ValueError(_NO_SPECS_MESSAGE)
         self._specs = tuple(specs)
         self._spawn = spawn or _spawn_process
         self._probe = probe or _probe_http
@@ -200,10 +204,8 @@ class Supervisor:
         for child in children:
             if child.proc.poll() is not None:
                 continue
-            try:
+            with contextlib.suppress(Exception):  # pragma: no cover - already gone
                 child.proc.terminate()
-            except Exception:  # pragma: no cover - already gone
-                pass
         for child in children:
             if child.proc.poll() is not None:
                 continue
@@ -212,15 +214,11 @@ class Supervisor:
             except subprocess.TimeoutExpired:
                 kill = getattr(child.proc, "kill", None)
                 if kill is not None:
-                    try:
+                    with contextlib.suppress(Exception):  # pragma: no cover - defensive
                         kill()
-                    except Exception:  # pragma: no cover - defensive
-                        pass
-                try:
+                with contextlib.suppress(Exception):  # pragma: no cover - defensive
                     child.proc.wait(timeout=5)
-                except Exception:  # pragma: no cover - defensive
-                    pass
-            except Exception:  # pragma: no cover - defensive
+            except Exception:  # ruff: ignore[blind-except, try-except-pass]  # pragma: no cover - defensive
                 pass
             logger.info(
                 "child stopped",
@@ -233,7 +231,7 @@ class Supervisor:
 
 def _spawn_process(spec: ChildSpec) -> subprocess.Popen:
     # Inherit stdio so child JSON logs land on the supervisor's stream.
-    proc = subprocess.Popen(spec.command)
+    proc = subprocess.Popen(spec.command)  # ruff: ignore[subprocess-without-shell-equals-true] - argv list, no shell
     _assign_to_windows_job(proc)
     return proc
 
@@ -250,7 +248,10 @@ _JobObjectExtendedLimitInformation = 9
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
 
-_windows_job: int | None = None
+class _WindowsJobHandle:
+    """Process-wide Job Object handle, created on first use."""
+
+    value: int | None = None
 
 
 if os.name == "nt":  # pragma: no cover - Windows-only structures
@@ -290,12 +291,11 @@ if os.name == "nt":  # pragma: no cover - Windows-only structures
 
 
 def _ensure_windows_job() -> int | None:
-    global _windows_job
     if os.name != "nt":  # pragma: no cover - non-Windows
         return None
-    if _windows_job is not None:
-        return _windows_job
-    try:  # pragma: no cover - Windows-only
+    if _WindowsJobHandle.value is not None:
+        return _WindowsJobHandle.value
+    try:  # ruff: ignore[too-many-statements-in-try-clause]  # pragma: no cover - Windows-only
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateJobObjectW.restype = ctypes.c_void_p
         kernel32.SetInformationJobObject.restype = ctypes.c_int
@@ -316,17 +316,18 @@ def _ensure_windows_job() -> int | None:
         if not configured:
             kernel32.CloseHandle(job)
             return None
-        _windows_job = job
-        return job
-    except Exception:  # pragma: no cover - defensive
+    except Exception:  # ruff: ignore[blind-except]  # pragma: no cover - defensive
         return None
+    else:
+        _WindowsJobHandle.value = job
+        return job
 
 
 def _assign_to_windows_job(proc: subprocess.Popen) -> None:
     job = _ensure_windows_job()
     if job is None:
         return
-    try:  # pragma: no cover - Windows-only
+    try:  # ruff: ignore[too-many-statements-in-try-clause]  # pragma: no cover - Windows-only
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.OpenProcess.restype = ctypes.c_void_p
         kernel32.AssignProcessToJobObject.restype = ctypes.c_int
@@ -340,7 +341,7 @@ def _assign_to_windows_job(proc: subprocess.Popen) -> None:
             kernel32.AssignProcessToJobObject(job, handle)
         finally:
             kernel32.CloseHandle(handle)
-    except Exception:  # pragma: no cover - defensive
+    except Exception:  # ruff: ignore[blind-except]  # pragma: no cover - defensive
         # Some CI runners already place us in a non-breakaway job; the normal
         # terminate path still stops children in that case.
         return
@@ -348,7 +349,9 @@ def _assign_to_windows_job(proc: subprocess.Popen) -> None:
 
 def _probe_http(url: str, *, timeout: float = 1.0) -> bool:
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
+        with urllib.request.urlopen(  # ruff: ignore[suspicious-url-open-usage] - local health probe
+            url, timeout=timeout
+        ) as response:
             return 200 <= response.status < 300
     except (urllib.error.URLError, OSError, ValueError):
         return False

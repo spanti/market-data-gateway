@@ -11,19 +11,16 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import datetime
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING
 
 from mdgw.aggregate import BarAggregator
 from mdgw.backfill import BackfillReport, run_backfill
 from mdgw.backfill_common import interval_ns, merge_bar_batch
-from mdgw.config import GatewayConfig
-from mdgw.core.bar import Bar
 from mdgw.core.errors import UnknownInstrumentError
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import datetime_to_ns, ns_to_datetime, utc_now
-from mdgw.ingest.feed_handler import FeedHandler
 from mdgw.normalize.bar import normalize_bar
 from mdgw.reference import (
     InstrumentStore,
@@ -35,15 +32,30 @@ from mdgw.state.health import GapEvent, HealthTracker
 from mdgw.state.high_water_mark import HighWaterMarkStore
 from mdgw.store.parquet_dataset import ParquetBarStore
 
+if TYPE_CHECKING:
+    from datetime import datetime
+
+    from mdgw.config import GatewayConfig
+    from mdgw.core.bar import Bar
+    from mdgw.ingest.feed_handler import FeedHandler
+
 logger = logging.getLogger(__name__)
 
 AssetClassResolver = Callable[[str], str]
+
+_NOT_OPEN_MESSAGE = "CollectorCore state is not open"
+_OPEN_BEFORE_INGEST_MESSAGE = (
+    "CollectorCore.open_state() must be called before ingest()"
+)
+_OPEN_BEFORE_BACKFILL_MESSAGE = (
+    "CollectorCore.open_state() must be called before backfill()"
+)
 
 
 class CollectorCore:
     """One collector pipeline over a single (possibly composite) Feed Handler."""
 
-    def __init__(
+    def __init__(  # ruff: ignore[too-many-arguments] - keyword-only pipeline wiring
         self,
         *,
         feed_handler: FeedHandler,
@@ -133,9 +145,7 @@ class CollectorCore:
         responsible for publication; backfilled history is never returned.
         """
         if self.hwm is None:
-            raise RuntimeError(
-                "CollectorCore.open_state() must be called before ingest()"
-            )
+            raise RuntimeError(_OPEN_BEFORE_INGEST_MESSAGE)
 
         ingest_ts = utc_now()
         base_bars = [
@@ -211,14 +221,12 @@ class CollectorCore:
     def backfill(self, now: datetime | None = None) -> BackfillReport:
         """Backfill closed 1m Bars from the HWM (or the configured window)."""
         if self.hwm is None:
-            raise RuntimeError(
-                "CollectorCore.open_state() must be called before backfill()"
-            )
+            raise RuntimeError(_OPEN_BEFORE_BACKFILL_MESSAGE)
         return self.run_backfill(now if now is not None else utc_now())
 
     def run_backfill(self, now: datetime) -> BackfillReport:
         if self.hwm is None:
-            raise RuntimeError("CollectorCore state is not open")
+            raise RuntimeError(_NOT_OPEN_MESSAGE)
         return run_backfill(
             feed_handler=self.feed_handler,
             store=self.store,
@@ -256,7 +264,7 @@ class CollectorCore:
             return
         grouped: dict[tuple[str, str], list[Bar]] = defaultdict(list)
         for bar in bars:
-            grouped[(bar.instrument_id, bar.interval)].append(bar)
+            grouped[bar.instrument_id, bar.interval].append(bar)
         for (instrument_id, interval), group in grouped.items():
             candidate = max(datetime_to_ns(bar.open_ts) for bar in group)
             # A Bar dropped by the bounded write queue may never have reached
@@ -279,20 +287,21 @@ class CollectorCore:
             else self.instrument_store.get(instrument_id)
         )
         if instrument is None:
+            message = f"unknown Instrument {instrument_id!r}"
             raise UnknownInstrumentError(
-                f"unknown Instrument {instrument_id!r}",
+                message,
                 details={"instrument_id": instrument_id},
             )
         return instrument.asset_class
 
     def high_water_mark(self, instrument_id: str, interval: str) -> int | None:
         if self.hwm is None:
-            raise RuntimeError("CollectorCore state is not open")
+            raise RuntimeError(_NOT_OPEN_MESSAGE)
         return self.hwm.get(instrument_id, interval)
 
     def high_water_marks(self) -> dict[tuple[str, str], int]:
         if self.hwm is None:
-            raise RuntimeError("CollectorCore state is not open")
+            raise RuntimeError(_NOT_OPEN_MESSAGE)
         return self.hwm.all()
 
     def stale_instruments(self, now: datetime | None = None) -> list[dict]:

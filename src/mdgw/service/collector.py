@@ -2,25 +2,30 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mdgw.bus.zmq_bus import READY_TOPIC, ZMQBus, table_to_ipc
-from mdgw.config import GatewayConfig
-from mdgw.core.bar import Bar
 from mdgw.core.schema import bars_to_logical_table
 from mdgw.ingest.composite import build_configured_feed_handler
-from mdgw.ingest.feed_handler import FeedHandler
 from mdgw.metrics import MetricsRegistry
 from mdgw.service.bar_sink import BufferedBarSink
 from mdgw.service.collector_core import CollectorCore
 from mdgw.service.common import iso_to_seconds, ns_iso, update_dataset_metrics
 from mdgw.service.health_server import ServiceHealthServer
+
+if TYPE_CHECKING:
+    from datetime import datetime
+    from pathlib import Path
+
+    from mdgw.config import GatewayConfig
+    from mdgw.core.bar import Bar
+    from mdgw.ingest.feed_handler import FeedHandler
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +34,7 @@ READY_INTERVAL_S = 0.05
 STATUS_INTERVAL_S = 1.0
 POLL_INTERVAL_S = 0.05
 ERROR_BACKOFF_S = 1.0
+_NOT_STARTED_MESSAGE = "CollectorService.start() must be called first"
 
 
 class CollectorService:
@@ -96,80 +102,81 @@ class CollectorService:
             return
         self.core.open_state()
         try:
-            self._bus = ZMQBus(zmq_hwm=self.config.bus.zmq_hwm)
-            resolved = self._bus.bind_publisher(
-                self.config.bus.collector_pub_bind
-            )
-            self._publish_endpoint = resolved[0]
-
-            # Observe the api READY handshake on the api PUB. This must not
-            # block startup: the api may not exist yet (standalone collector).
-            self._api_ready.clear()
-            self._api_ready_signal = self._bus.subscribe(
-                self.config.bus.api_pub_connect,
-                topic_prefix=READY_TOPIC,
-                handler=self._on_api_ready,
-            )
-
-            self._health_server = ServiceHealthServer(
-                service="collector",
-                host=self.config.service.health_host,
-                port=self.config.service.collector_health_port,
-                ready=self._ready_payload,
-                metrics_render=self.render_metrics,
-                status=self.status_payload,
-            )
-            self._health_server.start()
-
-            self.metrics.inc(
-                "mdgw_collector_bars_ingested_total",
-                amount=0,
-                help="Closed 1m Bars ingested by the collector",
-            )
-            self.metrics.inc(
-                "mdgw_collector_bars_written_total",
-                amount=0,
-                help="Bars written to the Dataset (including aggregated parents)",
-            )
-            self.metrics.inc(
-                "mdgw_collector_zmq_publishes_total",
-                amount=0,
-                help="Bar messages published on the collector PUB",
-            )
-
-            self._stop.clear()
-            self._started = True
-            self._started_at = time.monotonic()
-            self._ready.set()
-
-            self._ready_thread = threading.Thread(
-                target=self._run_ready_loop,
-                name="mdgw-collector-ready",
-                daemon=True,
-            )
-            self._status_thread = threading.Thread(
-                target=self._run_status_loop,
-                name="mdgw-collector-status",
-                daemon=True,
-            )
-            self._ingest_thread = threading.Thread(
-                target=self._run_ingest_loop,
-                name="mdgw-collector-ingest",
-                daemon=True,
-            )
-            self._ready_thread.start()
-            self._status_thread.start()
-            self._ingest_thread.start()
-            logger.info(
-                "collector service started",
-                extra={
-                    "event": "collector.started",
-                    "publish_endpoint": self._publish_endpoint,
-                },
-            )
+            self._start_service()
         except Exception:
             self.stop()
             raise
+
+    def _start_service(self) -> None:
+        self._bus = ZMQBus(zmq_hwm=self.config.bus.zmq_hwm)
+        resolved = self._bus.bind_publisher(self.config.bus.collector_pub_bind)
+        self._publish_endpoint = resolved[0]
+
+        # Observe the api READY handshake on the api PUB. This must not
+        # block startup: the api may not exist yet (standalone collector).
+        self._api_ready.clear()
+        self._api_ready_signal = self._bus.subscribe(
+            self.config.bus.api_pub_connect,
+            topic_prefix=READY_TOPIC,
+            handler=self._on_api_ready,
+        )
+
+        self._health_server = ServiceHealthServer(
+            service="collector",
+            host=self.config.service.health_host,
+            port=self.config.service.collector_health_port,
+            ready=self._ready_payload,
+            metrics_render=self.render_metrics,
+            status=self.status_payload,
+        )
+        self._health_server.start()
+
+        self.metrics.inc(
+            "mdgw_collector_bars_ingested_total",
+            amount=0,
+            help="Closed 1m Bars ingested by the collector",
+        )
+        self.metrics.inc(
+            "mdgw_collector_bars_written_total",
+            amount=0,
+            help="Bars written to the Dataset (including aggregated parents)",
+        )
+        self.metrics.inc(
+            "mdgw_collector_zmq_publishes_total",
+            amount=0,
+            help="Bar messages published on the collector PUB",
+        )
+
+        self._stop.clear()
+        self._started = True
+        self._started_at = time.monotonic()
+        self._ready.set()
+
+        self._ready_thread = threading.Thread(
+            target=self._run_ready_loop,
+            name="mdgw-collector-ready",
+            daemon=True,
+        )
+        self._status_thread = threading.Thread(
+            target=self._run_status_loop,
+            name="mdgw-collector-status",
+            daemon=True,
+        )
+        self._ingest_thread = threading.Thread(
+            target=self._run_ingest_loop,
+            name="mdgw-collector-ingest",
+            daemon=True,
+        )
+        self._ready_thread.start()
+        self._status_thread.start()
+        self._ingest_thread.start()
+        logger.info(
+            "collector service started",
+            extra={
+                "event": "collector.started",
+                "publish_endpoint": self._publish_endpoint,
+            },
+        )
 
     def stop(self) -> None:
         self._ready.clear()
@@ -211,13 +218,13 @@ class CollectorService:
     @property
     def publish_endpoint(self) -> str:
         if self._publish_endpoint is None:
-            raise RuntimeError("CollectorService.start() must be called first")
+            raise RuntimeError(_NOT_STARTED_MESSAGE)
         return self._publish_endpoint
 
     @property
     def health_url(self) -> str:
         if self._health_server is None:
-            raise RuntimeError("CollectorService.start() must be called first")
+            raise RuntimeError(_NOT_STARTED_MESSAGE)
         return self._health_server.base_url
 
     # -- ingest loop -------------------------------------------------------
@@ -260,7 +267,7 @@ class CollectorService:
             return
         groups: dict[tuple[str, str], list[Bar]] = defaultdict(list)
         for bar in bars:
-            groups[(bar.interval, bar.instrument_id)].append(bar)
+            groups[bar.interval, bar.instrument_id].append(bar)
 
         for (interval, instrument_id), group in groups.items():
             topic = f"{MARKET_BAR_TOPIC_PREFIX}{interval}.{instrument_id}"
@@ -272,7 +279,7 @@ class CollectorService:
 
     # -- readiness / status ------------------------------------------------
 
-    def _on_api_ready(self, topic: str, payload: bytes) -> None:
+    def _on_api_ready(self, _topic: str, _payload: bytes) -> None:
         """ZMQ subscriber callback: the api PUB forwarded our READY."""
         self._api_ready.set()
 
@@ -319,10 +326,8 @@ class CollectorService:
         while not self._stop.is_set():
             bus = self._bus
             if bus is not None:
-                try:
+                with contextlib.suppress(RuntimeError):
                     bus.publish(READY_TOPIC, b"")
-                except RuntimeError:
-                    pass
             self._stop.wait(READY_INTERVAL_S)
 
     def _run_status_loop(self) -> None:

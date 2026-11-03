@@ -9,17 +9,21 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from aiohttp import web
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 ReadyResult = tuple[bool, str]
+_NOT_RUNNING_MESSAGE = "health server is not running"
 
 
 class ServiceHealthServer:
     """Serve `/healthz`, `/readyz`, `/metrics` (and optionally `/status`)."""
 
-    def __init__(
+    def __init__(  # ruff: ignore[too-many-arguments] - keyword-only server config
         self,
         *,
         service: str,
@@ -81,34 +85,34 @@ class ServiceHealthServer:
     @property
     def bound_port(self) -> int:
         if self._bound_port is None:
-            raise RuntimeError("health server is not running")
+            raise RuntimeError(_NOT_RUNNING_MESSAGE)
         return self._bound_port
 
     @property
     def base_url(self) -> str:
         host = self.host
-        if host in {"0.0.0.0", "::"}:
+        if host in {"0.0.0.0", "::"}:  # ruff: ignore[hardcoded-bind-all-interfaces] - compares the configured host; no socket bind
             host = "127.0.0.1"
         return f"http://{host}:{self.bound_port}"
 
-    async def _healthz(self, request: web.Request) -> web.Response:
+    async def _healthz(self, _request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "service": self.service})
 
-    async def _readyz(self, request: web.Request) -> web.Response:
+    async def _readyz(self, _request: web.Request) -> web.Response:
         ready, reason = self._ready()
         return web.json_response(
             {"ready": ready, "reason": reason, "service": self.service},
             status=200 if ready else 503,
         )
 
-    async def _metrics(self, request: web.Request) -> web.Response:
+    async def _metrics(self, _request: web.Request) -> web.Response:
         text = "" if self._metrics_render is None else self._metrics_render()
         return web.Response(
             body=text.encode("utf-8"),
             headers={"Content-Type": "text/plain; version=0.0.4"},
         )
 
-    async def _status_handler(self, request: web.Request) -> web.Response:
+    async def _status_handler(self, _request: web.Request) -> web.Response:
         assert self._status is not None
         return web.json_response(self._status())
 

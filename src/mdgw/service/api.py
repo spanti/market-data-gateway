@@ -3,30 +3,36 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import threading
 import time
-from datetime import datetime
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from aiohttp import web
 
 from mdgw.api.server import create_app
 from mdgw.api.ws_hub import WebSocketHub
 from mdgw.bus.zmq_bus import READY_TOPIC, ZMQBus, ipc_to_table
-from mdgw.config import GatewayConfig
 from mdgw.core.envelope import table_to_messages
 from mdgw.metrics import MetricsRegistry
 from mdgw.reference import load_instrument_store
 from mdgw.service.common import ns_iso, update_dataset_metrics
 from mdgw.store.parquet_dataset import ParquetBarStore
 
+if TYPE_CHECKING:
+    from datetime import datetime
+    from pathlib import Path
+
+    from mdgw.config import GatewayConfig
+
 logger = logging.getLogger(__name__)
 
 MARKET_BAR_TOPIC_PREFIX = "market.bar."
 INTERNAL_STATUS_TOPIC = "_internal.status"
 READY_INTERVAL_S = 0.05
+_NOT_STARTED_MESSAGE = "ApiService.start() must be called first"
 
 
 class ApiService:
@@ -76,48 +82,51 @@ class ApiService:
         if self._started:
             return
         try:
-            self._bus = ZMQBus(zmq_hwm=self.config.bus.zmq_hwm)
-            resolved = self._bus.bind_publisher(self.config.bus.api_pub_bind)
-            self._publish_endpoint = resolved[0]
-            self._ready_event = self._bus.subscribe(
-                self.config.bus.collector_pub_connect,
-                topic_prefix=MARKET_BAR_TOPIC_PREFIX,
-                extra_prefixes=(INTERNAL_STATUS_TOPIC,),
-                handler=self._on_message,
-            )
-
-            self.metrics.inc(
-                "mdgw_api_messages_received_total",
-                amount=0,
-                help="Bar messages received from the collector",
-            )
-            self.metrics.inc(
-                "mdgw_api_messages_forwarded_total",
-                amount=0,
-                help="Bar messages re-published to external ZMQ consumers",
-            )
-
-            self._start_http()
-            self._stop.clear()
-            self._started = True
-            self._started_at = time.monotonic()
-            self._ready_thread = threading.Thread(
-                target=self._run_ready_loop,
-                name="mdgw-api-ready",
-                daemon=True,
-            )
-            self._ready_thread.start()
-            logger.info(
-                "api service started",
-                extra={
-                    "event": "api.started",
-                    "http": self.base_url,
-                    "publish_endpoint": self._publish_endpoint,
-                },
-            )
+            self._start_service()
         except Exception:
             self.stop()
             raise
+
+    def _start_service(self) -> None:
+        self._bus = ZMQBus(zmq_hwm=self.config.bus.zmq_hwm)
+        resolved = self._bus.bind_publisher(self.config.bus.api_pub_bind)
+        self._publish_endpoint = resolved[0]
+        self._ready_event = self._bus.subscribe(
+            self.config.bus.collector_pub_connect,
+            topic_prefix=MARKET_BAR_TOPIC_PREFIX,
+            extra_prefixes=(INTERNAL_STATUS_TOPIC,),
+            handler=self._on_message,
+        )
+
+        self.metrics.inc(
+            "mdgw_api_messages_received_total",
+            amount=0,
+            help="Bar messages received from the collector",
+        )
+        self.metrics.inc(
+            "mdgw_api_messages_forwarded_total",
+            amount=0,
+            help="Bar messages re-published to external ZMQ consumers",
+        )
+
+        self._start_http()
+        self._stop.clear()
+        self._started = True
+        self._started_at = time.monotonic()
+        self._ready_thread = threading.Thread(
+            target=self._run_ready_loop,
+            name="mdgw-api-ready",
+            daemon=True,
+        )
+        self._ready_thread.start()
+        logger.info(
+            "api service started",
+            extra={
+                "event": "api.started",
+                "http": self.base_url,
+                "publish_endpoint": self._publish_endpoint,
+            },
+        )
 
     def stop(self) -> None:
         self._stop.set()
@@ -138,22 +147,22 @@ class ApiService:
     @property
     def base_url(self) -> str:
         if self._port is None:
-            raise RuntimeError("ApiService.start() must be called first")
+            raise RuntimeError(_NOT_STARTED_MESSAGE)
         host = self.config.server.host
-        if host in {"0.0.0.0", "::"}:
+        if host in {"0.0.0.0", "::"}:  # ruff: ignore[hardcoded-bind-all-interfaces] - compares the configured host; no socket bind
             host = "127.0.0.1"
         return f"http://{host}:{self._port}"
 
     @property
     def http_port(self) -> int:
         if self._port is None:
-            raise RuntimeError("ApiService.start() must be called first")
+            raise RuntimeError(_NOT_STARTED_MESSAGE)
         return self._port
 
     @property
     def publish_endpoint(self) -> str:
         if self._publish_endpoint is None:
-            raise RuntimeError("ApiService.start() must be called first")
+            raise RuntimeError(_NOT_STARTED_MESSAGE)
         return self._publish_endpoint
 
     # -- collector subscription -------------------------------------------
@@ -174,7 +183,7 @@ class ApiService:
 
         try:
             table = ipc_to_table(payload)
-        except Exception:  # pragma: no cover - malformed external frame
+        except Exception:  # ruff: ignore[blind-except]  # pragma: no cover - malformed external frame
             logger.warning(
                 "discarding malformed collector Bar frame",
                 extra={"event": "api.malformed_frame"},
@@ -192,22 +201,18 @@ class ApiService:
             except RuntimeError:  # pragma: no cover - shutdown race
                 pass
         if table.num_rows:
-            try:
+            with contextlib.suppress(KeyError, ValueError):  # pragma: no cover
                 self._last_bar_ts = max(
                     row for row in table.column("close_ts").to_pylist()
                 )
-            except (KeyError, ValueError):  # pragma: no cover - defensive
-                pass
 
         hub = self._hub
         loop = self._loop
         if hub is None or loop is None:
             return
         messages = table_to_messages(table)
-        try:
+        with contextlib.suppress(RuntimeError):  # pragma: no cover - closed loop
             loop.call_soon_threadsafe(hub.publish, topic, messages)
-        except RuntimeError:  # pragma: no cover - loop already closed
-            pass
 
     def _run_ready_loop(self) -> None:
         # Only advertise READY once the collector handshake was observed. That
@@ -217,10 +222,8 @@ class ApiService:
         while not self._stop.is_set():
             bus = self._bus
             if bus is not None and self._collector_is_ready():
-                try:
+                with contextlib.suppress(RuntimeError):
                     bus.publish(READY_TOPIC, b"")
-                except RuntimeError:
-                    pass
             self._stop.wait(READY_INTERVAL_S)
 
     # -- readiness / status ------------------------------------------------
