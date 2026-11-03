@@ -1,0 +1,16 @@
+# 03: 让 ApiService 组合 HttpServer，并补首个直接测试
+
+**What to build:** `ApiService` 不再自己创建线程、事件循环、`AppRunner` 与 `TCPSite`，改为把同步构建的应用交给 `HttpServer`，并通过 `HttpServer.call_soon_threadsafe` 派发 collector 的 Bar 消息。公共 `base_url` 与 `http_port` 保持原语义并委托。`ApiService` 获得第一个进程内直接测试，不再只依赖多进程子进程覆盖。
+
+**Blocked by:** 01
+
+**Status:** ready-for-agent
+
+- [ ] `ApiService` 不再持有 `_loop`、`_loop_thread`、`_runner`、`_port`，也不直接调用 `AppRunner` / `TCPSite`。
+- [ ] 应用仍携带 metrics、status、ready provider 与 `service_role="api"`；WebSocket hub 由 `ApiService` 构建并交给关闭钩子。
+- [ ] `base_url` 与 `http_port` 保持原有名称、类型、语义，内部委托给 `HttpServer`。
+- [ ] 新增进程内集成测试：`http_port=0`、`api_pub_bind=tcp://127.0.0.1:0`、无 collector 进程。
+- [ ] 测试断言 `/healthz` 返回 200、`/readyz` 返回 200（`collector_required` 默认 false）、`/api/v1/status` 报告 `service: "api"`。
+- [ ] 测试结束调用 `stop()`，断言 HTTP 线程已退出，测试进程可继续复用端口。
+- [ ] 既有 collector → api 多进程测试与 Streaming Interface 测试保持通过。
+- [ ] 离线测试套件全绿；不修改端点行为或配置默认值。
