@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections import defaultdict
 from contextlib import suppress
 from typing import TYPE_CHECKING, Self
 from uuid import uuid4
@@ -18,19 +17,20 @@ from mdgw.aggregate import BarAggregator
 from mdgw.api.http_server import HttpServer
 from mdgw.api.server import create_app
 from mdgw.api.ws_hub import WebSocketHub
-from mdgw.bus.zmq_bus import ZMQBus, ipc_to_table, table_to_ipc
 from mdgw.core.envelope import table_to_messages
 from mdgw.core.errors import UnknownInstrumentError
-from mdgw.core.schema import bars_to_logical_table
 from mdgw.core.time import utc_now
 from mdgw.replay.service import ReplayService
 from mdgw.service.collector_core import CollectorCore
 from mdgw.state.health import GapEvent, HealthTracker
 from mdgw.store.parquet_dataset import ParquetBarStore
+from mdgw.streaming import StreamingInterface
 
 if TYPE_CHECKING:
     from datetime import datetime
     from pathlib import Path
+
+    import pyarrow as pa
 
     from mdgw.backfill import BackfillReport
     from mdgw.config import GatewayConfig
@@ -40,7 +40,6 @@ if TYPE_CHECKING:
     from mdgw.replay.session import Publish, ReplaySessionSpec
     from mdgw.state.high_water_mark import HighWaterMarkStore
 
-MARKET_BAR_TOPIC_PREFIX = "market.bar."
 RECEIVE_WAIT_TIMEOUT_S = 2.0
 
 logger = logging.getLogger(__name__)
@@ -83,13 +82,12 @@ class GatewayRuntime:
             asset_class_for=self._asset_class_for,
         )
 
-        self._bus: ZMQBus | None = None
+        self._streaming: StreamingInterface | None = None
         self._hub: WebSocketHub | None = None
         # Replay is created lazily: most runtime tests never replay, and a
         # ReplayService costs nothing until its first Session. No ZMQ server is
         # started here, so no port is bound unless the caller asks for replay.
         self._replay_service: ReplayService | None = None
-        self._stream_endpoint: str | None = None
         self._http = HttpServer()
         self._started = False
 
@@ -110,23 +108,15 @@ class GatewayRuntime:
         self._core.open_state()
         self.instrument_store = self._core.instrument_store
         self._hwm = self._core.hwm
-        bus: ZMQBus | None = None
         try:
-            bus = self._bind_streaming_bus()
+            self._streaming = self._open_streaming()
             self._start_http()
         except Exception:
-            if bus is not None:
-                bus.close()
-            self._stream_endpoint = None
-            self._stop_http()
-            self._close_feed_handler()
-            self._close_state()
+            self._close_after_failed_start()
             raise
-        self._bus = bus
         self._started = True
 
-    def _bind_streaming_bus(self) -> ZMQBus:
-        bus = ZMQBus(zmq_hwm=self.config.bus.zmq_hwm)
+    def _open_streaming(self) -> StreamingInterface:
         endpoint = f"inproc://mdgw-{uuid4().hex}"
         # One PUB socket feeds the internal api subscriber over inproc and
         # external ZMQ consumers over TCP (port 0 resolves to a free port).
@@ -134,29 +124,39 @@ class GatewayRuntime:
             f"tcp://{self.config.bus.stream_bind_host}:"
             f"{self.config.bus.stream_pub_port}"
         )
+        streaming = StreamingInterface(
+            bind=[endpoint, tcp_endpoint],
+            connect=endpoint,
+            zmq_hwm=self.config.bus.zmq_hwm,
+        )
         try:
-            resolved = bus.bind_publisher([endpoint, tcp_endpoint])
-            self._stream_endpoint = resolved[-1]
-            ready = bus.subscribe(
-                endpoint,
-                topic_prefix=MARKET_BAR_TOPIC_PREFIX,
-                handler=self._on_bar_message,
-            )
-            bus.wait_for_subscriber(ready)
+            streaming.start()
+            # Binding and connecting the same inproc endpoint makes the
+            # instance its own peer: this waits until the SUB is wired, so the
+            # first Bar is received before `ingest()` returns.
+            streaming.subscribe_bars(self._on_bar_message, await_ready=True)
         except Exception:
-            bus.close()
+            streaming.stop()
             raise
-        return bus
+        return streaming
+
+    def _close_after_failed_start(self) -> None:
+        """Release everything `start()` acquired before re-raising."""
+        streaming, self._streaming = self._streaming, None
+        if streaming is not None:
+            streaming.stop()
+        self._stop_http()
+        self._close_feed_handler()
+        self._close_state()
 
     def stop(self) -> None:
         if not self._started:
             return
         self._close_replay()
         self._stop_http()
-        if self._bus is not None:
-            self._bus.close()
-            self._bus = None
-        self._stream_endpoint = None
+        if self._streaming is not None:
+            self._streaming.stop()
+            self._streaming = None
         self._close_feed_handler()
         self._close_state()
         self._started = False
@@ -326,30 +326,24 @@ class GatewayRuntime:
         return instrument.asset_class
 
     def _publish_bars(self, bars: list[Bar]) -> int:
-        groups: dict[tuple[str, str], list[Bar]] = defaultdict(list)
-        for bar in bars:
-            groups[bar.interval, bar.instrument_id].append(bar)
-
         with self._received_condition:
             self._expected_received_bar_count += len(bars)
             target = self._expected_received_bar_count
 
-        assert self._bus is not None
-        for (interval, instrument_id), group in groups.items():
-            topic = f"{MARKET_BAR_TOPIC_PREFIX}{interval}.{instrument_id}"
-            self._bus.publish(topic, table_to_ipc(bars_to_logical_table(group)))
+        streaming = self._streaming
+        assert streaming is not None
+        streaming.publish_bars(bars)
         return target
 
-    def _on_bar_message(self, topic: str, payload: bytes) -> None:
-        table = ipc_to_table(payload)
+    def _on_bar_message(self, topic: str, table: pa.Table) -> None:
         with self._received_condition:
             self._received_bar_count += table.num_rows
             self._received_condition.notify_all()
 
-        # This runs on the ZMQ subscriber thread. Hand JSON messages to the
-        # event-loop hub via call_soon_threadsafe; never touch aiohttp objects
-        # from here. The external ZMQ consumer already received the same frames
-        # straight from the PUB socket.
+        # This runs on the Streaming Interface subscriber thread. Hand JSON
+        # messages to the event-loop hub via call_soon_threadsafe; never touch
+        # aiohttp objects from here. The external ZMQ consumer already received
+        # the same frames straight from the PUB socket.
         hub = self._hub
         if hub is None:
             return
@@ -402,10 +396,11 @@ class GatewayRuntime:
     @property
     def stream_endpoint(self) -> str:
         """Resolved external ZMQ PUB endpoint (`tcp://host:port`)."""
-        if self._stream_endpoint is None:
+        streaming = self._streaming
+        if streaming is None or not streaming.endpoints:
             msg = "GatewayRuntime.start() must be called first"
             raise RuntimeError(msg)
-        return self._stream_endpoint
+        return streaming.endpoints[-1]
 
     @property
     def base_url(self) -> str:
