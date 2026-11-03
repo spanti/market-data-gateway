@@ -12,12 +12,15 @@ Examples:
 
 from __future__ import annotations
 
-import argparse
 import statistics
 import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Optional
+
+import click
+import typer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -26,52 +29,49 @@ from _bench_common import format_bytes, format_rate, make_bars  # noqa: E402
 from mdgw.aggregate import BarAggregator  # noqa: E402
 from mdgw.store.parquet_dataset import ParquetBarStore  # noqa: E402
 
+app = typer.Typer(
+    add_completion=False,
+    help=(
+        "Write deterministic 1m Bars to a temporary Parquet Dataset and "
+        "report rows/s and bytes written."
+    ),
+)
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="bench_ingest.py",
-        description=(
-            "Write deterministic 1m Bars to a temporary Parquet Dataset and "
-            "report rows/s and bytes written."
-        ),
-    )
-    parser.add_argument(
-        "--rows", type=int, default=50_000, help="Bars per pass (default: 50000)"
-    )
-    parser.add_argument(
-        "--repeat", type=int, default=3, help="timed passes (default: 3)"
-    )
-    parser.add_argument(
+
+@app.command()
+def ingest(
+    rows: int = typer.Option(
+        50_000, "--rows", help="Bars per pass (default: 50000)"
+    ),
+    repeat: int = typer.Option(3, "--repeat", help="timed passes (default: 3)"),
+    aggregate: bool = typer.Option(
+        False,
         "--aggregate",
-        action="store_true",
         help="also run Bars through BarAggregator and write produced parents",
-    )
-    parser.add_argument(
+    ),
+    compression: str = typer.Option(
+        "zstd",
         "--compression",
-        default="zstd",
         help="Parquet compression codec (default: zstd)",
-    )
-    return parser
+    ),
+) -> int:
+    if rows <= 0:
+        raise typer.BadParameter("--rows must be positive", param_hint="--rows")
+    if repeat <= 0:
+        raise typer.BadParameter(
+            "--repeat must be positive", param_hint="--repeat"
+        )
 
-
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.rows <= 0:
-        parser.error("--rows must be positive")
-    if args.repeat <= 0:
-        parser.error("--repeat must be positive")
-
-    bars = make_bars(args.rows)
+    bars = make_bars(rows)
     with tempfile.TemporaryDirectory(prefix="mdgw-bench-ingest-") as tmp:
-        store = ParquetBarStore(Path(tmp), compression=args.compression)
+        store = ParquetBarStore(Path(tmp), compression=compression)
         durations: list[float] = []
         written_rows: list[int] = []
         bytes_per_pass: list[int] = []
 
-        for _ in range(args.repeat):
+        for _ in range(repeat):
             written = bars
-            if args.aggregate:
+            if aggregate:
                 # A fresh Aggregator per pass keeps every pass independent.
                 aggregator = BarAggregator(
                     intervals=("1m", "5m", "15m", "1h", "1d"),
@@ -88,16 +88,28 @@ def main(argv: list[str] | None = None) -> int:
 
         best = min(durations)
         median = statistics.median(durations)
-        rows = written_rows[-1]
-        print(f"rows per pass: {rows:,} (input Bars: {args.rows:,})")
-        print(f"passes: {args.repeat}  compression: {args.compression}")
-        print(
+        written_count = written_rows[-1]
+        typer.echo(f"rows per pass: {written_count:,} (input Bars: {rows:,})")
+        typer.echo(f"passes: {repeat}  compression: {compression}")
+        typer.echo(
             f"written: {format_bytes(statistics.mean(bytes_per_pass))} per pass"
         )
-        print(f"best:   {best:.3f}s  {format_rate(rows, best)}")
-        print(f"median: {median:.3f}s  {format_rate(rows, median)}")
-        print(f"files per pass: {len(files)}")
+        typer.echo(f"best:   {best:.3f}s  {format_rate(written_count, best)}")
+        typer.echo(f"median: {median:.3f}s  {format_rate(written_count, median)}")
+        typer.echo(f"files per pass: {len(files)}")
     return 0
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    try:
+        result = app(args=argv, standalone_mode=False)
+    except click.exceptions.ClickException as exc:
+        exc.show()
+        raise SystemExit(exc.exit_code) from None
+    except click.exceptions.Abort:
+        click.echo("Aborted!", err=True)
+        return 1
+    return 0 if result is None else int(result)
 
 
 if __name__ == "__main__":

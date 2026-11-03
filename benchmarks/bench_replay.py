@@ -13,12 +13,15 @@ Examples:
 
 from __future__ import annotations
 
-import argparse
 import statistics
 import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Optional
+
+import click
+import typer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -28,53 +31,49 @@ from mdgw.replay.service import ReplayService  # noqa: E402
 from mdgw.replay.session import BarSubscription, ReplaySessionSpec  # noqa: E402
 from mdgw.store.parquet_dataset import ParquetBarStore  # noqa: E402
 
+app = typer.Typer(
+    add_completion=False,
+    help="Run asap Replay Sessions over a seeded Dataset and report Bars/s.",
+)
+
 
 def _drop(topic: str, payload: bytes) -> None:
     """No-op market sink: the Replay Session still encodes the Arrow IPC frame."""
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="bench_replay.py",
-        description=(
-            "Run asap Replay Sessions over a seeded Dataset and report Bars/s."
-        ),
-    )
-    parser.add_argument(
-        "--rows", type=int, default=50_000, help="Bars to seed (default: 50000)"
-    )
-    parser.add_argument(
-        "--repeat", type=int, default=3, help="timed sessions (default: 3)"
-    )
-    parser.add_argument(
+@app.command()
+def replay(
+    rows: int = typer.Option(
+        50_000, "--rows", help="Bars to seed (default: 50000)"
+    ),
+    repeat: int = typer.Option(
+        3, "--repeat", help="timed sessions (default: 3)"
+    ),
+    instrument: str = typer.Option(
+        "binance:BTC/USDT",
         "--instrument",
-        default="binance:BTC/USDT",
         help="Instrument to replay (default: binance:BTC/USDT)",
-    )
-    parser.add_argument(
-        "--interval", default="1m", help="Bar Interval (default: 1m)"
-    )
-    parser.add_argument(
+    ),
+    interval: str = typer.Option(
+        "1m", "--interval", help="Bar Interval (default: 1m)"
+    ),
+    timeout_s: float = typer.Option(
+        120.0,
         "--timeout-s",
-        type=float,
-        default=120.0,
         help="abort a session after this many seconds (default: 120)",
-    )
-    return parser
+    ),
+) -> int:
+    if rows <= 0:
+        raise typer.BadParameter("--rows must be positive", param_hint="--rows")
+    if repeat <= 0:
+        raise typer.BadParameter(
+            "--repeat must be positive", param_hint="--repeat"
+        )
 
-
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.rows <= 0:
-        parser.error("--rows must be positive")
-    if args.repeat <= 0:
-        parser.error("--repeat must be positive")
-
-    bars = make_bars(args.rows, instrument_id=args.instrument, interval=args.interval)
+    bars = make_bars(rows, instrument_id=instrument, interval=interval)
     start_ns, end_ns = bar_range_ns(bars)
     subscription = BarSubscription(
-        instrument_id=args.instrument, interval=args.interval
+        instrument_id=instrument, interval=interval
     )
 
     durations: list[float] = []
@@ -83,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
         store = ParquetBarStore(Path(tmp))
         store.write_bars(bars, asset_class="crypto")
 
-        for index in range(args.repeat):
+        for index in range(repeat):
             service = ReplayService(store, publish=_drop, max_sessions=4)
             spec = ReplaySessionSpec(
                 subscriptions=(subscription,),
@@ -94,26 +93,38 @@ def main(argv: list[str] | None = None) -> int:
             )
             started = time.perf_counter()
             session_id = service.create_session(spec)
-            finished = service.wait_session(session_id, timeout=args.timeout_s)
+            finished = service.wait_session(session_id, timeout=timeout_s)
             durations.append(time.perf_counter() - started)
             sent_counts.append(service.session_bars_sent(session_id))
             if not finished:
-                print(
+                typer.echo(
                     f"error: session {index + 1} did not finish within "
-                    f"{args.timeout_s}s",
-                    file=sys.stderr,
+                    f"{timeout_s}s",
+                    err=True,
                 )
                 service.close()
-                return 1
+                raise typer.Exit(code=1)
             service.close()
 
     best = min(durations)
     median = statistics.median(durations)
-    rows = sent_counts[-1]
-    print(f"mode: asap replay  rows: {rows:,}  passes: {args.repeat}")
-    print(f"best:   {best:.3f}s  {format_rate(rows, best)}")
-    print(f"median: {median:.3f}s  {format_rate(rows, median)}")
+    sent = sent_counts[-1]
+    typer.echo(f"mode: asap replay  rows: {sent:,}  passes: {repeat}")
+    typer.echo(f"best:   {best:.3f}s  {format_rate(sent, best)}")
+    typer.echo(f"median: {median:.3f}s  {format_rate(sent, median)}")
     return 0
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    try:
+        result = app(args=argv, standalone_mode=False)
+    except click.exceptions.ClickException as exc:
+        exc.show()
+        raise SystemExit(exc.exit_code) from None
+    except click.exceptions.Abort:
+        click.echo("Aborted!", err=True)
+        return 1
+    return 0 if result is None else int(result)
 
 
 if __name__ == "__main__":

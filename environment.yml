@@ -8,5 +8,6 @@ dependencies:
   - aiohttp
   - pyyaml
   - pydantic
+  - typer
   - pytest
   - pip

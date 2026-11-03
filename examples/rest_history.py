@@ -14,110 +14,123 @@ Examples:
 
 from __future__ import annotations
 
-import argparse
-import sys
+from typing import Optional
+
+import click
+import typer
 
 from mdgw_client import ClientError, GatewayClient
 
+app = typer.Typer(
+    name="rest_history.py",
+    add_completion=False,
+    help="Fetch Bar history over REST via mdgw_client.GatewayClient.",
+)
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="rest_history.py",
-        description="Fetch Bar history over REST via mdgw_client.GatewayClient.",
-    )
-    parser.add_argument(
+
+@app.command()
+def history(
+    base_url: str = typer.Option(
+        ...,
         "--base-url",
-        required=True,
         metavar="URL",
         help="gateway base URL, e.g. http://127.0.0.1:8080",
-    )
-    parser.add_argument(
+    ),
+    instrument: Optional[str] = typer.Option(
+        None,
         "--instrument",
         metavar="INSTRUMENT_ID",
         help="filter one Instrument, e.g. binance:BTC/USDT",
-    )
-    parser.add_argument(
+    ),
+    interval: str = typer.Option(
+        "1m",
         "--interval",
-        default="1m",
         metavar="INTERVAL",
         help="Bar Interval (default: 1m)",
-    )
-    parser.add_argument(
+    ),
+    start: Optional[str] = typer.Option(
+        None,
         "--start",
         metavar="ISO8601",
         help="inclusive open_ts lower bound",
-    )
-    parser.add_argument(
+    ),
+    end: Optional[str] = typer.Option(
+        None,
         "--end",
         metavar="ISO8601",
         help="exclusive open_ts upper bound",
-    )
-    parser.add_argument(
+    ),
+    limit: int = typer.Option(
+        20,
         "--limit",
-        type=int,
-        default=20,
         help="maximum rows to request/print; 0 requests all rows (default: 20)",
-    )
-    parser.add_argument(
+    ),
+    pandas: bool = typer.Option(
+        False,
         "--pandas",
-        action="store_true",
         help="render with Table.to_pandas() instead of Arrow rows",
-    )
-    parser.add_argument(
+    ),
+    timeout_s: float = typer.Option(
+        10.0,
         "--timeout-s",
-        type=float,
-        default=10.0,
         help="HTTP timeout in seconds (default: 10)",
-    )
-    return parser
+    ),
+) -> int:
+    if limit < 0:
+        raise typer.BadParameter("--limit must be non-negative", param_hint="--limit")
 
-
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.limit < 0:
-        parser.error("--limit must be non-negative")
-
-    limit = None if args.limit == 0 else args.limit
+    row_limit = None if limit == 0 else limit
     try:
-        with GatewayClient(args.base_url, timeout_s=args.timeout_s) as client:
+        with GatewayClient(base_url, timeout_s=timeout_s) as client:
             table = client.history(
-                args.interval,
-                instrument=args.instrument,
-                start=args.start,
-                end=args.end,
-                limit=limit,
+                interval,
+                instrument=instrument,
+                start=start,
+                end=end,
+                limit=row_limit,
             )
     except ClientError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1)
 
-    print(f"Rows: {table.num_rows}")
-    print("Schema (Arrow):")
-    print(table.schema)
+    typer.echo(f"Rows: {table.num_rows}")
+    typer.echo("Schema (Arrow):")
+    typer.echo(table.schema)
 
     decimal_note = (
         "decimal128 columns keep exact values; do not call astype(float)."
     )
-    if args.pandas:
+    if pandas:
         frame = table.to_pandas()
-        print("\nDataFrame:")
-        print(frame.to_string(index=False))
-        print(
+        typer.echo("\nDataFrame:")
+        typer.echo(frame.to_string(index=False))
+        typer.echo(
             "\nNote: decimal columns are pandas object dtype holding "
             "decimal.Decimal. pandas 3 may display timestamps at microsecond "
             "resolution even though the wire value is nanoseconds. "
             + decimal_note
         )
     else:
-        print("\nRows:")
+        typer.echo("\nRows:")
         for row in table.to_pylist():
-            print(row)
-        print(
+            typer.echo(row)
+        typer.echo(
             "\nNote: Arrow decimals decode to decimal.Decimal and timestamps "
             "to datetime. " + decimal_note
         )
     return 0
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    try:
+        result = app(args=argv, standalone_mode=False)
+    except click.exceptions.ClickException as exc:
+        exc.show()
+        raise SystemExit(exc.exit_code) from None
+    except click.exceptions.Abort:
+        click.echo("Aborted!", err=True)
+        return 1
+    return 0 if result is None else int(result)
 
 
 if __name__ == "__main__":

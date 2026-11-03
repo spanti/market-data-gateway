@@ -21,91 +21,82 @@ Press Ctrl-C to exit.
 
 from __future__ import annotations
 
-import argparse
-import sys
+from typing import Optional
+
+import click
+import typer
 
 from mdgw_client import ClientError, GatewayClient, LiveSubscription
 
 DEFAULT_TOPICS = ["market.bar."]
 
+app = typer.Typer(
+    name="ws_live.py",
+    add_completion=False,
+    help="Subscribe to live Bar topics over the gateway WebSocket endpoint.",
+)
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="ws_live.py",
-        description=(
-            "Subscribe to live Bar topics over the gateway WebSocket endpoint."
-        ),
-    )
-    endpoint = parser.add_mutually_exclusive_group(required=True)
-    endpoint.add_argument(
+
+@app.command()
+def live(
+    base_url: Optional[str] = typer.Option(
+        None,
         "--base-url",
         metavar="URL",
         help="gateway base URL; the WebSocket URL is derived as ws://host:port/ws",
-    )
-    endpoint.add_argument(
+    ),
+    ws_url: Optional[str] = typer.Option(
+        None,
         "--ws-url",
         metavar="WS_URL",
         help="explicit WebSocket URL, e.g. ws://127.0.0.1:8080/ws",
-    )
-    parser.add_argument(
+    ),
+    topic: Optional[list[str]] = typer.Option(
+        None,
         "--topic",
-        action="append",
-        default=None,
         metavar="TOPIC",
         help=(
             "topic or prefix to subscribe to (repeatable; default: market.bar.)"
         ),
-    )
-    parser.add_argument(
+    ),
+    count: int = typer.Option(
+        0,
         "--count",
-        type=int,
-        default=0,
         help="exit after N Bar events; 0 runs until Ctrl-C (default: 0)",
-    )
-    parser.add_argument(
+    ),
+    timeout_s: float = typer.Option(
+        10.0,
         "--timeout-s",
-        type=float,
-        default=10.0,
         help="WebSocket connect timeout in seconds (default: 10)",
-    )
-    return parser
-
-
-def print_event(event) -> None:
-    if event.kind == "lag_notice":
-        notice = event.lag_notice or {}
-        print(
-            f"lag_notice: dropped={notice.get('dropped')} "
-            f"since={notice.get('since')}"
+    ),
+) -> int:
+    if base_url is None and ws_url is None:
+        raise typer.BadParameter(
+            "one of --base-url or --ws-url is required", param_hint="--base-url"
         )
-        return
-    rows = [] if event.table is None else event.table.to_pylist()
-    print(f"topic={event.topic} rows={len(rows)}")
-    for row in rows:
-        print(f"  {row}")
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.count < 0:
-        parser.error("--count must be non-negative")
-    topics = args.topic or DEFAULT_TOPICS
+    if base_url is not None and ws_url is not None:
+        raise typer.BadParameter(
+            "--base-url and --ws-url are mutually exclusive",
+            param_hint="--ws-url",
+        )
+    if count < 0:
+        raise typer.BadParameter("--count must be non-negative", param_hint="--count")
+    topics = topic or DEFAULT_TOPICS
 
     client = None
     subscription = None
     try:
-        if args.base_url:
-            client = GatewayClient(args.base_url, timeout_s=args.timeout_s)
+        if base_url:
+            client = GatewayClient(base_url, timeout_s=timeout_s)
             subscription = client.subscribe(topics, transport="ws")
         else:
             subscription = LiveSubscription(
                 transport="ws",
                 topics=topics,
-                ws_url=args.ws_url,
-                timeout_s=args.timeout_s,
+                ws_url=ws_url,
+                timeout_s=timeout_s,
             )
-        print(
+        typer.echo(
             f"subscribed to {topics!r}; waiting for events "
             "(Ctrl-C to exit) ..."
         )
@@ -116,19 +107,45 @@ def main(argv: list[str] | None = None) -> int:
             if event.kind == "lag_notice":
                 continue
             seen += 1
-            if args.count and seen >= args.count:
+            if count and seen >= count:
                 break
     except KeyboardInterrupt:
-        print("\ninterrupted")
+        typer.echo("\ninterrupted")
     except ClientError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1)
     finally:
         if subscription is not None:
             subscription.close()
         if client is not None:
             client.close()
     return 0
+
+
+def print_event(event) -> None:
+    if event.kind == "lag_notice":
+        notice = event.lag_notice or {}
+        typer.echo(
+            f"lag_notice: dropped={notice.get('dropped')} "
+            f"since={notice.get('since')}"
+        )
+        return
+    rows = [] if event.table is None else event.table.to_pylist()
+    typer.echo(f"topic={event.topic} rows={len(rows)}")
+    for row in rows:
+        typer.echo(f"  {row}")
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    try:
+        result = app(args=argv, standalone_mode=False)
+    except click.exceptions.ClickException as exc:
+        exc.show()
+        raise SystemExit(exc.exit_code) from None
+    except click.exceptions.Abort:
+        click.echo("Aborted!", err=True)
+        return 1
+    return 0 if result is None else int(result)
 
 
 if __name__ == "__main__":

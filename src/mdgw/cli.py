@@ -1,20 +1,24 @@
-"""Operator CLI: `run --service`, `up`, `compact`, and `gc`.
+"""Operator CLI: `run --service`, `up`, `compact`, `gc`, and `backfill`.
 
 `run` starts exactly one Service Role and blocks until SIGINT/SIGTERM; `up` is
 a small supervisor that starts collector -> ready -> api and restarts unexpected
-exits. Only `argparse` is used; framework imports for the roles are lazy so the
-maintenance commands stay lightweight.
+exits. The command tree is built with Typer; framework imports for the roles are
+lazy so the maintenance commands stay lightweight.
 """
 
 from __future__ import annotations
 
-import argparse
 import logging
 import signal
 import sys
 import threading
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Optional
+
+import click
+import typer
 
 from mdgw.config import GatewayConfig, load_config
 from mdgw.core.time import utc_now
@@ -24,224 +28,137 @@ from mdgw.store.parquet_dataset import ParquetBarStore
 
 DEFAULT_CONFIG_PATH = Path("config/gateway.toml")
 SERVICE_ROLES = ("collector", "api", "replay")
+BACKFILL_GRANULARITIES = ("auto", "daily", "monthly")
 
 logger = logging.getLogger(__name__)
 
-
-def _parse_date(value: str) -> date:
-    try:
-        return date.fromisoformat(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            f"invalid date {value!r}; expected YYYY-MM-DD"
-        ) from exc
+app = typer.Typer(
+    name="mdgw",
+    help="Market Data Gateway operator commands.",
+    no_args_is_help=True,
+    add_completion=False,
+)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="mdgw",
-        description="Market Data Gateway operator commands",
+@dataclass(frozen=True)
+class _CommonOptions:
+    """Options accepted both before and after the subcommand name."""
+
+    config: Optional[Path] = None
+    root: Optional[Path] = None
+
+
+def _common_options(
+    ctx: typer.Context,
+    config: Optional[Path],
+    root: Optional[Path],
+) -> tuple[Optional[Path], Optional[Path]]:
+    parent = ctx.obj if isinstance(ctx.obj, _CommonOptions) else _CommonOptions()
+    return (
+        config if config is not None else parent.config,
+        root if root is not None else parent.root,
     )
-    _add_common_options(parser)
 
-    subcommands = parser.add_subparsers(dest="command", required=True)
 
-    compact = subcommands.add_parser(
-        "compact", help="merge small Data Files per partition"
-    )
-    _add_common_options(compact, suppress_defaults=True)
-    compact.add_argument(
+@app.callback()
+def _root_options(
+    ctx: typer.Context,
+    config: Optional[Path] = typer.Option(
+        None, "--config", metavar="PATH", help="path to gateway.toml"
+    ),
+    root: Optional[Path] = typer.Option(
+        None,
+        "--root",
+        metavar="PATH",
+        help="override the Dataset parent directory",
+    ),
+) -> None:
+    ctx.obj = _CommonOptions(config=config, root=root)
+
+
+@app.command()
+def compact(
+    ctx: typer.Context,
+    older_than: str = typer.Option(
+        ...,
         "--older-than",
-        required=True,
         metavar="DURATION",
         help="only compact Data Files older than this (for example 24h or 7d)",
-    )
-
-    gc = subcommands.add_parser(
-        "gc", help="delete whole month partitions past the Retention window"
-    )
-    _add_common_options(gc, suppress_defaults=True)
-    mode = gc.add_mutually_exclusive_group()
-    mode.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="report what would be deleted (default)",
-    )
-    mode.add_argument(
-        "--apply",
-        action="store_true",
-        help="actually delete Data Files and switch the Manifest",
-    )
-
-    run = subcommands.add_parser(
-        "run", help="run exactly one Service Role until SIGINT/SIGTERM"
-    )
-    run.add_argument(
-        "--service",
-        required=True,
-        choices=SERVICE_ROLES,
-        help="Service Role to start",
-    )
-    _add_common_options(run, suppress_defaults=True)
-    run.add_argument(
-        "--log-level",
-        default=None,
-        metavar="LEVEL",
-        help="override [service].log_level",
-    )
-    run.add_argument(
-        "--wait-for-api",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help=(
-            "collector: wait for the api READY handshake before ingesting "
-            "(overrides [service].wait_for_api_ready)"
-        ),
-    )
-
-    up = subcommands.add_parser(
-        "up",
-        help="start collector -> ready -> api and restart unexpected exits",
-    )
-    _add_common_options(up, suppress_defaults=True)
-    up.add_argument(
-        "--log-level",
-        default=None,
-        metavar="LEVEL",
-        help="override [service].log_level",
-    )
-
-    backfill = subcommands.add_parser(
-        "backfill",
-        help="import historical Bars (v1: Binance archive backfill)",
-    )
-    _add_common_options(backfill, suppress_defaults=True)
-    backfill.add_argument(
-        "--archive",
-        action="store_true",
-        help="import Binance data.binance.vision K-line archives (v1 only mode)",
-    )
-    backfill.add_argument(
-        "--log-level",
-        default=None,
-        metavar="LEVEL",
-        help="override [service].log_level",
-    )
-    backfill.add_argument(
-        "--instrument",
-        action="append",
-        default=[],
-        metavar="INSTRUMENT_ID",
-        help=(
-            "import this InstrumentId (repeatable); defaults to every "
-            "venue/market-type match in Instrument Reference Data"
-        ),
-    )
-    backfill.add_argument(
-        "--start",
-        type=_parse_date,
-        default=None,
-        metavar="YYYY-MM-DD",
-        help="first UTC date to import (inclusive; required)",
-    )
-    backfill.add_argument(
-        "--end",
-        type=_parse_date,
-        default=None,
-        metavar="YYYY-MM-DD",
-        help="last UTC date to import (inclusive; defaults to yesterday UTC)",
-    )
-    backfill.add_argument("--venue", default="binance")
-    backfill.add_argument("--market-type", default="spot")
-    backfill.add_argument(
-        "--interval",
-        default="1m",
-        help="archive K-line interval (v1 only supports 1m)",
-    )
-    backfill.add_argument(
-        "--granularity",
-        choices=("auto", "daily", "monthly"),
-        default="auto",
-        help="archive file granularity; auto uses monthly for complete months",
-    )
-    backfill.add_argument(
-        "--archive-dir",
-        type=Path,
-        default=None,
-        help="read archives from this local directory; never touches the network",
-    )
-    backfill.add_argument(
-        "--base-url",
-        default="https://data.binance.vision",
-        help="data.binance.vision base URL",
-    )
-    backfill.add_argument("--timeout-s", type=float, default=30.0)
-    backfill.add_argument("--retries", type=int, default=3)
-    backfill.add_argument(
-        "--feed",
-        default="binance_archive",
-        help="Feed Handler name stamped on imported Bars",
-    )
-
-    return parser
-
-
-def _add_common_options(
-    parser: argparse.ArgumentParser, *, suppress_defaults: bool = False
-) -> None:
-    default = argparse.SUPPRESS if suppress_defaults else None
-    parser.add_argument(
-        "--config",
-        type=Path,
-        default=default,
-        help="path to gateway.toml",
-    )
-    parser.add_argument(
+    ),
+    config: Optional[Path] = typer.Option(
+        None, "--config", metavar="PATH", help="path to gateway.toml"
+    ),
+    root: Optional[Path] = typer.Option(
+        None,
         "--root",
-        type=Path,
-        default=default,
+        metavar="PATH",
         help="override the Dataset parent directory",
+    ),
+) -> int:
+    """Merge small Data Files per partition."""
+    config_path, root_path = _common_options(ctx, config, root)
+    gateway_config = _load_config(config_path)
+    store = _build_store(root_path, gateway_config)
+
+    try:
+        duration = parse_duration(older_than)
+    except ValueError as exc:
+        raise typer.BadParameter(
+            str(exc), param_hint="--older-than"
+        ) from exc
+
+    report = store.compact(older_than=duration)
+    print(
+        "compact: merged "
+        f"{len(report.merged_partitions)} partition(s), wrote "
+        f"{len(report.new_files)} file(s), removed "
+        f"{len(report.removed_files)} file(s), skipped "
+        f"{len(report.skipped_locked)} locked partition(s)"
     )
+    for failure in report.failures:
+        typer.echo(f"error: {failure}", err=True)
+    if report.failures:
+        raise typer.Exit(code=1)
+    return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
-    if args.command == "run":
-        return _run_service(args)
-    if args.command == "up":
-        return _run_up(args)
-    if args.command == "backfill":
-        return _run_archive_backfill(args, parser)
-
-    config = _load_config(args)
-    store = _build_store(args, config)
-
-    if args.command == "compact":
-        try:
-            older_than = parse_duration(args.older_than)
-        except ValueError as exc:
-            parser.error(str(exc))
-        report = store.compact(older_than=older_than)
-        print(
-            "compact: merged "
-            f"{len(report.merged_partitions)} partition(s), wrote "
-            f"{len(report.new_files)} file(s), removed "
-            f"{len(report.removed_files)} file(s), skipped "
-            f"{len(report.skipped_locked)} locked partition(s)"
+@app.command()
+def gc(
+    ctx: typer.Context,
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="report what would be deleted (default)"
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="actually delete Data Files and switch the Manifest",
+    ),
+    config: Optional[Path] = typer.Option(
+        None, "--config", metavar="PATH", help="path to gateway.toml"
+    ),
+    root: Optional[Path] = typer.Option(
+        None,
+        "--root",
+        metavar="PATH",
+        help="override the Dataset parent directory",
+    ),
+) -> int:
+    """Delete whole month partitions past the Retention window."""
+    if dry_run and apply:
+        raise typer.BadParameter(
+            "--dry-run and --apply are mutually exclusive", param_hint="--apply"
         )
-        for failure in report.failures:
-            print(f"error: {failure}", file=sys.stderr)
-        return 1 if report.failures else 0
 
-    apply = bool(getattr(args, "apply", False))
-    if not config.retention.enabled:
+    config_path, root_path = _common_options(ctx, config, root)
+    gateway_config = _load_config(config_path)
+    store = _build_store(root_path, gateway_config)
+
+    if not gateway_config.retention.enabled:
         print("gc: retention is disabled; nothing to do")
         return 0
 
     report = store.gc(
-        bars_days=config.retention.bars_days,
+        bars_days=gateway_config.retention.bars_days,
         apply=apply,
     )
     mode = "apply" if apply else "dry-run"
@@ -252,63 +169,269 @@ def main(argv: list[str] | None = None) -> int:
         f"{len(report.skipped_current_month)} current month"
     )
     for failure in report.failures:
-        print(f"error: {failure}", file=sys.stderr)
-    return 1 if report.failures else 0
+        typer.echo(f"error: {failure}", err=True)
+    if report.failures:
+        raise typer.Exit(code=1)
+    return 0
+
+
+@app.command()
+def run(
+    ctx: typer.Context,
+    service: str = typer.Option(
+        ...,
+        "--service",
+        click_type=click.Choice(SERVICE_ROLES),
+        help="Service Role to start",
+    ),
+    config: Optional[Path] = typer.Option(
+        None, "--config", metavar="PATH", help="path to gateway.toml"
+    ),
+    root: Optional[Path] = typer.Option(
+        None,
+        "--root",
+        metavar="PATH",
+        help="override the Dataset parent directory",
+    ),
+    log_level: Optional[str] = typer.Option(
+        None,
+        "--log-level",
+        metavar="LEVEL",
+        help="override [service].log_level",
+    ),
+    wait_for_api: Optional[bool] = typer.Option(
+        None,
+        "--wait-for-api/--no-wait-for-api",
+        help=(
+            "collector: wait for the api READY handshake before ingesting "
+            "(overrides [service].wait_for_api_ready)"
+        ),
+    ),
+) -> int:
+    """Run exactly one Service Role until SIGINT/SIGTERM."""
+    config_path, root_path = _common_options(ctx, config, root)
+    return _run_service(
+        service,
+        config_path=config_path,
+        root=root_path,
+        log_level=log_level,
+        wait_for_api=wait_for_api,
+    )
+
+
+@app.command()
+def up(
+    ctx: typer.Context,
+    config: Optional[Path] = typer.Option(
+        None, "--config", metavar="PATH", help="path to gateway.toml"
+    ),
+    root: Optional[Path] = typer.Option(
+        None,
+        "--root",
+        metavar="PATH",
+        help="override the Dataset parent directory",
+    ),
+    log_level: Optional[str] = typer.Option(
+        None,
+        "--log-level",
+        metavar="LEVEL",
+        help="override [service].log_level",
+    ),
+) -> int:
+    """Start collector -> ready -> api and restart unexpected exits."""
+    config_path, root_path = _common_options(ctx, config, root)
+    return _run_up(config_path, root_path, log_level)
+
+
+@app.command()
+def backfill(
+    ctx: typer.Context,
+    archive: bool = typer.Option(
+        False,
+        "--archive",
+        help=(
+            "import Binance data.binance.vision K-line archives "
+            "(v1 only mode)"
+        ),
+    ),
+    config: Optional[Path] = typer.Option(
+        None, "--config", metavar="PATH", help="path to gateway.toml"
+    ),
+    root: Optional[Path] = typer.Option(
+        None,
+        "--root",
+        metavar="PATH",
+        help="override the Dataset parent directory",
+    ),
+    log_level: Optional[str] = typer.Option(
+        None,
+        "--log-level",
+        metavar="LEVEL",
+        help="override [service].log_level",
+    ),
+    instrument: Optional[list[str]] = typer.Option(
+        None,
+        "--instrument",
+        metavar="INSTRUMENT_ID",
+        help=(
+            "import this InstrumentId (repeatable); defaults to every "
+            "venue/market-type match in Instrument Reference Data"
+        ),
+    ),
+    start: Optional[str] = typer.Option(
+        None,
+        "--start",
+        metavar="YYYY-MM-DD",
+        help="first UTC date to import (inclusive; required)",
+    ),
+    end: Optional[str] = typer.Option(
+        None,
+        "--end",
+        metavar="YYYY-MM-DD",
+        help=(
+            "last UTC date to import (inclusive; defaults to yesterday UTC)"
+        ),
+    ),
+    venue: str = typer.Option("binance", "--venue"),
+    market_type: str = typer.Option("spot", "--market-type"),
+    interval: str = typer.Option(
+        "1m",
+        "--interval",
+        help="archive K-line interval (v1 only supports 1m)",
+    ),
+    granularity: str = typer.Option(
+        "auto",
+        "--granularity",
+        click_type=click.Choice(BACKFILL_GRANULARITIES),
+        help=(
+            "archive file granularity; auto uses monthly for complete months"
+        ),
+    ),
+    archive_dir: Optional[Path] = typer.Option(
+        None,
+        "--archive-dir",
+        help="read archives from this local directory; never touches the network",
+    ),
+    base_url: str = typer.Option(
+        "https://data.binance.vision",
+        "--base-url",
+        help="data.binance.vision base URL",
+    ),
+    timeout_s: float = typer.Option(30.0, "--timeout-s"),
+    retries: int = typer.Option(3, "--retries"),
+    feed: str = typer.Option(
+        "binance_archive",
+        "--feed",
+        help="Feed Handler name stamped on imported Bars",
+    ),
+) -> int:
+    """Import historical Bars (v1: Binance archive backfill)."""
+    config_path, root_path = _common_options(ctx, config, root)
+    return _run_archive_backfill(
+        archive=archive,
+        config_path=config_path,
+        root=root_path,
+        log_level=log_level,
+        instruments=instrument or [],
+        start=_parse_date_option(start, "--start"),
+        end=_parse_date_option(end, "--end"),
+        venue=venue,
+        market_type=market_type,
+        interval=interval,
+        granularity=granularity,
+        archive_dir=archive_dir,
+        base_url=base_url,
+        timeout_s=timeout_s,
+        retries=retries,
+        feed=feed,
+    )
+
+
+def _parse_date_option(value: Optional[str], param_hint: str) -> Optional[date]:
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise typer.BadParameter(
+            f"invalid date {value!r}; expected YYYY-MM-DD",
+            param_hint=param_hint,
+        ) from exc
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """Console entry point; returns the process exit code."""
+    try:
+        result = app(args=argv, standalone_mode=False)
+    except click.exceptions.ClickException as exc:
+        exc.show()
+        raise SystemExit(exc.exit_code) from None
+    except click.exceptions.Abort:
+        click.echo("Aborted!", err=True)
+        return 1
+    return 0 if result is None else int(result)
 
 
 # -- Service Role commands ---------------------------------------------------
 
 
-def _run_service(args: argparse.Namespace) -> int:
-    config = _load_config(args)
-    level = getattr(args, "log_level", None) or config.service.log_level
-    configure_json_logging(level, service=args.service)
-    root = getattr(args, "root", None) or config.storage.root
+def _run_service(
+    service: str,
+    *,
+    config_path: Optional[Path],
+    root: Optional[Path],
+    log_level: Optional[str],
+    wait_for_api: Optional[bool],
+) -> int:
+    config = _load_config(config_path)
+    level = log_level or config.service.log_level
+    configure_json_logging(level, service=service)
+    data_root = root or config.storage.root
 
     try:
-        service = _build_service(
-            args.service,
+        role = _build_service(
+            service,
             config,
-            root,
-            wait_for_api=getattr(args, "wait_for_api", None),
+            data_root,
+            wait_for_api=wait_for_api,
         )
     except Exception:
         logger.exception(
             "failed to build Service Role",
             extra={
                 "event": "service.build_failed",
-                "service": args.service,
+                "service": service,
             },
         )
-        return 1
+        raise typer.Exit(code=1)
 
     stop = threading.Event()
     _install_signal_handlers(stop)
     try:
-        service.start()
+        role.start()
     except Exception:
         logger.exception(
             "Service Role failed to start",
             extra={
                 "event": "service.start_failed",
-                "service": args.service,
+                "service": service,
             },
         )
-        _safe_stop(service)
-        return 1
+        _safe_stop(role)
+        raise typer.Exit(code=1)
 
     logger.info(
         "Service Role started",
-        extra={"event": "service.started", "service": args.service},
+        extra={"event": "service.started", "service": service},
     )
     try:
         while not stop.wait(0.5):
             pass
     finally:
-        _safe_stop(service)
+        _safe_stop(role)
         logger.info(
             "Service Role stopped",
-            extra={"event": "service.stopped", "service": args.service},
+            extra={"event": "service.stopped", "service": service},
         )
     return 0
 
@@ -347,37 +470,45 @@ def _safe_stop(service) -> None:
         )
 
 
-def _run_up(args: argparse.Namespace) -> int:
-    config = _load_config(args)
-    level = getattr(args, "log_level", None) or config.service.log_level
+def _run_up(
+    config_path: Optional[Path],
+    root: Optional[Path],
+    log_level: Optional[str],
+) -> int:
+    config = _load_config(config_path)
+    level = log_level or config.service.log_level
     configure_json_logging(level, service="supervisor")
-    root = getattr(args, "root", None) or config.storage.root
+    data_root = root or config.storage.root
 
     from mdgw.service.supervisor import Supervisor
 
-    specs = _build_up_specs(args, config, root, level)
+    specs = _build_up_specs(
+        config, _resolved_config_path(config_path), data_root, level
+    )
     supervisor = Supervisor(specs)
     stop = threading.Event()
     _install_signal_handlers(stop)
     try:
-        return supervisor.run(stop)
+        code = supervisor.run(stop)
     except Exception:
         logger.exception(
             "supervisor failed",
             extra={"event": "supervisor.failed"},
         )
-        return 1
+        raise typer.Exit(code=1)
+    if code:
+        raise typer.Exit(code=code)
+    return 0
 
 
 def _build_up_specs(
-    args: argparse.Namespace,
     config: GatewayConfig,
+    config_path: Optional[Path],
     root: Path,
-    level: str,
+    level: Optional[str],
 ):
     from mdgw.service.supervisor import ChildSpec
 
-    config_path = _resolved_config_path(args)
     common: list[str] = []
     if config_path is not None:
         common.extend(["--config", str(config_path)])
@@ -411,8 +542,7 @@ def _build_up_specs(
     return [collector, api]
 
 
-def _resolved_config_path(args: argparse.Namespace) -> Path | None:
-    config_path = getattr(args, "config", None)
+def _resolved_config_path(config_path: Optional[Path]) -> Optional[Path]:
     if config_path is None and DEFAULT_CONFIG_PATH.exists():
         config_path = DEFAULT_CONFIG_PATH
     return config_path
@@ -442,10 +572,8 @@ def _install_signal_handlers(stop: threading.Event) -> None:
 # -- maintenance helpers -----------------------------------------------------
 
 
-def _load_config(args: argparse.Namespace) -> GatewayConfig:
-    config_path = getattr(args, "config", None)
-    if config_path is None and DEFAULT_CONFIG_PATH.exists():
-        config_path = DEFAULT_CONFIG_PATH
+def _load_config(config_path: Optional[Path]) -> GatewayConfig:
+    config_path = _resolved_config_path(config_path)
     if config_path is None:
         return GatewayConfig()
     try:
@@ -455,9 +583,9 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
 
 
 def _build_store(
-    args: argparse.Namespace, config: GatewayConfig
+    root: Optional[Path], config: GatewayConfig
 ) -> ParquetBarStore:
-    root = getattr(args, "root", None) or config.storage.root
+    root = root or config.storage.root
     return ParquetBarStore(
         root,
         compression=config.storage.compression,
@@ -471,42 +599,66 @@ def _build_store(
 
 
 def _run_archive_backfill(
-    args: argparse.Namespace, parser: argparse.ArgumentParser
+    *,
+    archive: bool,
+    config_path: Optional[Path],
+    root: Optional[Path],
+    log_level: Optional[str],
+    instruments: list[str],
+    start: Optional[date],
+    end: Optional[date],
+    venue: str,
+    market_type: str,
+    interval: str,
+    granularity: str,
+    archive_dir: Optional[Path],
+    base_url: str,
+    timeout_s: float,
+    retries: int,
+    feed: str,
 ) -> int:
     """Import Binance `data.binance.vision` archives into the Bar Dataset."""
-    if not getattr(args, "archive", False):
-        parser.error(
-            "backfill requires --archive (v1 only supports archive backfill)"
+    if not archive:
+        raise typer.BadParameter(
+            "backfill requires --archive (v1 only supports archive backfill)",
+            param_hint="--archive",
         )
-    if args.interval != "1m":
-        parser.error("--interval only supports '1m' in v1")
-    if args.venue != "binance":
-        parser.error("archive backfill only supports --venue binance in v1")
-    if args.market_type != "spot":
-        parser.error(
-            "archive backfill only supports --market-type spot in v1"
+    if interval != "1m":
+        raise typer.BadParameter(
+            "--interval only supports '1m' in v1", param_hint="--interval"
         )
-    if args.start is None:
-        parser.error("--start is required for archive backfill")
-    if args.archive_dir is not None and not args.archive_dir.is_dir():
-        parser.error(
-            f"--archive-dir is not a directory: {args.archive_dir}"
+    if venue != "binance":
+        raise typer.BadParameter(
+            "archive backfill only supports --venue binance in v1",
+            param_hint="--venue",
+        )
+    if market_type != "spot":
+        raise typer.BadParameter(
+            "archive backfill only supports --market-type spot in v1",
+            param_hint="--market-type",
+        )
+    if start is None:
+        raise typer.BadParameter(
+            "--start is required for archive backfill", param_hint="--start"
+        )
+    if archive_dir is not None and not archive_dir.is_dir():
+        raise typer.BadParameter(
+            f"--archive-dir is not a directory: {archive_dir}",
+            param_hint="--archive-dir",
         )
 
-    config = _load_config(args)
-    level = getattr(args, "log_level", None) or config.service.log_level
+    config = _load_config(config_path)
+    level = log_level or config.service.log_level
     configure_json_logging(level, service="backfill")
-    store = _build_store(args, config)
+    store = _build_store(root, config)
 
     today = utc_now().date()
-    end = args.end or (today - timedelta(days=1))
-    start = args.start
+    end = end or (today - timedelta(days=1))
     if end < start:
-        print(
-            f"error: --end {end} precedes --start {start}",
-            file=sys.stderr,
+        typer.echo(
+            f"error: --end {end} precedes --start {start}", err=True
         )
-        return 1
+        raise typer.Exit(code=1)
 
     from mdgw.archive import (
         ArchiveFetcher,
@@ -522,46 +674,48 @@ def _run_archive_backfill(
     try:
         reference = load_instrument_reference(Path(config.instruments.path))
     except (OSError, ValueError) as exc:
-        print(f"error: cannot load Instrument Reference Data: {exc}", file=sys.stderr)
-        return 1
+        typer.echo(
+            f"error: cannot load Instrument Reference Data: {exc}", err=True
+        )
+        raise typer.Exit(code=1)
 
     by_id = {instrument.instrument_id: instrument for instrument in reference.instruments}
-    requested = list(dict.fromkeys(args.instrument))
+    requested = list(dict.fromkeys(instruments))
     if requested:
-        instruments = []
+        selected = []
         for raw in requested:
             try:
                 instrument_id = InstrumentId.parse(raw).value
             except ValueError:
-                print(f"error: invalid --instrument {raw!r}", file=sys.stderr)
-                return 1
+                typer.echo(f"error: invalid --instrument {raw!r}", err=True)
+                raise typer.Exit(code=1)
             instrument = by_id.get(instrument_id)
             if instrument is None:
-                print(
+                typer.echo(
                     f"error: Instrument {instrument_id!r} is not in "
                     "Instrument Reference Data",
-                    file=sys.stderr,
+                    err=True,
                 )
-                return 1
+                raise typer.Exit(code=1)
             if (
-                instrument.venue != args.venue
-                or instrument.instrument_type != args.market_type
+                instrument.venue != venue
+                or instrument.instrument_type != market_type
             ):
-                print(
+                typer.echo(
                     f"error: archive import only supports "
-                    f"{args.venue}/{args.market_type}; "
+                    f"{venue}/{market_type}; "
                     f"{instrument_id!r} is "
                     f"{instrument.venue}/{instrument.instrument_type}",
-                    file=sys.stderr,
+                    err=True,
                 )
-                return 1
-            instruments.append(instrument)
+                raise typer.Exit(code=1)
+            selected.append(instrument)
     else:
-        instruments = [
+        selected = [
             instrument
             for instrument in reference.instruments
-            if instrument.venue == args.venue
-            and instrument.instrument_type == args.market_type
+            if instrument.venue == venue
+            and instrument.instrument_type == market_type
         ]
 
     archive_instruments = [
@@ -570,7 +724,7 @@ def _run_archive_backfill(
             symbol=market_symbol(instrument.instrument_id),
             asset_class=instrument.asset_class,
         )
-        for instrument in instruments
+        for instrument in selected
     ]
     aggregator = BarAggregator(
         intervals=config.aggregation.intervals,
@@ -578,10 +732,10 @@ def _run_archive_backfill(
         retention_parent_periods=config.aggregation.retention_parent_periods,
     )
     fetcher = ArchiveFetcher(
-        base_url=args.base_url,
-        archive_dir=args.archive_dir,
-        timeout_s=args.timeout_s,
-        retries=args.retries,
+        base_url=base_url,
+        archive_dir=archive_dir,
+        timeout_s=timeout_s,
+        retries=retries,
     )
     retention_bars_days = (
         config.retention.bars_days if config.retention.enabled else 0
@@ -596,10 +750,10 @@ def _run_archive_backfill(
             fetcher=fetcher,
             start=start,
             end=end,
-            feed=args.feed,
-            market_type=args.market_type,
-            interval=args.interval,
-            granularity=args.granularity,
+            feed=feed,
+            market_type=market_type,
+            interval=interval,
+            granularity=granularity,
             retention_bars_days=retention_bars_days,
         )
     finally:
@@ -617,4 +771,6 @@ def _run_archive_backfill(
         f"skipped_by_retention={report.skipped_by_retention} "
         f"failures={report.failures}"
     )
-    return 0 if report.ok else 1
+    if not report.ok:
+        raise typer.Exit(code=1)
+    return 0
