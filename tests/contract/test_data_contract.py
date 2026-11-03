@@ -8,7 +8,7 @@ from pathlib import Path
 import pyarrow as pa
 import pytest
 
-from mdgw.bus.zmq_bus import ipc_to_table, table_to_ipc
+from mdgw.streaming import ipc_to_table, table_to_ipc
 from mdgw.core.bar import Bar
 from mdgw.core.envelope import messages_to_table, table_to_messages
 from mdgw.core.schema import (
