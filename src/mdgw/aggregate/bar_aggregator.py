@@ -7,14 +7,17 @@ from the canonical Bar stream, so prices and volumes stay exact `Decimal`s.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from mdgw.core.bar import Bar
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import datetime_to_ns, ns_to_datetime, to_utc
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+    from datetime import timedelta
 
 AGGREGATION_INTERNAL = "internal"
 
@@ -54,23 +57,28 @@ class BarAggregator:
         retention_parent_periods: int = 2,
     ) -> None:
         if base_interval not in INTERVALS:
-            raise ValueError(f"unsupported base Bar Interval: {base_interval!r}")
+            msg = f"unsupported base Bar Interval: {base_interval!r}"
+            raise ValueError(msg)
         if base_interval != "1m":
-            raise ValueError(
-                "v1 Bar Aggregation only supports '1m' as the base interval"
-            )
+            msg = "v1 Bar Aggregation only supports '1m' as the base interval"
+            raise ValueError(msg)
         if retention_parent_periods < 1:
-            raise ValueError("retention_parent_periods must be at least 1")
+            msg = "retention_parent_periods must be at least 1"
+            raise ValueError(msg)
 
         unknown = [value for value in intervals if value not in INTERVALS]
         if unknown:
-            raise ValueError(f"unsupported Bar Interval(s): {unknown!r}")
+            msg = f"unsupported Bar Interval(s): {unknown!r}"
+            raise ValueError(msg)
         if len(set(intervals)) != len(intervals):
-            raise ValueError("aggregation intervals must not contain duplicates")
+            msg = "aggregation intervals must not contain duplicates"
+            raise ValueError(msg)
         if base_interval not in intervals:
-            raise ValueError(
-                f"aggregation intervals must contain the base interval {base_interval!r}"
+            msg = (
+                "aggregation intervals must contain the base interval "
+                f"{base_interval!r}"
             )
+            raise ValueError(msg)
 
         self.base_interval = base_interval
         self.intervals = tuple(intervals)
@@ -90,17 +98,19 @@ class BarAggregator:
         base interval are rejected: they cannot come from the canonical stream.
         """
         if bar.interval != self.base_interval:
-            raise ValueError(
+            msg = (
                 f"Bar Aggregation only accepts {self.base_interval!r} Bars, "
                 f"got {bar.interval!r}"
             )
+            raise ValueError(msg)
 
         open_ns = datetime_to_ns(to_utc(bar.open_ts))
         if open_ns % self._base_ns:
-            raise ValueError(
+            msg = (
                 f"Bar open_ts must align to the {self.base_interval} boundary: "
                 f"{bar.open_ts.isoformat()}"
             )
+            raise ValueError(msg)
 
         produced: list[Bar] = []
         for interval in self._parent_intervals:
@@ -136,12 +146,13 @@ class BarAggregator:
             window = _ParentWindow(feed=bar.feed)
             windows[parent_ns] = window
         elif window.feed != bar.feed:
-            raise ValueError(
+            msg = (
                 "inconsistent feed within one parent Bar period: "
                 f"{window.feed!r} != {bar.feed!r} "
                 f"(instrument={bar.instrument_id}, interval={interval}, "
                 f"open_ts={ns_to_datetime(parent_ns).isoformat()})"
             )
+            raise ValueError(msg)
 
         index = (open_ns - parent_ns) // self._base_ns
         existing = window.children.get(index)
@@ -176,7 +187,9 @@ class BarAggregator:
         window.last_emitted = parent
         return parent
 
-    def _advance_retention(self, key: tuple[str, str], parent_ns: int, interval_ns: int) -> None:
+    def _advance_retention(
+        self, key: tuple[str, str], parent_ns: int, interval_ns: int
+    ) -> None:
         newest = self._newest_parent_ns.get(key)
         if newest is None or parent_ns > newest:
             newest = parent_ns
