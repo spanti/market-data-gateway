@@ -15,7 +15,7 @@ from mdgw.core.bar import Bar
 from mdgw.ingest.fake import BarInput, FakeFeedHandler
 from mdgw.replay.session import ReplaySessionSpec
 from mdgw.runtime import GatewayRuntime
-from mdgw.streaming import bar_topic
+from mdgw.streaming import StreamingInterface, bar_topic
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -121,7 +121,32 @@ def test_runtime_start_failure_closes_the_feed_handler(
     assert feed.closed is True
     assert runtime._started is False
     assert runtime._hwm is None
-    assert runtime._bus is None
+    assert runtime._streaming is None
+
+
+def test_runtime_start_failure_in_streaming_subscription_releases_resources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    feed = _ClosingFeedHandler(instrument_id="binance:BTC/USDT", bars=())
+    runtime = GatewayRuntime(
+        feed_handler=feed, config=_config(), data_root=tmp_path
+    )
+
+    def _fail_subscribe(*_args, **_kwargs) -> None:
+        msg = "subscriber did not become ready"
+        raise TimeoutError(msg)
+
+    monkeypatch.setattr(StreamingInterface, "subscribe_bars", _fail_subscribe)
+
+    with pytest.raises(TimeoutError, match="subscriber did not become ready"):
+        runtime.start()
+
+    assert feed.closed is True
+    assert runtime._started is False
+    assert runtime._hwm is None
+    assert runtime._streaming is None
+    with pytest.raises(RuntimeError, match="must be called first"):
+        _ = runtime.stream_endpoint
 
 
 # -- replay seam -----------------------------------------------------------
