@@ -11,8 +11,8 @@ import asyncio
 import logging
 import threading
 from collections import defaultdict
-from datetime import datetime
-from pathlib import Path
+from contextlib import suppress
+from typing import TYPE_CHECKING, Self
 from uuid import uuid4
 
 from aiohttp import web
@@ -20,21 +20,27 @@ from aiohttp import web
 from mdgw.aggregate import BarAggregator
 from mdgw.api.server import create_app
 from mdgw.api.ws_hub import WebSocketHub
-from mdgw.backfill import BackfillReport
 from mdgw.bus.zmq_bus import ZMQBus, ipc_to_table, table_to_ipc
-from mdgw.config import GatewayConfig
-from mdgw.core.bar import Bar
 from mdgw.core.envelope import table_to_messages
 from mdgw.core.errors import UnknownInstrumentError
 from mdgw.core.schema import bars_to_logical_table
 from mdgw.core.time import utc_now
-from mdgw.ingest.feed_handler import FeedHandler
 from mdgw.replay.service import ReplayService
-from mdgw.replay.session import Publish, ReplaySessionSpec
-from mdgw.state.health import GapEvent, HealthTracker
-from mdgw.state.high_water_mark import HighWaterMarkStore
-from mdgw.store.parquet_dataset import ParquetBarStore
 from mdgw.service.collector_core import CollectorCore
+from mdgw.state.health import GapEvent, HealthTracker
+from mdgw.store.parquet_dataset import ParquetBarStore
+
+if TYPE_CHECKING:
+    from datetime import datetime
+    from pathlib import Path
+
+    from mdgw.backfill import BackfillReport
+    from mdgw.config import GatewayConfig
+    from mdgw.core.bar import Bar
+    from mdgw.ingest.feed_handler import FeedHandler
+    from mdgw.reference.snapshot import InstrumentStore
+    from mdgw.replay.session import Publish, ReplaySessionSpec
+    from mdgw.state.high_water_mark import HighWaterMarkStore
 
 MARKET_BAR_TOPIC_PREFIX = "market.bar."
 RECEIVE_WAIT_TIMEOUT_S = 2.0
@@ -111,22 +117,7 @@ class GatewayRuntime:
         self._hwm = self._core.hwm
         bus: ZMQBus | None = None
         try:
-            bus = ZMQBus(zmq_hwm=self.config.bus.zmq_hwm)
-            endpoint = f"inproc://mdgw-{uuid4().hex}"
-            # One PUB socket feeds the internal api subscriber over inproc and
-            # external ZMQ consumers over TCP (port 0 resolves to a free port).
-            tcp_endpoint = (
-                f"tcp://{self.config.bus.stream_bind_host}:"
-                f"{self.config.bus.stream_pub_port}"
-            )
-            resolved = bus.bind_publisher([endpoint, tcp_endpoint])
-            self._stream_endpoint = resolved[-1]
-            ready = bus.subscribe(
-                endpoint,
-                topic_prefix=MARKET_BAR_TOPIC_PREFIX,
-                handler=self._on_bar_message,
-            )
-            bus.wait_for_subscriber(ready)
+            bus = self._bind_streaming_bus()
             self._start_http()
         except Exception:
             if bus is not None:
@@ -138,6 +129,29 @@ class GatewayRuntime:
             raise
         self._bus = bus
         self._started = True
+
+    def _bind_streaming_bus(self) -> ZMQBus:
+        bus = ZMQBus(zmq_hwm=self.config.bus.zmq_hwm)
+        endpoint = f"inproc://mdgw-{uuid4().hex}"
+        # One PUB socket feeds the internal api subscriber over inproc and
+        # external ZMQ consumers over TCP (port 0 resolves to a free port).
+        tcp_endpoint = (
+            f"tcp://{self.config.bus.stream_bind_host}:"
+            f"{self.config.bus.stream_pub_port}"
+        )
+        try:
+            resolved = bus.bind_publisher([endpoint, tcp_endpoint])
+            self._stream_endpoint = resolved[-1]
+            ready = bus.subscribe(
+                endpoint,
+                topic_prefix=MARKET_BAR_TOPIC_PREFIX,
+                handler=self._on_bar_message,
+            )
+            bus.wait_for_subscriber(ready)
+        except Exception:
+            bus.close()
+            raise
+        return bus
 
     def stop(self) -> None:
         if not self._started:
@@ -214,7 +228,7 @@ class GatewayRuntime:
             await self._runner.cleanup()
             self._runner = None
 
-    def __enter__(self) -> "GatewayRuntime":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> None:
@@ -229,7 +243,8 @@ class GatewayRuntime:
         aggregated parents are written and published alongside them.
         """
         if not self._started:
-            raise RuntimeError("GatewayRuntime.start() must be called before ingest()")
+            msg = "GatewayRuntime.start() must be called before ingest()"
+            raise RuntimeError(msg)
 
         base_count, bars = self._core.ingest()
         if not bars:
@@ -247,24 +262,21 @@ class GatewayRuntime:
         Historical Bars are written and aggregated but never published.
         """
         if self._hwm is None:
-            raise RuntimeError(
-                "GatewayRuntime.start() must be called before backfill()"
-            )
+            msg = "GatewayRuntime.start() must be called before backfill()"
+            raise RuntimeError(msg)
         return self._core.backfill(now if now is not None else utc_now())
 
     def high_water_mark(self, instrument_id: str, interval: str) -> int | None:
         """Return the persisted data HWM in UTC nanoseconds, if any."""
         if self._hwm is None:
-            raise RuntimeError(
-                "GatewayRuntime.start() must be called before high_water_mark()"
-            )
+            msg = "GatewayRuntime.start() must be called before high_water_mark()"
+            raise RuntimeError(msg)
         return self._core.high_water_mark(instrument_id, interval)
 
     def high_water_marks(self) -> dict[tuple[str, str], int]:
         if self._hwm is None:
-            raise RuntimeError(
-                "GatewayRuntime.start() must be called before high_water_marks()"
-            )
+            msg = "GatewayRuntime.start() must be called before high_water_marks()"
+            raise RuntimeError(msg)
         return self._core.high_water_marks()
 
     def stale_instruments(self, now: datetime | None = None) -> list[dict]:
@@ -289,9 +301,8 @@ class GatewayRuntime:
         first access creates it; `stop()` closes it and every Session.
         """
         if not self._started:
-            raise RuntimeError(
-                "GatewayRuntime.start() must be called before replay_service"
-            )
+            msg = "GatewayRuntime.start() must be called before replay_service"
+            raise RuntimeError(msg)
         if self._replay_service is None:
             self._replay_service = ReplayService(
                 self.store,
@@ -335,8 +346,9 @@ class GatewayRuntime:
             else instrument_store.get(instrument_id)
         )
         if instrument is None:
+            msg = f"unknown Instrument {instrument_id!r}"
             raise UnknownInstrumentError(
-                f"unknown Instrument {instrument_id!r}",
+                msg,
                 details={"instrument_id": instrument_id},
             )
         return instrument.asset_class
@@ -344,7 +356,7 @@ class GatewayRuntime:
     def _publish_bars(self, bars: list[Bar]) -> int:
         groups: dict[tuple[str, str], list[Bar]] = defaultdict(list)
         for bar in bars:
-            groups[(bar.interval, bar.instrument_id)].append(bar)
+            groups[bar.interval, bar.instrument_id].append(bar)
 
         with self._received_condition:
             self._expected_received_bar_count += len(bars)
@@ -371,11 +383,9 @@ class GatewayRuntime:
         if hub is None or loop is None:
             return
         messages = table_to_messages(table)
-        try:
-            loop.call_soon_threadsafe(hub.publish, topic, messages)
-        except RuntimeError:
+        with suppress(RuntimeError):
             # The event loop is already shutting down.
-            pass
+            loop.call_soon_threadsafe(hub.publish, topic, messages)
 
     def _wait_for_received(self, target: int) -> None:
         with self._received_condition:
@@ -384,9 +394,8 @@ class GatewayRuntime:
                 timeout=RECEIVE_WAIT_TIMEOUT_S,
             )
         if not received:
-            raise TimeoutError(
-                f"api received {self._received_bar_count} of {target} Bars over ZMQ"
-            )
+            msg = f"api received {self._received_bar_count} of {target} Bars over ZMQ"
+            raise TimeoutError(msg)
 
     @property
     def received_bar_count(self) -> int:
@@ -442,14 +451,16 @@ class GatewayRuntime:
     def stream_endpoint(self) -> str:
         """Resolved external ZMQ PUB endpoint (`tcp://host:port`)."""
         if self._stream_endpoint is None:
-            raise RuntimeError("GatewayRuntime.start() must be called first")
+            msg = "GatewayRuntime.start() must be called first"
+            raise RuntimeError(msg)
         return self._stream_endpoint
 
     @property
     def base_url(self) -> str:
         if self._port is None:
-            raise RuntimeError("GatewayRuntime.start() must be called first")
+            msg = "GatewayRuntime.start() must be called first"
+            raise RuntimeError(msg)
         host = self.config.server.host
-        if host in {"0.0.0.0", "::"}:
+        if host in {"0.0.0.0", "::"}:  # ruff: ignore[hardcoded-bind-all-interfaces] - compares the configured host; no socket bind
             host = "127.0.0.1"
         return f"http://{host}:{self._port}"

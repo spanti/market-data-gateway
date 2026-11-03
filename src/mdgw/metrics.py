@@ -8,9 +8,11 @@ renderer emits the ``text/plain; version=0.0.4`` exposition format.
 from __future__ import annotations
 
 import math
+import operator
 import threading
-from dataclasses import dataclass, field
-from typing import Any, Mapping
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
 
 COUNTER = "counter"
 GAUGE = "gauge"
@@ -40,7 +42,7 @@ class MetricsRegistry:
         *,
         labels: Labels = None,
         amount: float = 1.0,
-        help: str | None = None,
+        help: str | None = None,  # ruff: ignore[builtin-argument-shadowing] - established keyword API
     ) -> None:
         """Increment a counter (creating it on first use)."""
         key = (name, _label_key(labels))
@@ -57,7 +59,7 @@ class MetricsRegistry:
         value: float,
         *,
         labels: Labels = None,
-        help: str | None = None,
+        help: str | None = None,  # ruff: ignore[builtin-argument-shadowing] - established keyword API
     ) -> None:
         """Set a gauge to an absolute value (creating it on first use)."""
         key = (name, _label_key(labels))
@@ -82,7 +84,9 @@ class MetricsRegistry:
             samples = list(self._samples.items())
 
         # Group by metric family so HELP/TYPE are emitted once.
-        families: dict[str, tuple[str, str, list[tuple[tuple[tuple[str, str], ...], float]]]] = {}
+        families: dict[
+            str, tuple[str, str, list[tuple[tuple[tuple[str, str], ...], float]]]
+        ] = {}
         for (name, labels), sample in samples:
             family = families.get(name)
             if family is None:
@@ -93,9 +97,13 @@ class MetricsRegistry:
         lines: list[str] = []
         for name in sorted(families):
             help_text, kind, series = families[name]
-            lines.append(f"# HELP {name} {_escape_help(help_text)}")
-            lines.append(f"# TYPE {name} {kind}")
-            for labels, value in sorted(series, key=lambda item: item[0]):
+            lines.extend(
+                (
+                    f"# HELP {name} {_escape_help(help_text)}",
+                    f"# TYPE {name} {kind}",
+                )
+            )
+            for labels, value in sorted(series, key=operator.itemgetter(0)):
                 lines.append(
                     f"{name}{_format_labels(labels)} {_format_value(value)}"
                 )

@@ -15,7 +15,7 @@ import threading
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import click
 import typer
@@ -25,6 +25,10 @@ from mdgw.core.time import utc_now
 from mdgw.logging import configure_json_logging
 from mdgw.store.maintenance import parse_duration
 from mdgw.store.parquet_dataset import ParquetBarStore
+
+if TYPE_CHECKING:
+    from mdgw.core.instrument import Instrument
+    from mdgw.reference import InstrumentReference
 
 DEFAULT_CONFIG_PATH = Path("config/gateway.toml")
 SERVICE_ROLES = ("collector", "api", "replay")
@@ -44,15 +48,15 @@ app = typer.Typer(
 class _CommonOptions:
     """Options accepted both before and after the subcommand name."""
 
-    config: Optional[Path] = None
-    root: Optional[Path] = None
+    config: Path | None = None
+    root: Path | None = None
 
 
 def _common_options(
     ctx: typer.Context,
-    config: Optional[Path],
-    root: Optional[Path],
-) -> tuple[Optional[Path], Optional[Path]]:
+    config: Path | None,
+    root: Path | None,
+) -> tuple[Path | None, Path | None]:
     parent = ctx.obj if isinstance(ctx.obj, _CommonOptions) else _CommonOptions()
     return (
         config if config is not None else parent.config,
@@ -63,10 +67,10 @@ def _common_options(
 @app.callback()
 def _root_options(
     ctx: typer.Context,
-    config: Optional[Path] = typer.Option(
+    config: Optional[Path] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional, function-call-in-default-argument] - Typer 0.9 lacks PEP 604 support
         None, "--config", metavar="PATH", help="path to gateway.toml"
     ),
-    root: Optional[Path] = typer.Option(
+    root: Optional[Path] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional, function-call-in-default-argument] - Typer 0.9 lacks PEP 604 support
         None,
         "--root",
         metavar="PATH",
@@ -85,10 +89,10 @@ def compact(
         metavar="DURATION",
         help="only compact Data Files older than this (for example 24h or 7d)",
     ),
-    config: Optional[Path] = typer.Option(
+    config: Optional[Path] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional, function-call-in-default-argument] - Typer 0.9 lacks PEP 604 support
         None, "--config", metavar="PATH", help="path to gateway.toml"
     ),
-    root: Optional[Path] = typer.Option(
+    root: Optional[Path] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional, function-call-in-default-argument] - Typer 0.9 lacks PEP 604 support
         None,
         "--root",
         metavar="PATH",
@@ -133,10 +137,10 @@ def gc(
         "--apply",
         help="actually delete Data Files and switch the Manifest",
     ),
-    config: Optional[Path] = typer.Option(
+    config: Optional[Path] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional, function-call-in-default-argument] - Typer 0.9 lacks PEP 604 support
         None, "--config", metavar="PATH", help="path to gateway.toml"
     ),
-    root: Optional[Path] = typer.Option(
+    root: Optional[Path] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional, function-call-in-default-argument] - Typer 0.9 lacks PEP 604 support
         None,
         "--root",
         metavar="PATH",
@@ -145,9 +149,8 @@ def gc(
 ) -> int:
     """Delete whole month partitions past the Retention window."""
     if dry_run and apply:
-        raise typer.BadParameter(
-            "--dry-run and --apply are mutually exclusive", param_hint="--apply"
-        )
+        msg = "--dry-run and --apply are mutually exclusive"
+        raise typer.BadParameter(msg, param_hint="--apply")
 
     config_path, root_path = _common_options(ctx, config, root)
     gateway_config = _load_config(config_path)
@@ -176,7 +179,7 @@ def gc(
 
 
 @app.command()
-def run(
+def run(  # ruff: ignore[too-many-arguments, too-many-positional-arguments] - Typer command surface
     ctx: typer.Context,
     service: str = typer.Option(
         ...,
@@ -184,22 +187,22 @@ def run(
         click_type=click.Choice(SERVICE_ROLES),
         help="Service Role to start",
     ),
-    config: Optional[Path] = typer.Option(
+    config: Optional[Path] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional, function-call-in-default-argument] - Typer 0.9 lacks PEP 604 support
         None, "--config", metavar="PATH", help="path to gateway.toml"
     ),
-    root: Optional[Path] = typer.Option(
+    root: Optional[Path] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional, function-call-in-default-argument] - Typer 0.9 lacks PEP 604 support
         None,
         "--root",
         metavar="PATH",
         help="override the Dataset parent directory",
     ),
-    log_level: Optional[str] = typer.Option(
+    log_level: Optional[str] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional] - Typer 0.9 lacks PEP 604 support
         None,
         "--log-level",
         metavar="LEVEL",
         help="override [service].log_level",
     ),
-    wait_for_api: Optional[bool] = typer.Option(
+    wait_for_api: Optional[bool] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional] - Typer 0.9 lacks PEP 604 support
         None,
         "--wait-for-api/--no-wait-for-api",
         help=(
@@ -222,16 +225,16 @@ def run(
 @app.command()
 def up(
     ctx: typer.Context,
-    config: Optional[Path] = typer.Option(
+    config: Optional[Path] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional, function-call-in-default-argument] - Typer 0.9 lacks PEP 604 support
         None, "--config", metavar="PATH", help="path to gateway.toml"
     ),
-    root: Optional[Path] = typer.Option(
+    root: Optional[Path] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional, function-call-in-default-argument] - Typer 0.9 lacks PEP 604 support
         None,
         "--root",
         metavar="PATH",
         help="override the Dataset parent directory",
     ),
-    log_level: Optional[str] = typer.Option(
+    log_level: Optional[str] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional] - Typer 0.9 lacks PEP 604 support
         None,
         "--log-level",
         metavar="LEVEL",
@@ -244,7 +247,7 @@ def up(
 
 
 @app.command()
-def backfill(
+def backfill(  # ruff: ignore[too-many-arguments, too-many-positional-arguments] - Typer command surface
     ctx: typer.Context,
     archive: bool = typer.Option(
         False,
@@ -254,22 +257,22 @@ def backfill(
             "(v1 only mode)"
         ),
     ),
-    config: Optional[Path] = typer.Option(
+    config: Optional[Path] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional, function-call-in-default-argument] - Typer 0.9 lacks PEP 604 support
         None, "--config", metavar="PATH", help="path to gateway.toml"
     ),
-    root: Optional[Path] = typer.Option(
+    root: Optional[Path] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional, function-call-in-default-argument] - Typer 0.9 lacks PEP 604 support
         None,
         "--root",
         metavar="PATH",
         help="override the Dataset parent directory",
     ),
-    log_level: Optional[str] = typer.Option(
+    log_level: Optional[str] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional] - Typer 0.9 lacks PEP 604 support
         None,
         "--log-level",
         metavar="LEVEL",
         help="override [service].log_level",
     ),
-    instrument: Optional[list[str]] = typer.Option(
+    instrument: Optional[list[str]] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional, function-call-in-default-argument] - Typer 0.9 lacks PEP 604 support
         None,
         "--instrument",
         metavar="INSTRUMENT_ID",
@@ -278,13 +281,13 @@ def backfill(
             "venue/market-type match in Instrument Reference Data"
         ),
     ),
-    start: Optional[str] = typer.Option(
+    start: Optional[str] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional] - Typer 0.9 lacks PEP 604 support
         None,
         "--start",
         metavar="YYYY-MM-DD",
         help="first UTC date to import (inclusive; required)",
     ),
-    end: Optional[str] = typer.Option(
+    end: Optional[str] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional] - Typer 0.9 lacks PEP 604 support
         None,
         "--end",
         metavar="YYYY-MM-DD",
@@ -307,7 +310,7 @@ def backfill(
             "archive file granularity; auto uses monthly for complete months"
         ),
     ),
-    archive_dir: Optional[Path] = typer.Option(
+    archive_dir: Optional[Path] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional, function-call-in-default-argument] - Typer 0.9 lacks PEP 604 support
         None,
         "--archive-dir",
         help="read archives from this local directory; never touches the network",
@@ -347,19 +350,17 @@ def backfill(
     )
 
 
-def _parse_date_option(value: Optional[str], param_hint: str) -> Optional[date]:
+def _parse_date_option(value: str | None, param_hint: str) -> date | None:
     if value is None:
         return None
     try:
         return date.fromisoformat(value)
     except ValueError as exc:
-        raise typer.BadParameter(
-            f"invalid date {value!r}; expected YYYY-MM-DD",
-            param_hint=param_hint,
-        ) from exc
+        msg = f"invalid date {value!r}; expected YYYY-MM-DD"
+        raise typer.BadParameter(msg, param_hint=param_hint) from exc
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Console entry point; returns the process exit code."""
     try:
         result = app(args=argv, standalone_mode=False)
@@ -378,10 +379,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 def _run_service(
     service: str,
     *,
-    config_path: Optional[Path],
-    root: Optional[Path],
-    log_level: Optional[str],
-    wait_for_api: Optional[bool],
+    config_path: Path | None,
+    root: Path | None,
+    log_level: str | None,
+    wait_for_api: bool | None,
 ) -> int:
     config = _load_config(config_path)
     level = log_level or config.service.log_level
@@ -403,7 +404,7 @@ def _run_service(
                 "service": service,
             },
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
     stop = threading.Event()
     _install_signal_handlers(stop)
@@ -418,7 +419,7 @@ def _run_service(
             },
         )
         _safe_stop(role)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
     logger.info(
         "Service Role started",
@@ -444,20 +445,21 @@ def _build_service(
     wait_for_api: bool | None = None,
 ):
     if role == "collector":
-        from mdgw.service.collector import CollectorService
+        from mdgw.service.collector import CollectorService  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
 
         return CollectorService(
             config, data_root=root, wait_for_api=wait_for_api
         )
     if role == "api":
-        from mdgw.service.api import ApiService
+        from mdgw.service.api import ApiService  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
 
         return ApiService(config, data_root=root)
     if role == "replay":
-        from mdgw.service.replay import ReplayServiceRole
+        from mdgw.service.replay import ReplayServiceRole  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
 
         return ReplayServiceRole(config, data_root=root)
-    raise ValueError(f"unsupported Service Role: {role!r}")
+    msg = f"unsupported Service Role: {role!r}"
+    raise ValueError(msg)
 
 
 def _safe_stop(service) -> None:
@@ -471,16 +473,16 @@ def _safe_stop(service) -> None:
 
 
 def _run_up(
-    config_path: Optional[Path],
-    root: Optional[Path],
-    log_level: Optional[str],
+    config_path: Path | None,
+    root: Path | None,
+    log_level: str | None,
 ) -> int:
     config = _load_config(config_path)
     level = log_level or config.service.log_level
     configure_json_logging(level, service="supervisor")
     data_root = root or config.storage.root
 
-    from mdgw.service.supervisor import Supervisor
+    from mdgw.service.supervisor import Supervisor  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
 
     specs = _build_up_specs(
         config, _resolved_config_path(config_path), data_root, level
@@ -495,7 +497,7 @@ def _run_up(
             "supervisor failed",
             extra={"event": "supervisor.failed"},
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
     if code:
         raise typer.Exit(code=code)
     return 0
@@ -503,11 +505,11 @@ def _run_up(
 
 def _build_up_specs(
     config: GatewayConfig,
-    config_path: Optional[Path],
+    config_path: Path | None,
     root: Path,
-    level: Optional[str],
+    level: str | None,
 ):
-    from mdgw.service.supervisor import ChildSpec
+    from mdgw.service.supervisor import ChildSpec  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
 
     common: list[str] = []
     if config_path is not None:
@@ -518,9 +520,16 @@ def _build_up_specs(
 
     collector = ChildSpec(
         role="collector",
-        command=[sys.executable, "-m", "mdgw", "run", "--service", "collector"]
-        + ["--wait-for-api"]
-        + common,
+        command=[
+            sys.executable,
+            "-m",
+            "mdgw",
+            "run",
+            "--service",
+            "collector",
+            "--wait-for-api",
+            *common,
+        ],
         health_url=_local_url(
             config.service.health_host,
             config.service.collector_health_port,
@@ -530,8 +539,15 @@ def _build_up_specs(
     )
     api = ChildSpec(
         role="api",
-        command=[sys.executable, "-m", "mdgw", "run", "--service", "api"]
-        + common,
+        command=[
+            sys.executable,
+            "-m",
+            "mdgw",
+            "run",
+            "--service",
+            "api",
+            *common,
+        ],
         health_url=_local_url(
             config.server.host,
             config.server.http_port,
@@ -542,20 +558,20 @@ def _build_up_specs(
     return [collector, api]
 
 
-def _resolved_config_path(config_path: Optional[Path]) -> Optional[Path]:
+def _resolved_config_path(config_path: Path | None) -> Path | None:
     if config_path is None and DEFAULT_CONFIG_PATH.exists():
         config_path = DEFAULT_CONFIG_PATH
     return config_path
 
 
 def _local_url(host: str, port: int, path: str) -> str:
-    if host in {"0.0.0.0", "::", ""}:
+    if host in {"0.0.0.0", "::", ""}:  # ruff: ignore[hardcoded-bind-all-interfaces] - compares the configured host; no socket bind
         host = "127.0.0.1"
     return f"http://{host}:{port}{path}"
 
 
 def _install_signal_handlers(stop: threading.Event) -> None:
-    def _handle(signum, frame) -> None:  # noqa: ANN001 - signal signature
+    def _handle(_signum, _frame) -> None:
         stop.set()
 
     for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
@@ -572,18 +588,19 @@ def _install_signal_handlers(stop: threading.Event) -> None:
 # -- maintenance helpers -----------------------------------------------------
 
 
-def _load_config(config_path: Optional[Path]) -> GatewayConfig:
+def _load_config(config_path: Path | None) -> GatewayConfig:
     config_path = _resolved_config_path(config_path)
     if config_path is None:
         return GatewayConfig()
     try:
         return load_config(config_path)
     except (OSError, ValueError) as exc:
-        raise SystemExit(f"mdgw: cannot load config {config_path}: {exc}") from exc
+        msg = f"mdgw: cannot load config {config_path}: {exc}"
+        raise SystemExit(msg) from exc
 
 
 def _build_store(
-    root: Optional[Path], config: GatewayConfig
+    root: Path | None, config: GatewayConfig
 ) -> ParquetBarStore:
     root = root or config.storage.root
     return ParquetBarStore(
@@ -598,20 +615,73 @@ def _build_store(
 # -- archive backfill --------------------------------------------------------
 
 
-def _run_archive_backfill(
+def _select_archive_instruments(
+    reference: InstrumentReference,
+    instruments: list[str],
+    venue: str,
+    market_type: str,
+) -> list[Instrument]:
+    """Resolve requested InstrumentIds, or every venue/market-type match."""
+    from mdgw.core.instrument import InstrumentId  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
+
+    by_id = {
+        instrument.instrument_id: instrument
+        for instrument in reference.instruments
+    }
+    requested = list(dict.fromkeys(instruments))
+    if not requested:
+        return [
+            instrument
+            for instrument in reference.instruments
+            if instrument.venue == venue
+            and instrument.instrument_type == market_type
+        ]
+
+    selected: list[Instrument] = []
+    for raw in requested:
+        try:
+            instrument_id = InstrumentId.parse(raw).value
+        except ValueError:
+            typer.echo(f"error: invalid --instrument {raw!r}", err=True)
+            raise typer.Exit(code=1) from None
+        instrument = by_id.get(instrument_id)
+        if instrument is None:
+            typer.echo(
+                f"error: Instrument {instrument_id!r} is not in "
+                "Instrument Reference Data",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if (
+            instrument.venue != venue
+            or instrument.instrument_type != market_type
+        ):
+            typer.echo(
+                f"error: archive import only supports "
+                f"{venue}/{market_type}; "
+                f"{instrument_id!r} is "
+                f"{instrument.venue}/{instrument.instrument_type}",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        selected.append(instrument)
+    return selected
+
+
+def _run_archive_backfill(  # ruff: ignore[too-many-arguments] - keyword-only import pipeline knobs
     *,
     archive: bool,
-    config_path: Optional[Path],
-    root: Optional[Path],
-    log_level: Optional[str],
+    config_path: Path | None,
+    root: Path | None,
+    log_level: str | None,
     instruments: list[str],
-    start: Optional[date],
-    end: Optional[date],
+    start: date | None,
+    end: date | None,
     venue: str,
     market_type: str,
     interval: str,
     granularity: str,
-    archive_dir: Optional[Path],
+    archive_dir: Path | None,
     base_url: str,
     timeout_s: float,
     retries: int,
@@ -619,57 +689,45 @@ def _run_archive_backfill(
 ) -> int:
     """Import Binance `data.binance.vision` archives into the Bar Dataset."""
     if not archive:
-        raise typer.BadParameter(
-            "backfill requires --archive (v1 only supports archive backfill)",
-            param_hint="--archive",
-        )
+        msg = "backfill requires --archive (v1 only supports archive backfill)"
+        raise typer.BadParameter(msg, param_hint="--archive")
     if interval != "1m":
-        raise typer.BadParameter(
-            "--interval only supports '1m' in v1", param_hint="--interval"
-        )
+        msg = "--interval only supports '1m' in v1"
+        raise typer.BadParameter(msg, param_hint="--interval")
     if venue != "binance":
-        raise typer.BadParameter(
-            "archive backfill only supports --venue binance in v1",
-            param_hint="--venue",
-        )
+        msg = "archive backfill only supports --venue binance in v1"
+        raise typer.BadParameter(msg, param_hint="--venue")
     if market_type != "spot":
-        raise typer.BadParameter(
-            "archive backfill only supports --market-type spot in v1",
-            param_hint="--market-type",
-        )
+        msg = "archive backfill only supports --market-type spot in v1"
+        raise typer.BadParameter(msg, param_hint="--market-type")
     if start is None:
-        raise typer.BadParameter(
-            "--start is required for archive backfill", param_hint="--start"
-        )
+        msg = "--start is required for archive backfill"
+        raise typer.BadParameter(msg, param_hint="--start")
     if archive_dir is not None and not archive_dir.is_dir():
-        raise typer.BadParameter(
-            f"--archive-dir is not a directory: {archive_dir}",
-            param_hint="--archive-dir",
-        )
+        msg = f"--archive-dir is not a directory: {archive_dir}"
+        raise typer.BadParameter(msg, param_hint="--archive-dir")
 
     config = _load_config(config_path)
     level = log_level or config.service.log_level
     configure_json_logging(level, service="backfill")
     store = _build_store(root, config)
 
-    today = utc_now().date()
-    end = end or (today - timedelta(days=1))
+    end = end or (utc_now().date() - timedelta(days=1))
     if end < start:
         typer.echo(
             f"error: --end {end} precedes --start {start}", err=True
         )
         raise typer.Exit(code=1)
 
-    from mdgw.archive import (
+    from mdgw.aggregate import BarAggregator  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
+    from mdgw.archive import (  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
         ArchiveFetcher,
         ArchiveInstrument,
         import_archive,
         market_symbol,
     )
-    from mdgw.aggregate import BarAggregator
-    from mdgw.core.instrument import InstrumentId
-    from mdgw.reference import load_instrument_reference
-    from mdgw.state.high_water_mark import HighWaterMarkStore
+    from mdgw.reference import load_instrument_reference  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
+    from mdgw.state.high_water_mark import HighWaterMarkStore  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
 
     try:
         reference = load_instrument_reference(Path(config.instruments.path))
@@ -677,46 +735,11 @@ def _run_archive_backfill(
         typer.echo(
             f"error: cannot load Instrument Reference Data: {exc}", err=True
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
-    by_id = {instrument.instrument_id: instrument for instrument in reference.instruments}
-    requested = list(dict.fromkeys(instruments))
-    if requested:
-        selected = []
-        for raw in requested:
-            try:
-                instrument_id = InstrumentId.parse(raw).value
-            except ValueError:
-                typer.echo(f"error: invalid --instrument {raw!r}", err=True)
-                raise typer.Exit(code=1)
-            instrument = by_id.get(instrument_id)
-            if instrument is None:
-                typer.echo(
-                    f"error: Instrument {instrument_id!r} is not in "
-                    "Instrument Reference Data",
-                    err=True,
-                )
-                raise typer.Exit(code=1)
-            if (
-                instrument.venue != venue
-                or instrument.instrument_type != market_type
-            ):
-                typer.echo(
-                    f"error: archive import only supports "
-                    f"{venue}/{market_type}; "
-                    f"{instrument_id!r} is "
-                    f"{instrument.venue}/{instrument.instrument_type}",
-                    err=True,
-                )
-                raise typer.Exit(code=1)
-            selected.append(instrument)
-    else:
-        selected = [
-            instrument
-            for instrument in reference.instruments
-            if instrument.venue == venue
-            and instrument.instrument_type == market_type
-        ]
+    selected = _select_archive_instruments(
+        reference, instruments, venue, market_type
+    )
 
     archive_instruments = [
         ArchiveInstrument(

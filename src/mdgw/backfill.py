@@ -14,29 +14,33 @@ Parquet Dataset.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
-from mdgw.aggregate import BarAggregator
 from mdgw.backfill_common import (
     BASE_INTERVAL,
     group_bars_by_interval,
     interval_ns,
     merge_bar_batch,
 )
-from mdgw.core.bar import Bar, RawBar
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.time import datetime_to_ns, ns_to_datetime, to_utc
-from mdgw.ingest.feed_handler import FeedHandler
 from mdgw.normalize.bar import normalize_bar
 from mdgw.state.health import (
     GAP_BACKFILL_LIMIT,
     GAP_HISTORY_UNSUPPORTED,
     HealthTracker,
 )
-from mdgw.state.high_water_mark import HighWaterMarkStore
-from mdgw.store.parquet_dataset import ParquetBarStore
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
+    from mdgw.aggregate import BarAggregator
+    from mdgw.core.bar import Bar, RawBar
+    from mdgw.ingest.feed_handler import FeedHandler
+    from mdgw.state.high_water_mark import HighWaterMarkStore
+    from mdgw.store.parquet_dataset import ParquetBarStore
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +58,7 @@ class BackfillReport:
     written_by_interval: dict[str, int] = field(default_factory=dict)
 
 
-def run_backfill(
+def run_backfill(  # ruff: ignore[too-many-arguments] -- public entry point; parameters are keyword-only
     *,
     feed_handler: FeedHandler,
     store: ParquetBarStore,
@@ -172,7 +176,7 @@ def run_backfill(
     return report
 
 
-def _record_gap(
+def _record_gap(  # ruff: ignore[too-many-arguments] -- keeps gap fields explicit for logging and health
     health: HealthTracker,
     *,
     feed: str,

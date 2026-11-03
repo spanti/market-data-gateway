@@ -20,11 +20,14 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from mdgw.core.bar import Bar
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import datetime_to_ns, to_utc
-from mdgw.store.parquet_dataset import ParquetBarStore
+
+if TYPE_CHECKING:
+    from mdgw.store.parquet_dataset import ParquetBarStore
 
 BASE_INTERVAL = "1m"
 
@@ -76,7 +79,7 @@ def read_existing_bars(
     return existing
 
 
-def merge_bar_batch(
+def merge_bar_batch(  # ruff: ignore[too-many-arguments] - keyword-only merge parameters
     *,
     store: ParquetBarStore,
     aggregator,
@@ -142,7 +145,9 @@ def merge_bar_batch(
         return MergeResult()
 
     parent_writes: list[Bar] = []
-    for interval, group in group_bars_by_interval(aggregator.add_many(aggregation_inputs)).items():
+    for interval, group in group_bars_by_interval(
+        aggregator.add_many(aggregation_inputs)
+    ).items():
         width_ns = interval_ns(interval)
         parent_start_ns = (read_start_ns // width_ns) * width_ns
         existing_parents = read_existing(

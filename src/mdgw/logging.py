@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import IO
 
 # Fields the formatter surfaces verbatim when present on a LogRecord.
@@ -87,7 +87,7 @@ def _coerce_level(level: str | int) -> int:
 
 def _iso_timestamp(created: float) -> str:
     return (
-        datetime.fromtimestamp(created, tz=timezone.utc)
+        datetime.fromtimestamp(created, tz=UTC)
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z")
     )

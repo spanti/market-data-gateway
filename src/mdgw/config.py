@@ -43,14 +43,15 @@ def _tcp_endpoint(value: str) -> str:
     """
     value = value.strip()
     if not value.startswith("tcp://"):
-        raise ValueError(
-            f"bus endpoint must use tcp:// (ipc:// is not supported): {value!r}"
-        )
+        msg = f"bus endpoint must use tcp:// (ipc:// is not supported): {value!r}"
+        raise ValueError(msg)
     host, separator, port = value[len("tcp://") :].rpartition(":")
     if not separator or not host:
-        raise ValueError(f"bus endpoint must be tcp://HOST:PORT: {value!r}")
+        msg = f"bus endpoint must be tcp://HOST:PORT: {value!r}"
+        raise ValueError(msg)
     if not port.isdigit() or not 0 <= int(port) <= 65_535:
-        raise ValueError(f"bus endpoint has an invalid port: {value!r}")
+        msg = f"bus endpoint has an invalid port: {value!r}"
+        raise ValueError(msg)
     return value
 
 
@@ -76,10 +77,11 @@ class BusConfig(_ConfigModel):
     @classmethod
     def _supported_transport(cls, value: str) -> str:
         if value not in SUPPORTED_BUS_TRANSPORTS:
-            raise ValueError(
+            msg = (
                 f"unsupported bus transport: {value!r} "
                 f"(supported: {sorted(SUPPORTED_BUS_TRANSPORTS)})"
             )
+            raise ValueError(msg)
         return value
 
     @field_validator(
@@ -173,17 +175,19 @@ class FeedConfig(_ConfigModel):
     @classmethod
     def _non_empty(cls, value: str, info: ValidationInfo) -> str:
         if not value.strip():
-            raise ValueError(f"{info.field_name} must be a non-empty string")
+            msg = f"{info.field_name} must be a non-empty string"
+            raise ValueError(msg)
         return value.strip()
 
     @field_validator("kind")
     @classmethod
     def _supported_kind(cls, value: str) -> str:
         if value not in SUPPORTED_FEED_KINDS:
-            raise ValueError(
+            msg = (
                 f"unsupported Feed Handler kind: {value!r} "
                 f"(supported: {sorted(SUPPORTED_FEED_KINDS)})"
             )
+            raise ValueError(msg)
         return value
 
     @field_validator("fake_start_ts")
@@ -193,31 +197,35 @@ class FeedConfig(_ConfigModel):
             return None
         cleaned = value.strip()
         if not cleaned:
-            raise ValueError("fake_start_ts must be an ISO-8601 string")
+            msg = "fake_start_ts must be an ISO-8601 string"
+            raise ValueError(msg)
         return cleaned
 
     @field_validator("symbols")
     @classmethod
     def _symbols(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if not value:
-            raise ValueError("symbols must contain at least one symbol")
+            msg = "symbols must contain at least one symbol"
+            raise ValueError(msg)
         cleaned = tuple(symbol.strip() for symbol in value)
         if any(not symbol for symbol in cleaned):
-            raise ValueError("symbols must not contain empty values")
+            msg = "symbols must not contain empty values"
+            raise ValueError(msg)
         if len(set(cleaned)) != len(cleaned):
-            raise ValueError("symbols must not contain duplicates")
+            msg = "symbols must not contain duplicates"
+            raise ValueError(msg)
         return cleaned
 
     @field_validator("data_types")
     @classmethod
     def _data_types(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if not value:
-            raise ValueError("data_types must contain at least one Data Type")
+            msg = "data_types must contain at least one Data Type"
+            raise ValueError(msg)
         unsupported = [data_type for data_type in value if data_type != "bar"]
         if unsupported:
-            raise ValueError(
-                f"unsupported data_types for v1: {unsupported!r} (supported: ['bar'])"
-            )
+            msg = f"unsupported data_types for v1: {unsupported!r} (supported: ['bar'])"
+            raise ValueError(msg)
         return value
 
     @property
@@ -239,7 +247,8 @@ class CollectorConfig(_ConfigModel):
     @classmethod
     def _non_empty_state_db_name(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("state_db_name must be a non-empty file name")
+            msg = "state_db_name must be a non-empty file name"
+            raise ValueError(msg)
         return value
 
 
@@ -255,11 +264,11 @@ class AggregationConfig(_ConfigModel):
     @classmethod
     def _supported_base_interval(cls, value: str) -> str:
         if value not in INTERVALS:
-            raise ValueError(f"unsupported base Bar Interval: {value!r}")
+            msg = f"unsupported base Bar Interval: {value!r}"
+            raise ValueError(msg)
         if value != "1m":
-            raise ValueError(
-                "v1 Bar Aggregation only supports '1m' as the base interval"
-            )
+            msg = "v1 Bar Aggregation only supports '1m' as the base interval"
+            raise ValueError(msg)
         return value
 
     @field_validator("intervals")
@@ -267,18 +276,21 @@ class AggregationConfig(_ConfigModel):
     def _supported_intervals(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         unknown = [interval for interval in value if interval not in INTERVALS]
         if unknown:
-            raise ValueError(f"unsupported Bar Interval(s): {unknown!r}")
+            msg = f"unsupported Bar Interval(s): {unknown!r}"
+            raise ValueError(msg)
         if len(set(value)) != len(value):
-            raise ValueError("aggregation intervals must not contain duplicates")
+            msg = "aggregation intervals must not contain duplicates"
+            raise ValueError(msg)
         return value
 
     @model_validator(mode="after")
-    def _base_interval_is_aggregated(self) -> "AggregationConfig":
+    def _base_interval_is_aggregated(self) -> AggregationConfig:
         if self.base_interval not in self.intervals:
-            raise ValueError(
+            msg = (
                 "aggregation intervals must contain the base interval "
                 f"{self.base_interval!r}"
             )
+            raise ValueError(msg)
         return self
 
 
@@ -307,7 +319,7 @@ class GatewayConfig(_ConfigModel):
     feeds: tuple[FeedConfig, ...] = ()
 
     @model_validator(mode="after")
-    def _backfill_lookback_within_retention(self) -> "GatewayConfig":
+    def _backfill_lookback_within_retention(self) -> GatewayConfig:
         """Reject a Backfill window the Retention policy would immediately erase.
 
         DESIGN §11: the Backfill lookback must not exceed the Data Type
@@ -321,18 +333,18 @@ class GatewayConfig(_ConfigModel):
             offenders.append(
                 f"collector.backfill_hours={self.collector.backfill_hours:g}h"
             )
-        for feed in self.feeds:
-            if feed.backfill_hours > retention_hours:
-                offenders.append(
-                    f"feed {feed.name!r} backfill_hours="
-                    f"{feed.backfill_hours:g}h"
-                )
+        offenders.extend(
+            f"feed {feed.name!r} backfill_hours={feed.backfill_hours:g}h"
+            for feed in self.feeds
+            if feed.backfill_hours > retention_hours
+        )
         if offenders:
-            raise ValueError(
+            msg = (
                 "Backfill lookback must not exceed Retention "
                 f"({self.retention.bars_days} day(s) = {retention_hours:g}h): "
                 + ", ".join(offenders)
             )
+            raise ValueError(msg)
         return self
 
 
