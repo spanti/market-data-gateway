@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
-from mdgw.core.bar import SCHEMA_VERSION, DATA_TYPE, Bar, RawBar
+from mdgw.core.bar import DATA_TYPE, SCHEMA_VERSION, Bar, RawBar
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import to_utc
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 MAX_SCALE = 18
 
@@ -17,16 +20,16 @@ def as_decimal(value: Decimal | str | int, field: str) -> Decimal:
     """Coerce exact input to Decimal and reject anything float-shaped."""
     if isinstance(value, Decimal):
         result = value
-    elif isinstance(value, str):
-        result = Decimal(value)
-    elif isinstance(value, int) and not isinstance(value, bool):
+    elif isinstance(value, str) or (
+        isinstance(value, int) and not isinstance(value, bool)
+    ):
         result = Decimal(value)
     else:
-        raise TypeError(
-            f"{field} must be Decimal, str or int; floats are forbidden: {value!r}"
-        )
+        msg = f"{field} must be Decimal, str or int; floats are forbidden: {value!r}"
+        raise TypeError(msg)
     if result.as_tuple().exponent < -MAX_SCALE:
-        raise ValueError(f"{field} has more than {MAX_SCALE} decimal places: {value!r}")
+        msg = f"{field} has more than {MAX_SCALE} decimal places: {value!r}"
+        raise ValueError(msg)
     return result
 
 
@@ -39,15 +42,18 @@ def normalize_bar(
     """Stamp envelope fields and enforce the closed-Bar rule."""
     instrument = InstrumentId.parse(raw.instrument_id)
     if raw.interval not in INTERVALS:
-        raise ValueError(f"invalid Bar Interval: {raw.interval!r}")
+        msg = f"invalid Bar Interval: {raw.interval!r}"
+        raise ValueError(msg)
 
     open_ts = to_utc(raw.open_ts)
     close_ts = open_ts + INTERVALS[raw.interval]
     ingest_ts = to_utc(ingest_ts)
     if close_ts > ingest_ts:
-        raise ValueError(
-            f"Bar is not closed: close_ts={close_ts.isoformat()} > ingest_ts={ingest_ts.isoformat()}"
+        msg = (
+            "Bar is not closed: "
+            f"close_ts={close_ts.isoformat()} > ingest_ts={ingest_ts.isoformat()}"
         )
+        raise ValueError(msg)
 
     return Bar(
         schema_version=SCHEMA_VERSION,
