@@ -9,9 +9,8 @@ through ``float``. Naive datetimes are interpreted as UTC by the SDK.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-UTC = timezone.utc
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 NANOS_PER_SECOND = 1_000_000_000
 NANOS_PER_MICROSECOND = 1_000
@@ -27,10 +26,11 @@ Timestamp = datetime | int | str
 
 def datetime_to_ns(value: datetime) -> int:
     """Convert a datetime to UTC nanoseconds. Naive values are treated as UTC."""
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=UTC)
-    else:
-        value = value.astimezone(UTC)
+    value = (
+        value.replace(tzinfo=UTC)
+        if value.tzinfo is None
+        else value.astimezone(UTC)
+    )
     delta = value - EPOCH
     return (
         delta.days * 86_400 * NANOS_PER_SECOND
@@ -43,7 +43,8 @@ def iso_to_ns(value: str) -> int:
     """Parse ISO-8601 into UTC nanoseconds, preserving up to 9 fractional digits."""
     match = _ISO_RE.match(value.strip())
     if match is None:
-        raise ValueError(f"invalid ISO-8601 timestamp: {value!r}")
+        msg = f"invalid ISO-8601 timestamp: {value!r}"
+        raise ValueError(msg)
 
     base = datetime.strptime(
         match.group("base").replace(" ", "T"), "%Y-%m-%dT%H:%M:%S"
@@ -82,17 +83,19 @@ def to_ns(value: Timestamp) -> int:
     strings with an optional offset and 1-9 fractional digits.
     """
     if isinstance(value, bool):
-        raise TypeError("bool is not a timestamp")
+        msg = "bool is not a timestamp"
+        raise TypeError(msg)
     if isinstance(value, int):
         return value
     if isinstance(value, datetime):
         return datetime_to_ns(value)
     if isinstance(value, str):
         return iso_to_ns(value)
-    raise TypeError(
+    msg = (
         "timestamp must be datetime, int nanoseconds or an ISO-8601 string, "
         f"not {type(value).__name__}"
     )
+    raise TypeError(msg)
 
 
 def normalize_ts(value: Timestamp) -> int:

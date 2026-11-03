@@ -11,8 +11,9 @@ nanosecond strings and decimals as exact decimal strings. Decoding goes through
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from decimal import Decimal
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 import pyarrow as pa
 
@@ -57,7 +58,8 @@ def empty_table() -> pa.Table:
 def _payload(message: Mapping[str, Any]) -> Mapping[str, Any]:
     payload = message.get("payload")
     if not isinstance(payload, Mapping):
-        raise ValueError("Message Envelope is missing its 'payload' object")
+        msg = "Message Envelope is missing its 'payload' object"
+        raise ValueError(msg)  # ruff: ignore[type-check-without-type-error] - ValueError is the envelope-error contract
     return payload
 
 
@@ -67,8 +69,9 @@ def _decimal(value: Any) -> Decimal:
     Data Contract v1 emits exact decimal strings. Floats are rejected because
     ``Decimal(float)`` would capture the binary approximation.
     """
-    if isinstance(value, bool) or isinstance(value, float):
-        raise ValueError("decimal fields must be exact strings, not floats")
+    if isinstance(value, (bool, float)):
+        msg = "decimal fields must be exact strings, not floats"
+        raise ValueError(msg)  # ruff: ignore[type-check-without-type-error] - tests and callers catch ValueError
     return Decimal(value)
 
 

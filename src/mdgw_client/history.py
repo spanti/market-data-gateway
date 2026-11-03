@@ -28,7 +28,7 @@ from mdgw_client.time import Timestamp, ns_to_iso, to_ns
 ARROW_STREAM_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
 
 
-def build_bars_url(
+def build_bars_url(  # ruff: ignore[too-many-arguments] - public history API; optional filters are keyword-only
     base_url: str,
     interval: str,
     *,
@@ -52,7 +52,8 @@ def build_bars_url(
         query["end"] = ns_to_iso(to_ns(end))
     if limit is not None:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
-            raise ValueError("limit must be a non-negative integer")
+            msg = "limit must be a non-negative integer"
+            raise ValueError(msg)
         query["limit"] = limit
     query["format"] = "arrow"
 
@@ -62,15 +63,17 @@ def build_bars_url(
 
 def fetch_arrow(url: str, *, timeout_s: float = 10.0) -> pa.Table:
     """Fetch an Arrow IPC stream and materialize it as a Table."""
-    request = urllib.request.Request(
+    request = urllib.request.Request(  # ruff: ignore[suspicious-url-open-usage] - caller-supplied gateway URL
         url, headers={"Accept": ARROW_STREAM_CONTENT_TYPE}
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+        with urllib.request.urlopen(  # ruff: ignore[suspicious-url-open-usage] - caller-supplied gateway URL
+            request, timeout=timeout_s
+        ) as response:
             body = response.read()
     except urllib.error.HTTPError as exc:
         raise error_from_rest_body(exc.read(), status=exc.code) from exc
-    except (socket.timeout, TimeoutError) as exc:
+    except TimeoutError as exc:
         raise ClientError(TIMEOUT, f"Bar history request timed out: {url}") from exc
     except urllib.error.URLError as exc:
         reason = exc.reason

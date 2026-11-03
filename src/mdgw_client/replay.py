@@ -12,18 +12,19 @@ messages could be lost to the PUB/SUB slow-joiner race.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import queue
 import threading
 import time
 from collections import deque
 from collections.abc import Iterator, Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any, Self
 
-import pyarrow as pa
 import zmq
 
 from mdgw_client.errors import (
+    CONFIGURATION_ERROR,
     CONNECTION_ERROR,
     PROTOCOL_ERROR,
     TIMEOUT,
@@ -33,6 +34,9 @@ from mdgw_client.errors import (
 from mdgw_client.live import READY_TOPIC, StreamEvent
 from mdgw_client.schema import ipc_to_table
 from mdgw_client.time import Timestamp, ns_to_iso, to_ns
+
+if TYPE_CHECKING:
+    import types
 
 REPLAY_PREFIX = "replay."
 
@@ -84,9 +88,10 @@ class _SessionChannel:
             self._eos_queued = True
         try:
             self._queue.put_nowait(message)
-            return
         except queue.Full:
             pass
+        else:
+            return
 
         # The queue is full. An ordinary message yields to an End of Session
         # that is already waiting; otherwise the oldest message is dropped to
@@ -139,17 +144,12 @@ class _SessionChannel:
             if self._closed.is_set():
                 return
             self._closed.set()
-        try:
+        with contextlib.suppress(queue.Full):
             self._queue.put_nowait(_CLOSED)
-        except queue.Full:
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:  # pragma: no cover - defensive
-                pass
-            try:
-                self._queue.put_nowait(_CLOSED)
-            except queue.Full:  # pragma: no cover - defensive
-                pass
+        with contextlib.suppress(queue.Empty):  # pragma: no cover - defensive
+            self._queue.get_nowait()
+        with contextlib.suppress(queue.Full):  # pragma: no cover - defensive
+            self._queue.put_nowait(_CLOSED)
 
 
 class _ReplayReceiver:
@@ -172,7 +172,8 @@ class _ReplayReceiver:
         self._timeout_s = timeout_s
         self._backoff = tuple(reconnect_backoff_s) or (0.0,)
         if queue_size <= 0:
-            raise ValueError("queue_size must be positive")
+            msg = "queue_size must be positive"
+            raise ValueError(msg)
         self._queue_size = queue_size
         self._routing_lock = threading.Lock()
         self._channels: dict[str, _SessionChannel] = {}
@@ -334,40 +335,11 @@ class _ReplayReceiver:
             poller = zmq.Poller()
             poller.register(socket, zmq.POLLIN)
             try:
-                while not self._stop.is_set():
-                    if self._reconnect_requested.is_set():
-                        break
-                    if dict(poller.poll(50)).get(socket) != zmq.POLLIN:
-                        continue
-                    frames = socket.recv_multipart()
-                    if len(frames) < 2:
-                        continue
-                    # One malformed frame must not kill the shared receiver
-                    # thread: record it, skip it, and keep using this socket.
-                    try:
-                        topic = frames[0].decode("utf-8")
-                        if topic == READY_TOPIC:
-                            # The Replay PUB repeats this every 50 ms, so it
-                            # proves the subscription was forwarded.
-                            self._ready.set()
-                            attempt = 0
-                            continue
-                        if not topic.startswith(REPLAY_PREFIX):
-                            continue
-                        self._route(topic, frames[1])
-                        # A routed message proves the socket is healthy again.
-                        attempt = 0
-                    except Exception as exc:  # noqa: BLE001 - bad frame
-                        if self._stop.is_set():
-                            break
-                        with self._state_lock:
-                            self._last_error = exc
-                        continue
-            except Exception as exc:  # noqa: BLE001 - reconnection boundary
+                attempt = self._pump_socket(socket, poller, attempt)
+            except Exception as exc:  # ruff: ignore[blind-except] - reconnection boundary
                 if self._stop.is_set():
                     break
-                with self._state_lock:
-                    self._last_error = exc
+                self._record_error(exc)
                 self._wait_backoff(attempt)
                 attempt += 1
             finally:
@@ -384,6 +356,50 @@ class _ReplayReceiver:
                 # fresh connect; a live socket simply keeps listening.
                 self._wait_backoff(attempt)
                 attempt += 1
+
+    def _pump_socket(
+        self, socket: zmq.Socket, poller: zmq.Poller, attempt: int
+    ) -> int:
+        """Pump one SUB socket until it breaks or a reconnect is requested."""
+        while not self._stop.is_set():
+            if self._reconnect_requested.is_set():
+                break
+            if dict(poller.poll(50)).get(socket) != zmq.POLLIN:
+                continue
+            frames = socket.recv_multipart()
+            if len(frames) < 2:
+                continue
+            attempt = self._handle_frame(frames, attempt)
+        return attempt
+
+    def _handle_frame(self, frames: Sequence[bytes], attempt: int) -> int:
+        """Route one frame; a malformed frame is recorded, never fatal."""
+        try:
+            healthy = self._route_frame(frames)
+        except Exception as exc:  # ruff: ignore[blind-except] - bad frame
+            self._record_error(exc)
+            return attempt
+        return 0 if healthy else attempt
+
+    def _route_frame(self, frames: Sequence[bytes]) -> bool:
+        """Route one frame; return True when it proves the socket is healthy."""
+        topic = frames[0].decode("utf-8")
+        if topic == READY_TOPIC:
+            # The Replay PUB repeats this every 50 ms, so it proves the
+            # subscription was forwarded.
+            self._ready.set()
+            return True
+        if not topic.startswith(REPLAY_PREFIX):
+            return False
+        self._route(topic, frames[1])
+        # A routed message proves the socket is healthy again.
+        return True
+
+    def _record_error(self, exc: Exception) -> None:
+        """Record the last transport error unless the receiver is stopping."""
+        if not self._stop.is_set():
+            with self._state_lock:
+                self._last_error = exc
 
     def _wait_backoff(self, attempt: int) -> None:
         delay = self._backoff[min(attempt, len(self._backoff) - 1)]
@@ -404,12 +420,14 @@ class ReplayClient:
         queue_size: int = 1000,
     ) -> None:
         if not publish_endpoint or not control_endpoint:
-            raise ClientError(
-                "configuration_error",
-                "both replay_publish_endpoint and replay_control_endpoint are required",
+            msg = (
+                "both replay_publish_endpoint and replay_control_endpoint "
+                "are required"
             )
+            raise ClientError(CONFIGURATION_ERROR, msg)
         if queue_size <= 0:
-            raise ValueError("queue_size must be positive")
+            msg = "queue_size must be positive"
+            raise ValueError(msg)
         self._publish_endpoint = publish_endpoint
         self._control_endpoint = control_endpoint
         self._timeout_s = timeout_s
@@ -435,14 +453,17 @@ class ReplayClient:
         *,
         replay_mode: str = "asap",
         speed: float = 1.0,
-    ) -> "ReplaySession":
+    ) -> ReplaySession:
         """Create a session. The SUB handshake is completed first."""
         if not subscriptions:
-            raise ValueError("subscriptions must not be empty")
+            msg = "subscriptions must not be empty"
+            raise ValueError(msg)
         normalized: list[dict[str, Any]] = []
         for item in subscriptions:
             if not isinstance(item, Mapping):
-                raise ValueError("each subscription must be a mapping")
+                # ValueError is the documented input-error type; keep it.
+                msg = "each subscription must be a mapping"
+                raise ValueError(msg)  # ruff: ignore[type-check-without-type-error]
             subscription = dict(item)
             subscription.setdefault("data_type", "bar")
             normalized.append(subscription)
@@ -482,7 +503,7 @@ class ReplayClient:
             self._sessions.add(session)
         return session
 
-    def _release_session(self, session: "ReplaySession") -> None:
+    def _release_session(self, session: ReplaySession) -> None:
         with self._state_lock:
             self._sessions.discard(session)
             receiver = self._receiver
@@ -591,10 +612,8 @@ class ReplayClient:
         # ``allow_closed`` opens exactly that narrow path; a transport failure
         # is swallowed so local resources are always released.
         for session in sessions:
-            try:
+            with contextlib.suppress(ClientError):
                 session._control("stop", allow_closed=True)
-            except ClientError:
-                pass
             session._ended.set()
             # Wake any consumer blocked in ``next_event`` for this session.
             session._channel.close()
@@ -605,10 +624,15 @@ class ReplayClient:
             self._reset_req_locked()
         self._context.term()
 
-    def __enter__(self) -> "ReplayClient":
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: types.TracebackType | None,
+    ) -> None:
         self.close()
 
 
@@ -672,9 +696,13 @@ class ReplaySession:
     def set_speed(self, speed: float) -> None:
         self._control("set_speed", speed=speed)
 
-    def step(self, credits: int = 1) -> None:
+    # `credits` is the Replay Protocol field name; renaming breaks callers.
+    def step(
+        self, credits: int = 1  # ruff: ignore[builtin-argument-shadowing]
+    ) -> None:
         if isinstance(credits, bool) or not isinstance(credits, int) or credits <= 0:
-            raise ValueError("credits must be a positive integer")
+            msg = "credits must be a positive integer"
+            raise ValueError(msg)
         self._control("step", credits=credits)
 
     def stop(self) -> None:
@@ -693,7 +721,8 @@ class ReplaySession:
     def next_event(self, timeout: float | None = None) -> StreamEvent:
         """Return the next event for this session, ending at End of Session."""
         if timeout is not None and timeout < 0:
-            raise ValueError("timeout must be non-negative or None")
+            msg = "timeout must be non-negative or None"
+            raise ValueError(msg)
         deadline = None if timeout is None else time.monotonic() + timeout
 
         while True:
@@ -754,24 +783,25 @@ class ReplaySession:
         if self._released.is_set():
             return
         if not self._ended.is_set():
-            try:
+            with contextlib.suppress(ClientError):
                 self._control("stop")
-            except ClientError:
-                pass
             self._ended.set()
         self._released.set()
         # Wake a consumer blocked in next_event before unregistering.
         self._channel.close()
         self._client._release_session(self)
 
-    def __enter__(self) -> "ReplaySession":
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
-        try:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: types.TracebackType | None,
+    ) -> None:
+        with contextlib.suppress(ClientError):
             self.stop()
-        except ClientError:
-            pass
         self.close()
 
 

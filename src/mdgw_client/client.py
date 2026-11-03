@@ -7,11 +7,8 @@ control uses ZMQ REQ/REP. No gateway internals are imported.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Self
 from urllib.parse import urlsplit
-
-import pyarrow as pa
 
 from mdgw_client.errors import (
     CONFIGURATION_ERROR,
@@ -22,7 +19,14 @@ from mdgw_client.history import build_bars_url, fetch_arrow
 from mdgw_client.live import LiveSubscription
 from mdgw_client.replay import ReplayClient, ReplaySession
 from mdgw_client.schema import BAR_SCHEMA
-from mdgw_client.time import Timestamp
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from types import TracebackType
+
+    import pyarrow as pa
+
+    from mdgw_client.time import Timestamp
 
 
 def derive_ws_url(base_url: str, ws_path: str = "/ws") -> str:
@@ -37,7 +41,7 @@ def derive_ws_url(base_url: str, ws_path: str = "/ws") -> str:
 class GatewayClient:
     """Thin, framework-neutral client for history, live and replay."""
 
-    def __init__(
+    def __init__(  # ruff: ignore[too-many-arguments] - keyword-only client configuration
         self,
         base_url: str,
         *,
@@ -49,7 +53,8 @@ class GatewayClient:
         reconnect_backoff_s: tuple[float, ...] = (0.1, 0.2, 0.5, 1.0, 2.0, 5.0),
     ) -> None:
         if not base_url:
-            raise ValueError("base_url is required")
+            msg = "base_url is required"
+            raise ValueError(msg)
         self.base_url = base_url.rstrip("/")
         self.stream_endpoint = stream_endpoint
         self.replay_publish_endpoint = replay_publish_endpoint
@@ -110,7 +115,8 @@ class GatewayClient:
             topics = [topics]
         normalized = list(topics)
         if not normalized:
-            raise ValueError("at least one topic is required")
+            msg = "at least one topic is required"
+            raise ValueError(msg)
 
         resolved = transport
         if resolved == "auto":
@@ -170,10 +176,15 @@ class GatewayClient:
             self._replay.close()
             self._replay = None
 
-    def __enter__(self) -> "GatewayClient":
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         self.close()
 
 

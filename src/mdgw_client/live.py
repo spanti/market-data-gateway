@@ -15,24 +15,30 @@ losing data.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import queue
 import threading
 import time
-from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Self
 
-import pyarrow as pa
 import zmq
 
 from mdgw_client.errors import (
+    CONFIGURATION_ERROR,
     CONNECTION_ERROR,
     TIMEOUT,
     WS_UNAVAILABLE,
     ClientError,
 )
 from mdgw_client.schema import ipc_to_table, messages_to_table
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Sequence
+    from types import TracebackType
+
+    import pyarrow as pa
 
 READY_TOPIC = "_internal.ready"
 
@@ -54,6 +60,7 @@ def _import_ws_connect() -> Callable[..., Any]:
     ``websockets`` is optional: the base install only needs pyarrow and pyzmq.
     """
     try:
+        # ruff: ignore[import-outside-top-level] - optional dependency
         from websockets.sync.client import connect
     except ImportError as exc:  # pragma: no cover - exercised when not installed
         raise ClientError(
@@ -67,7 +74,7 @@ def _import_ws_connect() -> Callable[..., Any]:
 class LiveSubscription:
     """A live subscription that can be iterated for :class:`StreamEvent`."""
 
-    def __init__(
+    def __init__(  # ruff: ignore[too-many-arguments] - public constructor
         self,
         *,
         transport: str,
@@ -79,22 +86,22 @@ class LiveSubscription:
         reconnect_backoff_s: tuple[float, ...] = (0.1, 0.2, 0.5, 1.0, 2.0, 5.0),
     ) -> None:
         if transport not in {"zmq", "ws"}:
-            raise ClientError(
-                "configuration_error",
-                f"unsupported transport {transport!r}; use 'zmq', 'ws' or 'auto'",
-            )
+            msg = f"unsupported transport {transport!r}; use 'zmq', 'ws' or 'auto'"
+            raise ClientError(CONFIGURATION_ERROR, msg)
         if not topics:
-            raise ValueError("at least one topic is required")
+            msg = "at least one topic is required"
+            raise ValueError(msg)
         if queue_size <= 0:
-            raise ValueError("queue_size must be positive")
+            msg = "queue_size must be positive"
+            raise ValueError(msg)
         if transport == "zmq" and not stream_endpoint:
             raise ClientError(
-                "configuration_error",
+                CONFIGURATION_ERROR,
                 "transport='zmq' requires a stream_endpoint",
             )
         if transport == "ws" and not ws_url:
             raise ClientError(
-                "configuration_error", "transport='ws' requires a ws_url"
+                CONFIGURATION_ERROR, "transport='ws' requires a ws_url"
             )
 
         self.transport = transport
@@ -163,7 +170,8 @@ class LiveSubscription:
     def next(self, timeout: float | None = None) -> StreamEvent:
         """Return the next event, or raise ``ClientError('timeout')``."""
         if timeout is not None and timeout < 0:
-            raise ValueError("timeout must be non-negative or None")
+            msg = "timeout must be non-negative or None"
+            raise ValueError(msg)
 
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
@@ -203,10 +211,15 @@ class LiveSubscription:
             self._thread.join(timeout=2.0)
             self._thread = None
 
-    def __enter__(self) -> "LiveSubscription":
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         self.close()
 
     # -- shared helpers ----------------------------------------------------
@@ -232,9 +245,10 @@ class LiveSubscription:
         while not self._stop.is_set():
             try:
                 self._queue.put(event, timeout=0.1)
-                return True
             except queue.Full:
                 continue
+            else:
+                return True
         return False
 
     def _ws_snapshot(self) -> tuple[Any, bool]:
@@ -243,10 +257,10 @@ class LiveSubscription:
 
     @staticmethod
     def _close_quietly(conn: Any) -> None:
-        try:
+        # Closing a transport may fail if the peer already went away; shutdown
+        # must stay best-effort.
+        with contextlib.suppress(Exception):
             conn.close()
-        except Exception:
-            pass
 
     # -- ZMQ transport -----------------------------------------------------
 
@@ -269,39 +283,8 @@ class LiveSubscription:
             poller = zmq.Poller()
             poller.register(socket, zmq.POLLIN)
             try:
-                while not self._stop.is_set():
-                    if self._reconnect_requested.is_set():
-                        break
-                    if dict(poller.poll(50)).get(socket) != zmq.POLLIN:
-                        continue
-                    frames = socket.recv_multipart()
-                    if len(frames) < 2:
-                        continue
-                    # One malformed frame (bad UTF-8 topic, non-Arrow payload)
-                    # must not kill the receiver thread: record it, skip it,
-                    # and keep consuming later frames on the same socket.
-                    try:
-                        topic = frames[0].decode("utf-8")
-                        if topic == READY_TOPIC:
-                            self._ready.set()
-                            attempt = 0
-                            continue
-                        event = StreamEvent(
-                            topic=topic,
-                            table=ipc_to_table(frames[1]),
-                            kind="bar",
-                        )
-                    except Exception as exc:  # noqa: BLE001 - bad frame
-                        if self._stop.is_set():
-                            break
-                        self._set_error(exc)
-                        continue
-                    if not self._put(event):
-                        break
-                    # A decoded message proves the connection is healthy, so
-                    # do not linger at the maximum reconnect backoff.
-                    attempt = 0
-            except Exception as exc:  # noqa: BLE001 - reconnection boundary
+                attempt = self._receive_zmq(socket, poller, attempt)
+            except Exception as exc:  # ruff: ignore[blind-except] - reconnection boundary
                 if self._stop.is_set():
                     break
                 self._set_error(exc)
@@ -319,6 +302,44 @@ class LiveSubscription:
                 self._bump_reconnect()
                 attempt = 0
 
+    def _receive_zmq(
+        self, socket: zmq.Socket, poller: zmq.Poller, attempt: int
+    ) -> int:
+        """Consume frames until the socket fails or a reconnect is requested."""
+        while not self._stop.is_set():
+            if self._reconnect_requested.is_set():
+                return attempt
+            if dict(poller.poll(50)).get(socket) != zmq.POLLIN:
+                continue
+            frames = socket.recv_multipart()
+            if len(frames) < 2:
+                continue
+            attempt = self._handle_zmq_frame(frames, attempt)
+        return attempt
+
+    def _handle_zmq_frame(self, frames: list[bytes], attempt: int) -> int:
+        """Decode one frame, keeping the backoff counter across bad frames."""
+        # One malformed frame (bad UTF-8 topic, non-Arrow payload) must not
+        # kill the receiver thread: record it, skip it, and keep consuming
+        # later frames on the same socket.
+        try:
+            topic = frames[0].decode("utf-8")
+            if topic == READY_TOPIC:
+                self._ready.set()
+                return 0
+            event = StreamEvent(
+                topic=topic,
+                table=ipc_to_table(frames[1]),
+                kind="bar",
+            )
+        except Exception as exc:  # ruff: ignore[blind-except] - bad frame
+            if not self._stop.is_set():
+                self._set_error(exc)
+            return attempt
+        # A decoded message proves the connection is healthy, so do not linger
+        # at the maximum reconnect backoff.
+        return 0 if self._put(event) else attempt
+
     # -- WebSocket transport ----------------------------------------------
 
     def _run_ws(self) -> None:
@@ -330,7 +351,7 @@ class LiveSubscription:
                     open_timeout=self._timeout_s,
                     close_timeout=1.0,
                 )
-            except Exception as exc:  # noqa: BLE001 - reconnection boundary
+            except Exception as exc:  # ruff: ignore[blind-except] - reconnection boundary
                 self._set_error(exc)
                 if self._stop.is_set():
                     break
@@ -338,34 +359,7 @@ class LiveSubscription:
                 attempt += 1
                 continue
 
-            try:
-                # Using connect() as a context manager is the API contract in
-                # websockets >= 14 and is also supported by 13.
-                with connection as conn:
-                    with self._state_lock:
-                        self._ws_conn = conn
-                    try:
-                        self._ws_handshake(conn)
-                        self._ready.set()
-                        attempt = 0
-                        while not self._stop.is_set():
-                            if self._reconnect_requested.is_set():
-                                break
-                            try:
-                                raw = conn.recv(timeout=0.2)
-                            except TimeoutError:
-                                continue
-                            if raw is None:
-                                break
-                            self._handle_ws_message(raw)
-                    finally:
-                        with self._state_lock:
-                            if self._ws_conn is conn:
-                                self._ws_conn = None
-            except ClientError as exc:
-                self._set_error(exc)
-            except Exception as exc:  # noqa: BLE001 - reconnection boundary
-                self._set_error(exc)
+            attempt = self._serve_ws_connection(connection, attempt)
 
             if self._stop.is_set():
                 break
@@ -374,6 +368,50 @@ class LiveSubscription:
             self._bump_reconnect()
             self._wait_backoff(attempt)
             attempt += 1
+
+    def _serve_ws_connection(self, connection: Any, attempt: int) -> int:
+        """Serve one connection, returning the updated backoff attempt."""
+        try:
+            # Using connect() as a context manager is the API contract in
+            # websockets >= 14 and is also supported by 13.
+            with connection as conn:
+                attempt = self._pump_ws(conn, attempt)
+        except ClientError as exc:
+            self._set_error(exc)
+        except Exception as exc:  # ruff: ignore[blind-except] - reconnection boundary
+            self._set_error(exc)
+        return attempt
+
+    def _pump_ws(self, conn: Any, attempt: int) -> int:
+        """Handshake and receive until the connection ends."""
+        with self._state_lock:
+            self._ws_conn = conn
+        try:
+            self._ws_handshake(conn)
+            self._ready.set()
+            attempt = 0
+            self._receive_ws(conn)
+        except ClientError as exc:
+            self._set_error(exc)
+        except Exception as exc:  # ruff: ignore[blind-except] - reconnection boundary
+            self._set_error(exc)
+        finally:
+            with self._state_lock:
+                if self._ws_conn is conn:
+                    self._ws_conn = None
+        return attempt
+
+    def _receive_ws(self, conn: Any) -> None:
+        while not self._stop.is_set():
+            if self._reconnect_requested.is_set():
+                return
+            try:
+                raw = conn.recv(timeout=0.2)
+            except TimeoutError:
+                continue
+            if raw is None:
+                return
+            self._handle_ws_message(raw)
 
     def _ws_handshake(self, conn: Any) -> None:
         conn.send(
@@ -416,7 +454,7 @@ class LiveSubscription:
         """
         try:
             self._process_ws_message(raw)
-        except Exception as exc:  # noqa: BLE001 - one bad message
+        except Exception as exc:  # ruff: ignore[blind-except] - one bad message
             self._set_error(exc)
 
     def _process_ws_message(self, raw: Any) -> None:
@@ -442,7 +480,14 @@ class LiveSubscription:
                 table = messages_to_table(data)
             else:
                 return
-            self._put(StreamEvent(topic=topic, table=table, kind="bar", data=data if isinstance(data, dict) else None))
+            self._put(
+                StreamEvent(
+                    topic=topic,
+                    table=table,
+                    kind="bar",
+                    data=data if isinstance(data, dict) else None,
+                )
+            )
         elif op == "lag_notice":
             self._put(
                 StreamEvent(
