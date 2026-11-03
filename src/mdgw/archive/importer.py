@@ -26,12 +26,12 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from typing import TYPE_CHECKING
 
-from mdgw.aggregate import BarAggregator
 from mdgw.archive.binance import (
+    SUPPORTED_ARCHIVE_INTERVAL,
     ArchiveFormatError,
     ArchivePeriod,
-    SUPPORTED_ARCHIVE_INTERVAL,
     archive_csv_filename,
     parse_checksum,
     parse_kline_csv,
@@ -39,17 +39,20 @@ from mdgw.archive.binance import (
     read_zip_csv,
     timestamp_unit_for_date,
 )
-from mdgw.archive.fetch import ArchiveFetchError, ArchiveFetcher
+from mdgw.archive.fetch import ArchiveFetcher, ArchiveFetchError
 from mdgw.backfill_common import (
     group_bars_by_interval,
     interval_ns,
     merge_bar_batch,
 )
-from mdgw.core.bar import RawBar
 from mdgw.core.time import datetime_to_ns, to_utc, utc_now
 from mdgw.normalize.bar import normalize_bar
-from mdgw.state.high_water_mark import HighWaterMarkStore
-from mdgw.store.parquet_dataset import ParquetBarStore
+
+if TYPE_CHECKING:
+    from mdgw.aggregate import BarAggregator
+    from mdgw.core.bar import RawBar
+    from mdgw.state.high_water_mark import HighWaterMarkStore
+    from mdgw.store.parquet_dataset import ParquetBarStore
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +89,28 @@ class ArchiveReport:
         return self.failures == 0
 
 
-def import_archive(
+@dataclass(frozen=True)
+class _ImportContext:
+    """Loop-invariant state shared by the per-file import helpers."""
+
+    report: ArchiveReport
+    store: ParquetBarStore
+    hwm: HighWaterMarkStore
+    aggregator: BarAggregator
+    fetcher: ArchiveFetcher
+    feed: str
+    market_type: str
+    interval: str
+    start: date
+    end: date
+    cutoff_ns: int | None
+    ingest_ts: datetime
+    requested_granularity: str
+
+
+# The public keyword-only API mirrors the CLI options; an options object would
+# make the documented call sites less explicit.
+def import_archive(  # ruff: ignore[too-many-arguments]
     *,
     instruments,
     store: ParquetBarStore,
@@ -106,12 +130,14 @@ def import_archive(
 ) -> ArchiveReport:
     """Import all archive files covering `[start, end]` for every Instrument."""
     if interval != SUPPORTED_ARCHIVE_INTERVAL:
-        raise ValueError(
+        msg = (
             f"v1 archive import only supports {SUPPORTED_ARCHIVE_INTERVAL!r}, "
             f"got {interval!r}"
         )
+        raise ValueError(msg)
     if end < start:
-        raise ValueError("archive import end date must not precede start date")
+        msg = "archive import end date must not precede start date"
+        raise ValueError(msg)
 
     current = to_utc(now) if now is not None else utc_now()
     ingest_time = to_utc(ingest_ts) if ingest_ts is not None else utc_now()
@@ -123,6 +149,21 @@ def import_archive(
     )
 
     report = ArchiveReport()
+    context = _ImportContext(
+        report=report,
+        store=store,
+        hwm=hwm,
+        aggregator=aggregator,
+        fetcher=fetcher,
+        feed=feed,
+        market_type=market_type,
+        interval=interval,
+        start=start,
+        end=end,
+        cutoff_ns=cutoff_ns,
+        ingest_ts=ingest_time,
+        requested_granularity=granularity,
+    )
     logger.info(
         "archive import started; stop the collector while importing",
         extra={"event": "archive.import_started", "feed": feed},
@@ -135,21 +176,9 @@ def import_archive(
         )
         for period in periods:
             _import_period(
+                context=context,
                 instrument=instrument,
                 period=period,
-                report=report,
-                store=store,
-                hwm=hwm,
-                aggregator=aggregator,
-                fetcher=fetcher,
-                feed=feed,
-                market_type=market_type,
-                interval=interval,
-                start=start,
-                end=end,
-                cutoff_ns=cutoff_ns,
-                ingest_ts=ingest_time,
-                requested_granularity=granularity,
             )
 
     logger.info(
@@ -161,141 +190,66 @@ def import_archive(
 
 def _import_period(
     *,
+    context: _ImportContext,
     instrument: ArchiveInstrument,
     period: ArchivePeriod,
-    report: ArchiveReport,
-    store: ParquetBarStore,
-    hwm: HighWaterMarkStore,
-    aggregator: BarAggregator,
-    fetcher: ArchiveFetcher,
-    feed: str,
-    market_type: str,
-    interval: str,
-    start: date,
-    end: date,
-    cutoff_ns: int | None,
-    ingest_ts: datetime,
-    requested_granularity: str,
 ) -> None:
-    filename = period.filename(instrument.symbol, interval)
+    report = context.report
+    filename = period.filename(instrument.symbol, context.interval)
     try:
-        data = fetcher.read_zip(
-            market_type=market_type,
+        data = context.fetcher.read_zip(
+            market_type=context.market_type,
             period=period,
             symbol=instrument.symbol,
-            interval=interval,
+            interval=context.interval,
         )
     except ArchiveFetchError as exc:
-        _failure(report, instrument, feed, f"{filename}: {exc}")
+        _failure(report, instrument, context.feed, f"{filename}: {exc}")
         return
     if data is None:
-        if requested_granularity == "auto" and period.granularity == "monthly":
-            logger.warning(
-                "monthly archive is missing; falling back to daily files",
-                extra={
-                    "event": "archive.monthly_missing_fallback_daily",
-                    "feed": feed,
-                    "instrument_id": instrument.instrument_id,
-                },
-            )
-            fallback_start = max(start, period.start)
-            fallback_end = min(end, period.end)
-            day = fallback_start
-            while day <= fallback_end:
-                _import_period(
-                    instrument=instrument,
-                    period=ArchivePeriod("daily", day, day),
-                    report=report,
-                    store=store,
-                    hwm=hwm,
-                    aggregator=aggregator,
-                    fetcher=fetcher,
-                    feed=feed,
-                    market_type=market_type,
-                    interval=interval,
-                    start=start,
-                    end=end,
-                    cutoff_ns=cutoff_ns,
-                    ingest_ts=ingest_ts,
-                    requested_granularity=requested_granularity,
-                )
-                day += timedelta(days=1)
-            return
-        report.missing_files += 1
-        logger.warning(
-            "archive file is missing",
-            extra={
-                "event": "archive.file_missing",
-                "feed": feed,
-                "instrument_id": instrument.instrument_id,
-            },
-        )
+        _handle_missing(context, instrument, period)
         return
 
     try:
         raw_bars = _load_verified_bars(
+            context=context,
             data=data,
             instrument=instrument,
             period=period,
-            interval=interval,
-            market_type=market_type,
-            fetcher=fetcher,
         )
     except (ArchiveFetchError, ArchiveFormatError, ValueError) as exc:
-        _failure(report, instrument, feed, f"{filename}: {exc}")
+        _failure(report, instrument, context.feed, f"{filename}: {exc}")
         return
 
     report.files += 1
     report.bars_read += len(raw_bars)
 
-    selected: list[RawBar] = []
-    retention_skipped = 0
-    for raw in raw_bars:
-        day = raw.open_ts.date()
-        if not period.contains(day):
-            # A monthly archive only contains its own month, but be defensive.
-            continue
-        if day < start or day > end:
-            continue
-        open_ns = datetime_to_ns(raw.open_ts)
-        if cutoff_ns is not None and open_ns < cutoff_ns:
-            retention_skipped += 1
-            continue
-        selected.append(raw)
-
-    if retention_skipped:
-        report.skipped_by_retention += retention_skipped
-        logger.info(
-            "archive Bars skipped by Retention",
-            extra={
-                "event": "archive.retention_skipped",
-                "feed": feed,
-                "instrument_id": instrument.instrument_id,
-            },
-        )
-
+    selected = _select_bars(context, instrument, period, raw_bars)
     if not selected:
         return
 
     try:
         bars = [
-            normalize_bar(raw, feed=feed, ingest_ts=ingest_ts)
+            normalize_bar(raw, feed=context.feed, ingest_ts=context.ingest_ts)
             for raw in selected
         ]
     except ValueError as exc:
         _failure(
-            report, instrument, feed, f"{filename}: normalize failed: {exc}"
+            report,
+            instrument,
+            context.feed,
+            f"{filename}: normalize failed: {exc}",
         )
         return
 
     read_start_ns = min(datetime_to_ns(bar.open_ts) for bar in bars)
     read_end_ns = (
         max(datetime_to_ns(bar.open_ts) for bar in bars)
-        + interval_ns(interval)
+        + interval_ns(context.interval)
     )
     result = merge_bar_batch(
-        store=store,
-        aggregator=aggregator,
+        store=context.store,
+        aggregator=context.aggregator,
         instrument_id=instrument.instrument_id,
         base_bars=bars,
         read_start_ns=read_start_ns,
@@ -307,14 +261,16 @@ def _import_period(
     if not result.written:
         return
 
-    store.write_bars(result.written, asset_class=instrument.asset_class)
+    context.store.write_bars(
+        result.written, asset_class=instrument.asset_class
+    )
     report.bars_written += len(result.written)
 
     # The HWM advances only after Data Files and the Manifest are durable. The
     # store uses monotonic MAX semantics, so importing older history cannot
     # move it backwards.
     for bar_interval, group in group_bars_by_interval(result.written).items():
-        hwm.set(
+        context.hwm.set(
             instrument.instrument_id,
             bar_interval,
             max(datetime_to_ns(bar.open_ts) for bar in group),
@@ -324,48 +280,127 @@ def _import_period(
         "archive file imported",
         extra={
             "event": "archive.file_imported",
-            "feed": feed,
+            "feed": context.feed,
             "instrument_id": instrument.instrument_id,
         },
     )
 
 
+def _handle_missing(
+    context: _ImportContext,
+    instrument: ArchiveInstrument,
+    period: ArchivePeriod,
+) -> None:
+    if (
+        context.requested_granularity == "auto"
+        and period.granularity == "monthly"
+    ):
+        _import_monthly_fallback(context, instrument, period)
+        return
+    context.report.missing_files += 1
+    logger.warning(
+        "archive file is missing",
+        extra={
+            "event": "archive.file_missing",
+            "feed": context.feed,
+            "instrument_id": instrument.instrument_id,
+        },
+    )
+
+
+def _import_monthly_fallback(
+    context: _ImportContext,
+    instrument: ArchiveInstrument,
+    period: ArchivePeriod,
+) -> None:
+    logger.warning(
+        "monthly archive is missing; falling back to daily files",
+        extra={
+            "event": "archive.monthly_missing_fallback_daily",
+            "feed": context.feed,
+            "instrument_id": instrument.instrument_id,
+        },
+    )
+    day = max(context.start, period.start)
+    fallback_end = min(context.end, period.end)
+    while day <= fallback_end:
+        _import_period(
+            context=context,
+            instrument=instrument,
+            period=ArchivePeriod("daily", day, day),
+        )
+        day += timedelta(days=1)
+
+
+def _select_bars(
+    context: _ImportContext,
+    instrument: ArchiveInstrument,
+    period: ArchivePeriod,
+    raw_bars: list[RawBar],
+) -> list[RawBar]:
+    selected: list[RawBar] = []
+    retention_skipped = 0
+    for raw in raw_bars:
+        day = raw.open_ts.date()
+        if not period.contains(day):
+            # A monthly archive only contains its own month, but be defensive.
+            continue
+        if day < context.start or day > context.end:
+            continue
+        open_ns = datetime_to_ns(raw.open_ts)
+        if context.cutoff_ns is not None and open_ns < context.cutoff_ns:
+            retention_skipped += 1
+            continue
+        selected.append(raw)
+
+    if retention_skipped:
+        context.report.skipped_by_retention += retention_skipped
+        logger.info(
+            "archive Bars skipped by Retention",
+            extra={
+                "event": "archive.retention_skipped",
+                "feed": context.feed,
+                "instrument_id": instrument.instrument_id,
+            },
+        )
+    return selected
+
+
 def _load_verified_bars(
     *,
+    context: _ImportContext,
     data: bytes,
     instrument: ArchiveInstrument,
     period: ArchivePeriod,
-    interval: str,
-    market_type: str,
-    fetcher: ArchiveFetcher,
 ) -> list[RawBar]:
-    checksum_text = fetcher.read_checksum(
-        market_type=market_type,
+    checksum_text = context.fetcher.read_checksum(
+        market_type=context.market_type,
         period=period,
         symbol=instrument.symbol,
-        interval=interval,
+        interval=context.interval,
     )
     if checksum_text is None:
-        raise ArchiveFormatError(
-            f"missing CHECKSUM for {period.filename(instrument.symbol, interval)}"
+        msg = (
+            "missing CHECKSUM for "
+            f"{period.filename(instrument.symbol, context.interval)}"
         )
+        raise ArchiveFormatError(msg)
     expected = parse_checksum(checksum_text)
     actual = hashlib.sha256(data).hexdigest()
     if actual != expected:
-        raise ArchiveFormatError(
-            f"SHA-256 mismatch: expected {expected}, got {actual}"
-        )
+        msg = f"SHA-256 mismatch: expected {expected}, got {actual}"
+        raise ArchiveFormatError(msg)
 
     csv_data = read_zip_csv(
         data,
         expected_name=archive_csv_filename(
-            instrument.symbol, interval, period
+            instrument.symbol, context.interval, period
         ),
     )
     raw_bars = parse_kline_csv(
         csv_data,
         instrument_id=instrument.instrument_id,
-        interval=interval,
+        interval=context.interval,
         unit=timestamp_unit_for_date(period.start),
     )
     # Chronological, de-duplicated order is required by BarAggregator.
