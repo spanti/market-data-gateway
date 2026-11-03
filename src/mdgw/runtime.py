@@ -7,7 +7,6 @@ the whole chain deterministically; the HTTP server runs on its own event loop.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import threading
 from collections import defaultdict
@@ -15,9 +14,8 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Self
 from uuid import uuid4
 
-from aiohttp import web
-
 from mdgw.aggregate import BarAggregator
+from mdgw.api.http_server import HttpServer
 from mdgw.api.server import create_app
 from mdgw.api.ws_hub import WebSocketHub
 from mdgw.bus.zmq_bus import ZMQBus, ipc_to_table, table_to_ipc
@@ -92,10 +90,7 @@ class GatewayRuntime:
         # started here, so no port is bound unless the caller asks for replay.
         self._replay_service: ReplayService | None = None
         self._stream_endpoint: str | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._loop_thread: threading.Thread | None = None
-        self._runner: web.AppRunner | None = None
-        self._port: int | None = None
+        self._http = HttpServer()
         self._started = False
 
         self._received_condition = threading.Condition()
@@ -202,31 +197,8 @@ class GatewayRuntime:
         self._hwm = None
 
     def _stop_http(self) -> None:
-        loop = self._loop
-        if loop is not None and loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(
-                self._shutdown_http_on_loop(), loop
-            )
-            try:
-                future.result(timeout=10)
-            finally:
-                loop.call_soon_threadsafe(loop.stop)
-        if self._loop_thread is not None:
-            self._loop_thread.join(timeout=5)
-            self._loop_thread = None
-        if loop is not None:
-            if not loop.is_running():
-                loop.close()
-            self._loop = None
-
-    async def _shutdown_http_on_loop(self) -> None:
-        hub = self._hub
+        self._http.stop()
         self._hub = None
-        if hub is not None:
-            await hub.close()
-        if self._runner is not None:
-            await self._runner.cleanup()
-            self._runner = None
 
     def __enter__(self) -> Self:
         return self
@@ -379,13 +351,12 @@ class GatewayRuntime:
         # from here. The external ZMQ consumer already received the same frames
         # straight from the PUB socket.
         hub = self._hub
-        loop = self._loop
-        if hub is None or loop is None:
+        if hub is None:
             return
         messages = table_to_messages(table)
         with suppress(RuntimeError):
-            # The event loop is already shutting down.
-            loop.call_soon_threadsafe(hub.publish, topic, messages)
+            # The HttpServer event loop is already shutting down.
+            self._http.call_soon_threadsafe(hub.publish, topic, messages)
 
     def _wait_for_received(self, target: int) -> None:
         with self._received_condition:
@@ -405,47 +376,28 @@ class GatewayRuntime:
     # -- HTTP --------------------------------------------------------------
 
     def _start_http(self) -> None:
-        self._loop = asyncio.new_event_loop()
-        self._loop_thread = threading.Thread(
-            target=self._run_event_loop,
-            name="mdgw-http",
-            daemon=True,
-        )
-        self._loop_thread.start()
-        future = asyncio.run_coroutine_threadsafe(
-            self._start_http_on_loop(), self._loop
-        )
-        self._runner = future.result(timeout=10)
-
-    def _run_event_loop(self) -> None:
-        assert self._loop is not None
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_forever()
-
-    async def _start_http_on_loop(self) -> web.AppRunner:
-        # The hub belongs to the HTTP event loop; the runtime passes it into
-        # the app so ZMQ fan-out and the WebSocket route share one registry.
-        self._hub = WebSocketHub(
+        # Building the hub and the app does not need a running event loop, so
+        # both happen synchronously before the `HttpServer` owns the lifecycle.
+        # The runtime keeps ownership of the hub and passes it into the app so
+        # ZMQ fan-out and the WebSocket route share one registry.
+        hub = WebSocketHub(
             queue_size=self.config.streaming.queue_size,
             lag_notice_interval_ms=self.config.streaming.lag_notice_interval_ms,
         )
+        self._hub = hub
         app = create_app(
             self.store,
             instrument_store=self.instrument_store,
-            ws_hub=self._hub,
+            ws_hub=hub,
             ws_path=self.config.server.ws_path,
         )
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(
-            runner,
+        self._http.start(
+            app,
             host=self.config.server.host,
             port=self.config.server.http_port,
+            thread_name="mdgw-http",
+            on_shutdown=hub.close,
         )
-        await site.start()
-        assert site._server is not None
-        self._port = site._server.sockets[0].getsockname()[1]
-        return runner
 
     @property
     def stream_endpoint(self) -> str:
@@ -457,10 +409,8 @@ class GatewayRuntime:
 
     @property
     def base_url(self) -> str:
-        if self._port is None:
+        try:
+            return self._http.base_url
+        except RuntimeError:
             msg = "GatewayRuntime.start() must be called first"
-            raise RuntimeError(msg)
-        host = self.config.server.host
-        if host in {"0.0.0.0", "::"}:  # ruff: ignore[hardcoded-bind-all-interfaces] - compares the configured host; no socket bind
-            host = "127.0.0.1"
-        return f"http://{host}:{self._port}"
+            raise RuntimeError(msg) from None
