@@ -36,7 +36,7 @@ from mdgw.core.errors import (
     SessionNotFoundError,
     UnknownInstrumentError,
 )
-from mdgw.core.schema import BAR_SCHEMA, INTERVALS
+from mdgw.core.schema import BAR_SCHEMA, INTERVALS, bars_to_logical_table
 from mdgw.reference import (
     export_instrument_snapshot,
     load_instrument_reference,
@@ -47,6 +47,7 @@ from mdgw.replay.service import ReplayService
 from mdgw.replay.session import ReplaySessionSpec
 from mdgw.store.parquet_dataset import ParquetBarStore
 from mdgw.store.session_locks import active_session_locks, lock_path
+from mdgw.streaming import bar_topic, table_to_ipc
 
 UTC = timezone.utc
 BASE = datetime(2026, 10, 30, 0, 0, tzinfo=UTC)
@@ -177,9 +178,21 @@ class _Collector:
         self.messages: list[tuple[str, bytes]] = []
         self._lock = threading.Lock()
 
-    def __call__(self, topic: str, payload: bytes) -> None:
+    def _record(self, topic: str, payload: bytes) -> None:
         with self._lock:
             self.messages.append((topic, payload))
+
+    def publish_bar(self, session_id: str, bar: Bar) -> None:
+        self._record(
+            bar_topic(bar, namespace=f"replay.{session_id}"),
+            table_to_ipc(bars_to_logical_table([bar])),
+        )
+
+    def publish_event(self, session_id: str, event: dict[str, Any]) -> None:
+        self._record(
+            f"replay.{session_id}.control",
+            json.dumps(event, ensure_ascii=False).encode("utf-8"),
+        )
 
 
 class _BlockingPublisher:
@@ -191,12 +204,24 @@ class _BlockingPublisher:
         self.messages: list[tuple[str, bytes]] = []
         self._lock = threading.Lock()
 
-    def __call__(self, topic: str, payload: bytes) -> None:
+    def _record(self, topic: str, payload: bytes) -> None:
+        with self._lock:
+            self.messages.append((topic, payload))
+
+    def publish_bar(self, session_id: str, bar: Bar) -> None:
         if not self.entered.is_set():
             self.entered.set()
             assert self.release.wait(5), "test never released the first publish"
-        with self._lock:
-            self.messages.append((topic, payload))
+        self._record(
+            bar_topic(bar, namespace=f"replay.{session_id}"),
+            table_to_ipc(bars_to_logical_table([bar])),
+        )
+
+    def publish_event(self, session_id: str, event: dict[str, Any]) -> None:
+        self._record(
+            f"replay.{session_id}.control",
+            json.dumps(event, ensure_ascii=False).encode("utf-8"),
+        )
 
 
 class _BlockingReadStore:
@@ -241,7 +266,10 @@ def test_asap_session_streams_ordered_bars_then_end_of_session(
     _populate(store)
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: "rpl-test"
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: "rpl-test"
     )
 
     session_id = service.create_session(_spec())
@@ -296,7 +324,10 @@ def _run_once(
 ) -> list[tuple[str, bytes]]:
     collector = _Collector()
     service = ReplayService(
-        store, publish=collector, session_id_factory=lambda: session_id
+        store,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
+        session_id_factory=lambda: session_id
     )
     created = service.create_session(_spec())
     assert created == session_id
@@ -336,7 +367,10 @@ def test_stop_during_publish_sends_stopped_end_of_session(tmp_path: Path) -> Non
     _populate(store)
     publisher = _BlockingPublisher()
     service = ReplayService(
-        store, publish=publisher, session_id_factory=lambda: "rpl-stop"
+        store,
+        publish_bar=publisher.publish_bar,
+        publish_event=publisher.publish_event,
+        session_id_factory=lambda: "rpl-stop"
     )
 
     session_id = service.create_session(_spec())
@@ -358,7 +392,7 @@ def test_stop_during_publish_sends_stopped_end_of_session(tmp_path: Path) -> Non
 def test_unknown_session_raises_session_not_found(tmp_path: Path) -> None:
     store = ParquetBarStore(tmp_path / "data")
     _populate(store)
-    service = ReplayService(store, publish=lambda topic, payload: None)
+    service = ReplayService(store)
 
     with pytest.raises(SessionNotFoundError) as excinfo:
         service.stop_session("rpl-missing")
@@ -393,7 +427,8 @@ def test_delisted_instrument_still_replays(tmp_path: Path) -> None:
     collector = _Collector()
     service = ReplayService(
         store,
-        publish=collector,
+        publish_bar=collector.publish_bar,
+        publish_event=collector.publish_event,
         instrument_store=instrument_store,
         session_id_factory=lambda: "rpl-delisted",
     )
@@ -450,7 +485,10 @@ def test_session_lock_lives_for_the_run_and_is_released(tmp_path: Path) -> None:
     _populate(store)
     publisher = _BlockingPublisher()
     service = ReplayService(
-        store, publish=publisher, session_id_factory=lambda: "rpl-lock"
+        store,
+        publish_bar=publisher.publish_bar,
+        publish_event=publisher.publish_event,
+        session_id_factory=lambda: "rpl-lock"
     )
 
     session_id = service.create_session(_spec())
@@ -480,7 +518,8 @@ def test_max_sessions_rejects_an_extra_session(tmp_path: Path) -> None:
     service = ReplayService(
         store,
         max_sessions=1,
-        publish=publisher,
+        publish_bar=publisher.publish_bar,
+        publish_event=publisher.publish_event,
         session_id_factory=lambda: "rpl-only",
     )
 

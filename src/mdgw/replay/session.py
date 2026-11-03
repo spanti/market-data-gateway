@@ -18,7 +18,6 @@ Three Replay Modes share the same deterministic ordering and End of Session:
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 from bisect import bisect_left
@@ -27,7 +26,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from mdgw.bus.zmq_bus import table_to_ipc
 from mdgw.core.errors import (
     InvalidInstrumentError,
     InvalidIntervalError,
@@ -35,7 +33,7 @@ from mdgw.core.errors import (
     InvalidRangeError,
 )
 from mdgw.core.instrument import InstrumentId
-from mdgw.core.schema import INTERVALS, bars_to_logical_table
+from mdgw.core.schema import INTERVALS
 from mdgw.core.time import datetime_to_ns, iso_to_ns, ns_to_iso
 from mdgw.replay.clock import ReplayClock, validate_speed
 from mdgw.replay.source import ReplayBarSource
@@ -206,11 +204,12 @@ class SessionState(StrEnum):
         return self in {SessionState.FINISHED, SessionState.STOPPED}
 
 
-Publish = Callable[[str, bytes], None]
-
-
 class ReplaySession:
     """One Replay Session: read, stream per Replay Mode, send End of Session.
+
+    Publishing is expressed as two typed, single-argument callbacks:
+    `publish_bar(bar)` and `publish_event(mapping)`. The Session never builds
+    topics or Arrow IPC frames; that belongs to the transport adapter.
 
     Controls acquire `_cond`; the worker only holds it while inspecting or
     moving the cursor, never while publishing. That keeps control operations
@@ -222,7 +221,8 @@ class ReplaySession:
         session_id: str,
         spec: ReplaySessionSpec,
         store: ParquetBarStore,
-        publish: Publish,
+        publish_bar: Callable[[Bar], None],
+        publish_event: Callable[[Mapping[str, Any]], None],
         *,
         heartbeat_s: float = 1.0,
     ) -> None:
@@ -230,7 +230,8 @@ class ReplaySession:
         self.spec = spec
         self._store = store
         self._source = ReplayBarSource(store)
-        self._publish = publish
+        self._publish_bar = publish_bar
+        self._publish_event = publish_event
         self._heartbeat_s = heartbeat_s
 
         self._state = SessionState.CREATED
@@ -594,28 +595,14 @@ class ReplaySession:
 
     # -- wire format -------------------------------------------------------
 
-    def _market_topic(self, bar: Bar) -> str:
-        # `replay.<session_id>.` prefixes the Streaming Interface topic.
-        return (
-            f"replay.{self.session_id}.market.bar."
-            f"{bar.interval}.{bar.instrument_id}"
-        )
-
-    def _publish_bar(self, bar: Bar) -> None:
-        payload = table_to_ipc(bars_to_logical_table([bar]))
-        self._publish(self._market_topic(bar), payload)
-
     def _publish_end_of_session(self, reason: str) -> None:
-        payload = {
+        event = {
             "op": "end_of_session",
             "session_id": self.session_id,
             "reason": reason,
             "bars_sent": self._bars_sent,
         }
-        self._publish(
-            f"replay.{self.session_id}.control",
-            json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        )
+        self._publish_event(event)
         logger.info(
             "replay end of session",
             extra={
