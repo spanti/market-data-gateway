@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import json
 import logging
@@ -10,8 +9,7 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from aiohttp import web
-
+from mdgw.api.http_server import HttpServer
 from mdgw.api.server import create_app
 from mdgw.api.ws_hub import WebSocketHub
 from mdgw.bus.zmq_bus import READY_TOPIC, ZMQBus, ipc_to_table
@@ -60,10 +58,7 @@ class ApiService:
         self._ready_event: threading.Event | None = None
 
         self._hub: WebSocketHub | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._loop_thread: threading.Thread | None = None
-        self._runner: web.AppRunner | None = None
-        self._port: int | None = None
+        self._http = HttpServer()
 
         self._stop = threading.Event()
         self._ready_thread: threading.Thread | None = None
@@ -146,18 +141,17 @@ class ApiService:
 
     @property
     def base_url(self) -> str:
-        if self._port is None:
-            raise RuntimeError(_NOT_STARTED_MESSAGE)
-        host = self.config.server.host
-        if host in {"0.0.0.0", "::"}:  # ruff: ignore[hardcoded-bind-all-interfaces] - compares the configured host; no socket bind
-            host = "127.0.0.1"
-        return f"http://{host}:{self._port}"
+        try:
+            return self._http.base_url
+        except RuntimeError as exc:
+            raise RuntimeError(_NOT_STARTED_MESSAGE) from exc
 
     @property
     def http_port(self) -> int:
-        if self._port is None:
-            raise RuntimeError(_NOT_STARTED_MESSAGE)
-        return self._port
+        try:
+            return self._http.bound_port
+        except RuntimeError as exc:
+            raise RuntimeError(_NOT_STARTED_MESSAGE) from exc
 
     @property
     def publish_endpoint(self) -> str:
@@ -207,12 +201,11 @@ class ApiService:
                 )
 
         hub = self._hub
-        loop = self._loop
-        if hub is None or loop is None:
+        if hub is None:
             return
         messages = table_to_messages(table)
-        with contextlib.suppress(RuntimeError):  # pragma: no cover - closed loop
-            loop.call_soon_threadsafe(hub.publish, topic, messages)
+        with contextlib.suppress(RuntimeError):  # pragma: no cover - stopped server
+            self._http.call_soon_threadsafe(hub.publish, topic, messages)
 
     def _run_ready_loop(self) -> None:
         # Only advertise READY once the collector handshake was observed. That
@@ -261,11 +254,15 @@ class ApiService:
         }
 
     def status_payload(self) -> dict:
+        try:
+            http_port = self._http.bound_port
+        except RuntimeError:
+            http_port = None
         return {
             "service": "api",
             "role": "api",
             "uptime_s": self._uptime_s(),
-            "http": {"host": self.config.server.host, "port": self._port},
+            "http": {"host": self.config.server.host, "port": http_port},
             "zmq": {
                 "publish_endpoint": self._publish_endpoint,
                 "collector_endpoint": self.config.bus.collector_pub_connect,
@@ -311,24 +308,6 @@ class ApiService:
     # -- HTTP --------------------------------------------------------------
 
     def _start_http(self) -> None:
-        self._loop = asyncio.new_event_loop()
-        self._loop_thread = threading.Thread(
-            target=self._run_event_loop,
-            name="mdgw-api-http",
-            daemon=True,
-        )
-        self._loop_thread.start()
-        future = asyncio.run_coroutine_threadsafe(
-            self._start_http_on_loop(), self._loop
-        )
-        self._runner = future.result(timeout=10)
-
-    def _run_event_loop(self) -> None:
-        assert self._loop is not None
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_forever()
-
-    async def _start_http_on_loop(self) -> web.AppRunner:
         self._hub = WebSocketHub(
             queue_size=self.config.streaming.queue_size,
             lag_notice_interval_ms=self.config.streaming.lag_notice_interval_ms,
@@ -344,44 +323,17 @@ class ApiService:
             ready_provider=self.ready_payload,
             service_role="api",
         )
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(
-            runner,
+        self._http.start(
+            app,
             host=self.config.server.host,
             port=self.config.server.http_port,
+            thread_name="mdgw-api-http",
+            on_shutdown=self._hub.close,
         )
-        await site.start()
-        assert site._server is not None
-        self._port = site._server.sockets[0].getsockname()[1]
-        return runner
 
     def _stop_http(self) -> None:
-        loop = self._loop
-        if loop is not None and loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(
-                self._shutdown_http_on_loop(), loop
-            )
-            try:
-                future.result(timeout=10)
-            finally:
-                loop.call_soon_threadsafe(loop.stop)
-        if self._loop_thread is not None:
-            self._loop_thread.join(timeout=5)
-            self._loop_thread = None
-        if loop is not None:
-            if not loop.is_running():
-                loop.close()
-            self._loop = None
-
-    async def _shutdown_http_on_loop(self) -> None:
-        hub = self._hub
+        self._http.stop()
         self._hub = None
-        if hub is not None:
-            await hub.close()
-        if self._runner is not None:
-            await self._runner.cleanup()
-            self._runner = None
 
 
 __all__ = ["ApiService"]
