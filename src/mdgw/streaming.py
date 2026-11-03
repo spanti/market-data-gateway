@@ -192,54 +192,55 @@ class StreamingInterface:
                 raise RuntimeError(msg)
 
             context = zmq.Context()
-            publisher: zmq.Socket | None = None
-            sub_stop: threading.Event | None = None
-            sub_thread: threading.Thread | None = None
+            self._context = context
             try:
-                publisher = context.socket(zmq.PUB)
-                publisher.setsockopt(zmq.SNDHWM, self._zmq_hwm)
-                publisher.setsockopt(zmq.LINGER, 0)
-                resolved: list[str] = []
-                for endpoint in self._bind:
-                    publisher.bind(endpoint)
-                    resolved.append(
-                        publisher.getsockopt_string(zmq.LAST_ENDPOINT)
-                    )
-
-                # Commit the running state before the subscriber thread starts:
-                # a peer may already be publishing, and a forwarded frame must
-                # see a fully usable interface rather than a half-built one.
-                self._context = context
-                self._publisher = publisher
-                self._resolved_endpoints = tuple(resolved)
-                self._state = "started"
-
-                if self._connect is not None:
-                    sub_stop = threading.Event()
-                    sub_thread = threading.Thread(
-                        target=self._run_subscriber,
-                        args=(context, sub_stop),
-                        name="mdgw-streaming-subscriber",
-                        daemon=True,
-                    )
-                    self._sub_stop = sub_stop
-                    self._sub_thread = sub_thread
-                    sub_thread.start()
+                self._open(context)
             except BaseException:
-                self._state = "new"
-                self._context = None
-                self._publisher = None
-                self._resolved_endpoints = ()
-                self._sub_stop = None
-                self._sub_thread = None
-                if sub_stop is not None:
-                    sub_stop.set()
-                if sub_thread is not None:
-                    sub_thread.join(timeout=2.0)
-                if publisher is not None:
-                    publisher.close(linger=0)
-                context.term()
+                self._discard_start(context)
                 raise
+
+    def _open(self, context: zmq.Context) -> None:
+        publisher = context.socket(zmq.PUB)
+        self._publisher = publisher
+        publisher.setsockopt(zmq.SNDHWM, self._zmq_hwm)
+        publisher.setsockopt(zmq.LINGER, 0)
+        resolved: list[str] = []
+        for endpoint in self._bind:
+            publisher.bind(endpoint)
+            resolved.append(publisher.getsockopt_string(zmq.LAST_ENDPOINT))
+
+        # Commit the running state before the subscriber thread starts: a peer
+        # may already be publishing, and a forwarded frame must see a fully
+        # usable interface rather than a half-built one.
+        self._resolved_endpoints = tuple(resolved)
+        self._state = "started"
+
+        if self._connect is not None:
+            sub_stop = threading.Event()
+            sub_thread = threading.Thread(
+                target=self._run_subscriber,
+                args=(context, sub_stop),
+                name="mdgw-streaming-subscriber",
+                daemon=True,
+            )
+            self._sub_stop = sub_stop
+            self._sub_thread = sub_thread
+            sub_thread.start()
+
+    def _discard_start(self, context: zmq.Context) -> None:
+        self._state = "new"
+        self._resolved_endpoints = ()
+        sub_stop, self._sub_stop = self._sub_stop, None
+        sub_thread, self._sub_thread = self._sub_thread, None
+        publisher, self._publisher = self._publisher, None
+        self._context = None
+        if sub_stop is not None:
+            sub_stop.set()
+        if sub_thread is not None:
+            sub_thread.join(timeout=2.0)
+        if publisher is not None:
+            publisher.close(linger=0)
+        context.term()
 
     def stop(self) -> None:
         """Stop the READY heartbeat and subscriber, close sockets, term context."""
@@ -511,24 +512,32 @@ class StreamingInterface:
         poller.register(socket, zmq.POLLIN)
         try:
             socket.connect(self._connect)
-            while not stop_event.is_set():
-                ready = dict(poller.poll(_POLL_INTERVAL_MS))
-                if ready.get(socket) != zmq.POLLIN:
-                    continue
-                try:
-                    frames = socket.recv_multipart()
-                except zmq.ZMQError:
-                    if stop_event.is_set():
-                        break
-                    logger.exception("failed to receive a streaming frame")
-                    continue
-                self._dispatch_frame(frames)
+            self._pump_subscriber(socket, poller, stop_event)
         except Exception:
             if not stop_event.is_set():
                 logger.exception("streaming subscriber thread failed")
         finally:
             poller.unregister(socket)
             socket.close()
+
+    def _pump_subscriber(
+        self,
+        socket: zmq.Socket,
+        poller: zmq.Poller,
+        stop_event: threading.Event,
+    ) -> None:
+        while not stop_event.is_set():
+            ready = dict(poller.poll(_POLL_INTERVAL_MS))
+            if ready.get(socket) != zmq.POLLIN:
+                continue
+            try:
+                frames = socket.recv_multipart()
+            except zmq.ZMQError:
+                if stop_event.is_set():
+                    return
+                logger.exception("failed to receive a streaming frame")
+                continue
+            self._dispatch_frame(frames)
 
     def _dispatch_frame(self, frames: list[bytes]) -> None:
         if len(frames) != 2:
