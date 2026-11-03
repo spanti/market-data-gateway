@@ -4,10 +4,14 @@
 
 **Blocked by:** 03, 06
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] `mdgw backfill --archive` 读取日/月 K 线归档。
-- [ ] 时间戳 ms/µs 判定。
-- [ ] 写入遵循 Data Contract、Manifest、HWM。
-- [ ] 与 Compaction/Retention 协同。
-- [ ] 测试使用本地 fixture，不依赖网络。
+- [x] `mdgw backfill --archive` 读取日/月 K 线归档。
+- [x] 时间戳 ms/µs 判定。
+- [x] 写入遵循 Data Contract、Manifest、HWM。
+- [x] 与 Compaction/Retention 协同。
+- [x] 测试使用本地 fixture，不依赖网络。
+
+## Comments
+
+- Resolved in `integration/market-data-gateway-v1` after the v1 delivery code review and follow-up fixes.

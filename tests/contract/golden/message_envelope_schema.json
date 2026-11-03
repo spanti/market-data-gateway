@@ -1,0 +1,11 @@
+{
+  "fields": [
+    {"name": "schema_version", "type": "uint16", "nullable": false},
+    {"name": "data_type", "type": "string", "nullable": false},
+    {"name": "instrument_id", "type": "string", "nullable": false},
+    {"name": "event_ts", "type": "timestamp[ns, tz=UTC]", "nullable": false},
+    {"name": "ingest_ts", "type": "timestamp[ns, tz=UTC]", "nullable": false},
+    {"name": "feed", "type": "string", "nullable": false},
+    {"name": "seq", "type": "int64", "nullable": true}
+  ]
+}

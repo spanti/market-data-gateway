@@ -4,9 +4,13 @@
 
 **Blocked by:** 11, 12, 13
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 四类消费者示例可运行：直接读 Parquet、REST、WebSocket、Replay。
-- [ ] Data Contract 文档（字段、语义、错误码）。
-- [ ] Ingestion/Query/Replay 基准脚本与结果。
-- [ ] README 一条命令跑通全套。
+- [x] 四类消费者示例可运行：直接读 Parquet、REST、WebSocket、Replay。
+- [x] Data Contract 文档（字段、语义、错误码）。
+- [x] Ingestion/Query/Replay 基准脚本与结果。
+- [x] README 一条命令跑通全套。
+
+## Comments
+
+- Resolved in `integration/market-data-gateway-v1` after the v1 delivery code review and follow-up fixes.

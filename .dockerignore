@@ -1,0 +1,35 @@
+# Keep the Docker build context to what the image actually needs:
+# pyproject.toml, src/ and config/. Everything else is excluded.
+.git
+.github
+.claude
+.scratch
+.vscode
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+
+# Runtime and demo data must never enter an image layer.
+data/
+data-demo/
+
+# Development and delivery files that are not part of the runtime image.
+tests/
+examples/
+benchmarks/
+docs/
+README.md
+DESIGN.md
+GLOSSARY.md
+需求整理.md
+environment.yml
+docker-compose.yml

@@ -1,0 +1,107 @@
+# Runtime configuration for the Market Data Gateway.
+# Instrument Reference Data lives separately under config/instruments/*.yaml.
+
+[server]
+host = "127.0.0.1"
+http_port = 8080
+ws_path = "/ws"
+
+[bus]
+# `transport` only describes the single-process `GatewayRuntime` internal
+# transport. Multi-process Service Roles always use the explicit `tcp://`
+# endpoints below, regardless of this value.
+transport = "tcp"
+zmq_hwm = 10000
+# External Streaming Interface PUB endpoint (port 0 = ephemeral).
+stream_bind_host = "127.0.0.1"
+stream_pub_port = 0
+# Multi-process Service Role endpoints. Only tcp:// is accepted (Windows
+# pyzmq builds cannot bind ipc://). `mdgw run --service collector` binds
+# collector_pub_bind; the api connects to collector_pub_connect and binds
+# api_pub_bind for external consumers.
+collector_pub_bind = "tcp://127.0.0.1:5555"
+collector_pub_connect = "tcp://127.0.0.1:5555"
+api_pub_bind = "tcp://127.0.0.1:5556"
+# The collector connects to the api PUB here to observe its READY handshake.
+api_pub_connect = "tcp://127.0.0.1:5556"
+
+[service]
+# Health/metrics listeners for collector and replay; the api uses http_port.
+health_host = "127.0.0.1"
+collector_health_port = 8081
+replay_health_port = 8082
+log_level = "INFO"
+startup_delay_s = 1.0
+collector_required = false
+collector_ready_timeout_s = 30.0
+# Ask the collector to wait for the api READY handshake before ingesting.
+# Standalone collectors default off; `mdgw up` and Docker enable it.
+wait_for_api_ready = false
+api_ready_timeout_s = 30.0
+
+[streaming]
+# Per-session WebSocket queue; overflow drops the oldest and sends lag_notice.
+queue_size = 1000
+lag_notice_interval_ms = 1000
+
+[replay]
+# Replay Service Role: ZMQ control REP + market PUB endpoints.
+# Port 0 picks an ephemeral port; the resolved endpoint is advertised on
+# create_session.
+control_bind_host = "127.0.0.1"
+control_port = 0
+publish_bind_host = "127.0.0.1"
+publish_port = 0
+max_sessions = 4
+heartbeat_s = 1.0
+
+[storage]
+root = "./data"
+schema_version = 1
+format_version = "2.6"
+compression = "zstd"
+row_group_size = 1000000
+# Flush the collector write buffer on whichever limit is reached first.
+# Setting either value to 0 (or less) flushes after every ingest batch.
+flush_max_bytes = 67108864
+flush_max_age_s = 3600
+
+[retention]
+enabled = false
+bars_days = 0   # 0 = keep forever
+
+[collector]
+# Backfill starts from the HWM; without one it looks back this many hours.
+backfill_hours = 24
+# Stale threshold is max(2 x Bar Interval, stale_after_s).
+stale_after_s = 120
+# SQLite HWM database under the storage root.
+state_db_name = "state.db"
+# Bounded queue between ingest and the collector writer. When full, the
+# oldest Bar is dropped and counted in the lag/dropped metrics.
+write_queue_size = 10000
+
+[aggregation]
+base_interval = "1m"
+intervals = ["1m", "5m", "15m", "1h", "1d"]
+retention_parent_periods = 2
+
+[instruments]
+# Instrument Reference Data truth source (`*.yaml` files).
+path = "config/instruments"
+
+# One Feed Handler per [[feeds]] entry. The ccxt Feed Handler connects a Venue,
+# watches native 1m K-lines, and backfills history through fetch_ohlcv.
+[[feeds]]
+name = "binance_spot"
+kind = "ccxt"
+venue = "binance"
+market_type = "spot"
+enable_rate_limit = true
+data_types = ["bar"]
+symbols = ["BTC/USDT", "ETH/USDT"]
+backfill_hours = 24
+stale_after_s = 120
+# Retained for the collector batching ticket; not consumed by the Feed Handler.
+batch_window_ms = 100
+batch_max_events = 500

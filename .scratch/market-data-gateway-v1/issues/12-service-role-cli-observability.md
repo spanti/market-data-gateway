@@ -4,11 +4,15 @@
 
 **Blocked by:** 07, 08, 10
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] `mdgw run --service collector|api|replay`。
-- [ ] `mdgw up` 按 collector → ready → api 顺序拉起并负责重启。
-- [ ] `/healthz`、`/readyz`、`/status`、`/metrics`。
-- [ ] 结构化 JSON 日志，带 request/session/instrument。
-- [ ] docker-compose；Windows 默认 `tcp://127.0.0.1`。
-- [ ] 多进程集成测试通过。
+- [x] `mdgw run --service collector|api|replay`。
+- [x] `mdgw up` 按 collector → ready → api 顺序拉起并负责重启。
+- [x] `/healthz`、`/readyz`、`/status`、`/metrics`。
+- [x] 结构化 JSON 日志，带 request/session/instrument。
+- [x] docker-compose；Windows 默认 `tcp://127.0.0.1`。
+- [x] 多进程集成测试通过。
+
+## Comments
+
+- Resolved in `integration/market-data-gateway-v1` after the v1 delivery code review and follow-up fixes.

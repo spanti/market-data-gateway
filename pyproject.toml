@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "market-data-gateway"
+version = "0.1.0"
+description = "Market Data Gateway: framework-neutral market data contract and services"
+requires-python = ">=3.13"
+dependencies = [
+    "pyarrow>=18",
+    "pyzmq>=26",
+    "aiohttp>=3.14",
+    "PyYAML>=6",
+    "pydantic>=2.9",
+    "ccxt>=4.5",
+]
+
+[project.scripts]
+mdgw = "mdgw.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8", "websockets>=13"]
+client-ws = ["websockets>=13"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Import `mdgw` from this checkout's `src/`, not from another editable install.
+pythonpath = ["src"]
+addopts = "-ra -m 'not network'"
+markers = [
+    "network: tests that reach a real Venue (skipped by default)",
+]

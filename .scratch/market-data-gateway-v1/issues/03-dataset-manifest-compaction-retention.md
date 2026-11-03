@@ -4,11 +4,15 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Hive key=value 分区；symbol 百分号编码；Data File 命名与不可变性。
-- [ ] `_dataset.json` 与 `_manifest.json`；读取路径先读 Manifest。
-- [ ] `mdgw compact --older-than` 合并小文件并原子切换 Manifest。
-- [ ] `mdgw gc --dry-run/--apply` 只删除整月分区，跳过当前月与活跃 Replay Session。
-- [ ] `/api/v1/status` 暴露 last_flushed_ts、Data File 数量与中位大小。
-- [ ] 测试覆盖路径编码、Manifest 切换、Compaction、GC。
+- [x] Hive key=value 分区；symbol 百分号编码；Data File 命名与不可变性。
+- [x] `_dataset.json` 与 `_manifest.json`；读取路径先读 Manifest。
+- [x] `mdgw compact --older-than` 合并小文件并原子切换 Manifest。
+- [x] `mdgw gc --dry-run/--apply` 只删除整月分区，跳过当前月与活跃 Replay Session。
+- [x] `/api/v1/status` 暴露 last_flushed_ts、Data File 数量与中位大小。
+- [x] 测试覆盖路径编码、Manifest 切换、Compaction、GC。
+
+## Comments
+
+- Resolved in `integration/market-data-gateway-v1` after the v1 delivery code review and follow-up fixes.

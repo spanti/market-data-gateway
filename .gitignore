@@ -13,9 +13,11 @@ htmlcov/
 
 # Runtime data
 data/
+data-demo/
 
 # Editor
 .vscode/
+.claude/
 
 # OS
 Thumbs.db

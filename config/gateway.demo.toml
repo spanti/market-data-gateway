@@ -1,0 +1,96 @@
+# Local demo configuration.
+#
+# `mdgw up --config config/gateway.demo.toml` starts collector -> api on
+# loopback with a deterministic, offline fake feed. Run the replay role in a
+# second terminal:
+#
+#   mdgw run --service replay --config config/gateway.demo.toml
+#
+# Every port is fixed so the commands in README.md / examples/README.md can be
+# copied verbatim. Data goes to ./data-demo, not the default ./data.
+
+[server]
+host = "127.0.0.1"
+http_port = 8080
+ws_path = "/ws"
+
+[bus]
+# Service Roles always use the explicit tcp:// endpoints below.
+transport = "tcp"
+zmq_hwm = 10000
+stream_bind_host = "127.0.0.1"
+stream_pub_port = 0
+collector_pub_bind = "tcp://127.0.0.1:5555"
+collector_pub_connect = "tcp://127.0.0.1:5555"
+api_pub_bind = "tcp://127.0.0.1:5556"
+api_pub_connect = "tcp://127.0.0.1:5556"
+
+[service]
+health_host = "127.0.0.1"
+collector_health_port = 8081
+replay_health_port = 8082
+log_level = "INFO"
+# Tiny settle delay; the api READY handshake does the real synchronisation.
+startup_delay_s = 0.2
+collector_required = true
+collector_ready_timeout_s = 30.0
+wait_for_api_ready = true
+api_ready_timeout_s = 30.0
+
+[streaming]
+queue_size = 1000
+lag_notice_interval_ms = 1000
+
+[replay]
+control_bind_host = "127.0.0.1"
+control_port = 5557
+publish_bind_host = "127.0.0.1"
+publish_port = 5558
+max_sessions = 4
+heartbeat_s = 1.0
+
+[storage]
+# Demo data lives beside the checkout and is git-ignored, so it never mixes
+# with a real ./data Dataset.
+root = "./data-demo"
+schema_version = 1
+format_version = "2.6"
+compression = "zstd"
+row_group_size = 1000000
+flush_max_bytes = 67108864
+# The offline demo has only a handful of Bars, so flush by age quickly instead
+# of waiting the production default of one hour.
+flush_max_age_s = 5
+
+[retention]
+enabled = false
+bars_days = 0
+
+[collector]
+backfill_hours = 24
+stale_after_s = 120
+state_db_name = "state.db"
+write_queue_size = 10000
+
+[aggregation]
+base_interval = "1m"
+intervals = ["1m", "5m", "15m", "1h", "1d"]
+retention_parent_periods = 2
+
+[instruments]
+path = "config/instruments"
+
+# Offline demo feed: the same 20 closed 1m Bars are generated for each symbol.
+# It is one-shot, so restart the collector to replay the live stream.
+[[feeds]]
+name = "fake_spot"
+kind = "fake"
+venue = "binance"
+market_type = "spot"
+enable_rate_limit = false
+data_types = ["bar"]
+symbols = ["BTC/USDT", "ETH/USDT"]
+backfill_hours = 24
+stale_after_s = 120
+fake_bars = 20
+fake_price = "100"

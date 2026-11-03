@@ -1,0 +1,66 @@
+services:
+  collector:
+    build: .
+    command:
+      - mdgw
+      - run
+      - --service
+      - collector
+      - --wait-for-api
+      - --config
+      - config/gateway.docker.toml
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "5555:5555"
+      - "8081:8081"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8081/readyz', timeout=2).status == 200 else 1)"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  api:
+    build: .
+    command:
+      - mdgw
+      - run
+      - --service
+      - api
+      - --config
+      - config/gateway.docker.toml
+    depends_on:
+      collector:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8080:8080"
+      - "5556:5556"
+    restart: unless-stopped
+
+  replay:
+    build: .
+    command:
+      - mdgw
+      - run
+      - --service
+      - replay
+      - --config
+      - config/gateway.docker.toml
+    depends_on:
+      collector:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "5557:5557"
+      - "5558:5558"
+      - "8082:8082"
+    restart: unless-stopped

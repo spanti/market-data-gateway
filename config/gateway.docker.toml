@@ -1,0 +1,91 @@
+# Docker/docker-compose runtime configuration.
+#
+# Every Service Role binds on 0.0.0.0 inside the container; peers reach each
+# other by compose service name. Only tcp:// endpoints are accepted.
+
+[server]
+host = "0.0.0.0"
+http_port = 8080
+ws_path = "/ws"
+
+[bus]
+# `transport` only describes the single-process `GatewayRuntime` internal
+# transport; Service Roles use the explicit tcp:// endpoints below.
+transport = "tcp"
+zmq_hwm = 10000
+stream_bind_host = "0.0.0.0"
+stream_pub_port = 0
+# collector binds 5555 everywhere; api connects to the collector service name
+# and exposes its own PUB for external consumers. The collector observes that
+# PUB for the api READY handshake.
+collector_pub_bind = "tcp://0.0.0.0:5555"
+collector_pub_connect = "tcp://collector:5555"
+api_pub_bind = "tcp://0.0.0.0:5556"
+api_pub_connect = "tcp://api:5556"
+
+[service]
+health_host = "0.0.0.0"
+collector_health_port = 8081
+replay_health_port = 8082
+log_level = "INFO"
+startup_delay_s = 2.0
+collector_required = true
+collector_ready_timeout_s = 60.0
+wait_for_api_ready = true
+api_ready_timeout_s = 60.0
+
+[streaming]
+queue_size = 1000
+lag_notice_interval_ms = 1000
+
+[replay]
+control_bind_host = "0.0.0.0"
+control_port = 5557
+publish_bind_host = "0.0.0.0"
+publish_port = 5558
+max_sessions = 4
+heartbeat_s = 1.0
+
+[storage]
+root = "/app/data"
+schema_version = 1
+format_version = "2.6"
+compression = "zstd"
+row_group_size = 1000000
+flush_max_bytes = 67108864
+# The compose stack is an offline demo; flush quickly so REST history is
+# visible without waiting the production default of one hour.
+flush_max_age_s = 5
+
+[retention]
+enabled = false
+bars_days = 0
+
+[collector]
+backfill_hours = 24
+stale_after_s = 120
+state_db_name = "state.db"
+write_queue_size = 10000
+
+[aggregation]
+base_interval = "1m"
+intervals = ["1m", "5m", "15m", "1h", "1d"]
+retention_parent_periods = 2
+
+[instruments]
+path = "config/instruments"
+
+# The compose stack is an offline development/delivery demo: the deterministic
+# fake feed emits 10 closed 1m Bars and never reaches a Venue.
+[[feeds]]
+name = "fake_spot"
+kind = "fake"
+venue = "binance"
+market_type = "spot"
+enable_rate_limit = false
+data_types = ["bar"]
+symbols = ["BTC/USDT"]
+backfill_hours = 24
+stale_after_s = 120
+fake_bars = 10
+fake_price = "100"
