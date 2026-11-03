@@ -141,11 +141,17 @@ class ApiService:
 
     @property
     def base_url(self) -> str:
-        return self._http.base_url
+        try:
+            return self._http.base_url
+        except RuntimeError as exc:
+            raise RuntimeError(_NOT_STARTED_MESSAGE) from exc
 
     @property
     def http_port(self) -> int:
-        return self._http.bound_port
+        try:
+            return self._http.bound_port
+        except RuntimeError as exc:
+            raise RuntimeError(_NOT_STARTED_MESSAGE) from exc
 
     @property
     def publish_endpoint(self) -> str:

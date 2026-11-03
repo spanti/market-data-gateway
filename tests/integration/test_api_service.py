@@ -15,6 +15,8 @@ import threading
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 from mdgw.config import load_config
 from mdgw.service.api import ApiService
 
@@ -22,6 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 HTTP_THREAD_NAME = "mdgw-api-http"
 WAIT_TIMEOUT_S = 15.0
 HOST = "127.0.0.1"
+NOT_STARTED_MESSAGE = r"ApiService\.start\(\) must be called first"
 
 
 def _config():
@@ -84,3 +87,23 @@ def test_api_service_serves_operational_endpoints_without_a_collector(
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         probe.bind((HOST, port))
+
+
+def test_base_url_and_http_port_require_start(tmp_path: Path) -> None:
+    service = ApiService(_config(), data_root=tmp_path)
+
+    with pytest.raises(RuntimeError, match=NOT_STARTED_MESSAGE):
+        _ = service.base_url
+    with pytest.raises(RuntimeError, match=NOT_STARTED_MESSAGE):
+        _ = service.http_port
+
+    try:
+        service.start()
+        assert service.http_port > 0
+    finally:
+        service.stop()
+
+    with pytest.raises(RuntimeError, match=NOT_STARTED_MESSAGE):
+        _ = service.base_url
+    with pytest.raises(RuntimeError, match=NOT_STARTED_MESSAGE):
+        _ = service.http_port
