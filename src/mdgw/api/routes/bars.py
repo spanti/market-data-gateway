@@ -1,9 +1,8 @@
 """Bar history endpoints: JSON, Arrow IPC stream, CSV and file export.
 
-This is the FastAPI port of the aiohttp Bar handlers. Every format reads
-through the same batch iterator, so JSON / Arrow / CSV / export cannot drift
-apart. Store calls run on worker threads; streaming bodies are never
-materialised in full.
+Every format reads through the same batch iterator, so JSON / Arrow / CSV /
+export cannot drift apart. Store calls run on worker threads; streaming bodies
+are never materialised in full.
 """
 
 from __future__ import annotations
@@ -273,15 +272,42 @@ async def _respond_json(store: ParquetBarStore, query: BarQuery) -> Response:
             details={"row_count": total, "limit": JSON_ROW_LIMIT},
         )
 
+    # Pagination metadata is a single-Instrument feature: it needs both
+    # `instrument` and `limit` (limit=0 counts) to be unambiguous.
+    paginated = query.instrument is not None and query.limit is not None
+    # Read one extra row so the next page's inclusive `start` is known.
+    read_limit = query.limit + 1 if paginated else query.limit
+
     table = await asyncio.to_thread(
         store.read_bars,
         instrument_id=query.instrument,
         interval=query.interval,
         start_ns=query.start_ns,
         end_ns=query.end_ns,
-        limit=query.limit,
+        limit=read_limit,
     )
-    return JSONResponse({"bars": table_to_messages(table)})
+    if not paginated:
+        return JSONResponse({"bars": table_to_messages(table)})
+
+    assert query.limit is not None  # narrowed by `paginated`
+    limit = query.limit
+    # The paginated JSON surface has an explicit ordering contract: open_ts
+    # ascending. Non-paginated JSON and the streaming formats keep storage
+    # order.
+    if table.num_rows > 1:
+        table = table.sort_by([("open_ts", "ascending")])
+
+    has_more = table.num_rows > limit
+    next_start: str | None = None
+    if has_more:
+        next_ns = table.column("open_ts").cast(pa.int64())[limit].as_py()
+        next_start = ns_to_iso(next_ns)
+    return JSONResponse(
+        {
+            "bars": table_to_messages(table.slice(0, limit)),
+            "page": {"has_more": has_more, "next_start": next_start},
+        }
+    )
 
 
 # -- Arrow stream -----------------------------------------------------------

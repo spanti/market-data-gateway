@@ -122,6 +122,40 @@ and by `GET /api/v1/bars?format=json`):
 
 The JSON `bars` endpoint returns `{"bars": [<envelope>, ...]}`.
 
+### Paginated JSON Bars
+
+When a JSON Bars query supplies **both** `instrument` and `limit` (a `limit`
+of `0` counts), the response adds a `page` object:
+
+```json
+{
+  "bars": ["<Message Envelope>", "..."],
+  "page": {"has_more": true, "next_start": "2026-10-30T12:35:00.000000000Z"}
+}
+```
+
+- `next_start` is the `open_ts` of the first Bar **not** returned on this
+  page, as an ISO-8601 nanosecond string. Use it as the next request's
+  `start`; because `start` is inclusive, pages neither duplicate nor skip
+  Bars.
+- `has_more` is true only when another Bar exists inside the half-open
+  `[start, end)` window after the rows returned on this page. Rows at or
+  after `end` never affect `has_more` or `next_start`.
+- `limit=0` returns an empty `bars` array but still reports whether a
+  matching Bar exists; when one does, `has_more` is `true` and `next_start`
+  is the first Bar's `open_ts`.
+- When there is no more data, `has_more` is `false` and `next_start` is
+  `null`.
+
+**Ordering contract.** Paginated JSON Bars are ordered by `open_ts`
+ascending. The non-paginated JSON response, Arrow, CSV and export keep the
+storage order and make no total-order promise.
+
+Because one `next_start` value cannot represent per-Instrument progress,
+pagination is not offered for multi-Instrument queries: queries missing
+either `instrument` or `limit` keep exactly the `{"bars": [...]}` shape.
+`/api/v1/instruments`, Arrow, CSV and export are never paginated.
+
 ## 4. Instrument
 
 `INSTRUMENT_SCHEMA` in `src/mdgw/core/schema.py`:
