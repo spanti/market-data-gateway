@@ -4,7 +4,9 @@ This document is the consumer-facing contract for the Market Data Gateway v1.
 It describes the Arrow schema, the JSON/CSV wire forms, the Parquet Dataset
 layout, the Streaming Interface topics, the Replay Protocol and the stable
 error codes. `DESIGN.md` is the design rationale; this file is what a client
-should code against.
+should code against. The gateway also serves `/openapi.json` and `/docs`, but
+those are generated, non-normative documentation: where they disagree with
+this file, this file wins.
 
 v1 carries **Bar** data only. Every payload has `schema_version = 1`.
 
@@ -370,6 +372,8 @@ the status.
 |---|---|---|
 | `invalid_instrument` | malformed `<venue>:<symbol>` | 400 |
 | `instrument_not_found` | unknown Instrument in the snapshot | 404 |
+| `not_found` | unknown path or unmatched route (including `/redoc`) | 404 |
+| `method_not_allowed` | known path with an unsupported HTTP method (HEAD is not in the contract) | 405 |
 | `invalid_interval` | interval outside the Data Contract | 400 |
 | `invalid_parameter` | missing/invalid control or query field | 400 |
 | `invalid_format` | unsupported `format` value | 400 |
@@ -377,12 +381,16 @@ the status.
 | `range_too_large` | JSON response would exceed 100,000 Bars | 400 |
 | `schema_version_mismatch` | Dataset written under another contract version | 409 |
 | `session_not_found` | control op references an unknown Replay Session | 404 |
+| `rate_limited` | request exceeded the per-IP/per-route limit (only when `[rate_limit].enabled = true`); `details.retry_after_s` matches the `Retry-After` header | 429 |
 | `internal_error` | unexpected server failure | 500 |
 
-REST errors use the envelope
-`{"error": {"code", "message", "details", "request_id"}}`; the same
+Every REST failure — including `not_found`, `method_not_allowed`,
+`rate_limited` and parameter-validation errors — uses the envelope
+`{"error": {"code", "message", "details", "request_id"}}`. The same
 `request_id` is returned in the `X-Request-ID` response header and in the JSON
-request log. Replay control errors use
+request log; an inbound `X-Request-ID` is preserved, otherwise one is
+generated. Validation failures return 400 with a stable code above, never
+FastAPI's default 422 `{"detail": ...}`. Replay control errors use
 `{"ok": false, "error": {"code", "message"}}` with the same codes.
 
 The client SDK additionally reports transport-level failures under its own

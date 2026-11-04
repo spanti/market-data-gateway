@@ -5,7 +5,9 @@ dependencies:
   - python=3.13
   - pyarrow
   - pyzmq
-  - aiohttp
+  - fastapi
+  - uvicorn
+  - websockets
   - pyyaml
   - pydantic
   - typer

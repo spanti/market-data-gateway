@@ -1,6 +1,6 @@
 # HTTP 面统一迁移到 FastAPI/ASGI，退役 aiohttp
 
-api Service Role 的 REST 与 WebSocket 面，以及 collector / replay 的 `/healthz`、`/readyz`、`/metrics`、`/status` 运维端点，统一由 FastAPI（Starlette/ASGI）承担；旧的手写 aiohttp 分发与 aiohttp 专用 `HttpServer` 退役。迁移后仓库只保留一套服务器栈，路由按资源拆分，`create_app(...)` 的名称与参数形状保持不变。本决定显式取代 `DESIGN.md` §12「已拒绝的方案」中的「Flask + gevent 或 FastAPI 等 Web 框架」一条（约第 465 行）：原先拒绝的理由是端点少、手写分发足够；如今 HTTP 面同时包含 REST、WebSocket、运维指标与机器可读文档，手写分发会让参数校验、错误映射、限流与可观测性在多个 handler 中重复，因此该理由不再成立。此条不是静默删除，而是由本 ADR 正式推翻。
+api Service Role 的 REST 与 WebSocket 面，以及 collector / replay 的 `/healthz`、`/readyz`、`/metrics`、`/status` 运维端点，统一由 FastAPI（Starlette/ASGI）承担；旧的手写 aiohttp 分发与 aiohttp 专用 `HttpServer` 退役。迁移后仓库只保留一套服务器栈，路由按资源拆分，`create_app(...)` 的名称与参数形状保持不变。本决定显式取代 `DESIGN.md` §12「已拒绝的方案」中的「Flask + gevent 或 FastAPI 等 Web 框架」一条：原先拒绝的理由是端点少、手写分发足够；如今 HTTP 面同时包含 REST、WebSocket、运维指标与机器可读文档，手写分发会让参数校验、错误映射、限流与可观测性在多个 handler 中重复，因此该理由不再成立。此条不是静默删除，而是由本 ADR 正式推翻。
 
 生命周期仍由单独的深模块持有：新 `AsgiServer`（`mdgw.api.asgi_server`）在 daemon 线程内运行私有事件循环与 `uvicorn.Server`，保留 `start`、`stop`、`call_soon_threadsafe`、`bound_port`、`base_url` 五个公共成员，以及幂等启停、端口 0 解析、通配地址回显 `127.0.0.1`、启动失败完整回滚后重抛原异常、从服务器自身线程调用 `stop()` 抛 `RuntimeError` 的语义。uvicorn 关闭默认日志配置与 access log（`log_config=None`、`access_log=False`），继续使用网关自己的结构化日志，避免后台线程中的框架日志覆盖网关日志。这样从 aiohttp 切换到 ASGI 不需要调用方重新学习启停模型。
 
