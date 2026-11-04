@@ -12,19 +12,19 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["collector:8081"]
-    labels:
-      role: collector
+        labels:
+          role: collector
 
   - job_name: api
     metrics_path: /metrics
     static_configs:
       - targets: ["api:8080"]
-    labels:
-      role: api
+        labels:
+          role: api
 
   - job_name: replay
     metrics_path: /metrics
     static_configs:
       - targets: ["replay:8082"]
-    labels:
-      role: replay
+        labels:
+          role: replay

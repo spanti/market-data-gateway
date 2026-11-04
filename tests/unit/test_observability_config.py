@@ -64,8 +64,13 @@ def test_prometheus_scrapes_all_three_service_roles_every_15_seconds() -> None:
     for role, target in expected_targets.items():
         job = jobs[role]
         assert job["metrics_path"] == "/metrics"
-        assert job["static_configs"][0]["targets"] == [target]
-        assert job["labels"]["role"] == role
+        static = job["static_configs"][0]
+        assert static["targets"] == [target]
+        # Prometheus only accepts `labels` on a static_config, not on the
+        # scrape_config itself; a top-level key makes the server refuse to
+        # load and restart-loop.
+        assert static["labels"]["role"] == role
+        assert "labels" not in job
 
 
 def test_grafana_datasource_points_at_the_prometheus_service() -> None:
