@@ -4,14 +4,18 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 新模块提供 `start(app, *, host, port, thread_name, on_shutdown=None) -> int`、`stop()`、`call_soon_threadsafe(fn, *args)`、`bound_port`、`base_url`
-- [ ] uvicorn 在 daemon 线程运行，使用 `log_config=None` 与 `access_log=False`
-- [ ] 真实 socket + 端口 0：`bound_port` 与 `base_url` 反映实际端口
-- [ ] 重复 `start()` 返回同一端口且只有一个线程；重复 `stop()` 为 no-op
-- [ ] 启动失败后无线程/循环/端口残留，并重新抛出原始异常
-- [ ] `on_shutdown` 在关闭阶段执行；其异常不阻断拆除
-- [ ] `call_soon_threadsafe` 可从另一线程派发；停止后抛 `RuntimeError`
-- [ ] 从服务器线程调用 `stop()` 抛 `RuntimeError` 而不是死锁
-- [ ] 旧 `HttpServer` 与现有调用方保持不变
+- [x] 新模块提供 `start(app, *, host, port, thread_name, on_shutdown=None) -> int`、`stop()`、`call_soon_threadsafe(fn, *args)`、`bound_port`、`base_url`
+- [x] uvicorn 在 daemon 线程运行，使用 `log_config=None` 与 `access_log=False`
+- [x] 真实 socket + 端口 0：`bound_port` 与 `base_url` 反映实际端口
+- [x] 重复 `start()` 返回同一端口且只有一个线程；重复 `stop()` 为 no-op
+- [x] 启动失败后无线程/循环/端口残留，并重新抛出原始异常
+- [x] `on_shutdown` 在关闭阶段执行；其异常不阻断拆除
+- [x] `call_soon_threadsafe` 可从另一线程派发；停止后抛 `RuntimeError`
+- [x] 从服务器线程调用 `stop()` 抛 `RuntimeError` 而不是死锁
+- [x] 旧 `HttpServer` 与现有调用方保持不变
+
+## Comments
+
+- Resolved on `integration/fastapi-rest-api` (merge `ab31b2c`; code-review fixes `c067310`). `mdgw.api.asgi_server.AsgiServer` 提供五个公共成员；`tests/integration/test_asgi_server.py` 用真实 socket、端口 0 覆盖启停、幂等、回滚、跨线程派发与自身线程 stop。 Full offline suite: 698 passed, 5 known Typer/Click baseline failures, no new failures.

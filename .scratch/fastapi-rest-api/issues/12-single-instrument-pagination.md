@@ -4,13 +4,17 @@
 
 **Blocked by:** 01 (ADR 与 glossary), 09 (切换生产到 FastAPI 应用 + AsgiServer)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 仅同时有 `instrument` 与 `limit` 时出现 `page` 对象
-- [ ] `next_start` 为第一条未返回 Bar 的 `open_ts`，ISO-8601 纳秒字符串
-- [ ] `has_more` 只统计 `end` 以内的行；无更多行时 `next_start` 为 `null`
-- [ ] `limit=0` 返回空 `bars`，并给出存在性与首行 `open_ts`
-- [ ] 缺少 `instrument` 或 `limit` 时响应保持 `{"bars": [...]}`
-- [ ] 时间缺口、`end` 边界与单 Instrument 多页场景被测试覆盖
-- [ ] Arrow/CSV/export 与 `/api/v1/instruments` 行为不变
-- [ ] 排序契约写入 Data Contract 与 ADR-0012
+- [x] 仅同时有 `instrument` 与 `limit` 时出现 `page` 对象
+- [x] `next_start` 为第一条未返回 Bar 的 `open_ts`，ISO-8601 纳秒字符串
+- [x] `has_more` 只统计 `end` 以内的行；无更多行时 `next_start` 为 `null`
+- [x] `limit=0` 返回空 `bars`，并给出存在性与首行 `open_ts`
+- [x] 缺少 `instrument` 或 `limit` 时响应保持 `{"bars": [...]}`
+- [x] 时间缺口、`end` 边界与单 Instrument 多页场景被测试覆盖
+- [x] Arrow/CSV/export 与 `/api/v1/instruments` 行为不变
+- [x] 排序契约写入 Data Contract 与 ADR-0012
+
+## Comments
+
+- Resolved on `integration/fastapi-rest-api` (merge `38208b2`; code-review fixes `c067310`). 仅对同时带 `instrument` 与 `limit` 的 JSON 查询返回 `page.{has_more,next_start}`；按 `open_ts` 升序（全局 top-k，避免存储序造成跳页/重复），`limit=0`、`end` 边界与多页无重无漏均有测试；OpenAPI 与 Data Contract 同步。 Full offline suite: 698 passed, 5 known Typer/Click baseline failures, no new failures.

@@ -4,10 +4,14 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] ADR-0011 存在，说明 FastAPI/ASGI、后台线程 uvicorn、Pydantic 只做入口、统一错误 envelope，并取代 `DESIGN.md` §12 的 FastAPI 条目
-- [ ] ADR-0012 存在，说明分页只对单 Instrument 生效、按 `open_ts` 升序、`next_start` 为第一条未返回 Bar 的 `open_ts`
-- [ ] `GLOSSARY.md` 新增 **REST API** 与 **Time Cursor**，且 REST API 条目明确避免“服务层”
-- [ ] 旧 `http-server-lifecycle` spec 顶部标记 superseded，并指向本 feature spec
-- [ ] 无生产代码行为变化；测试全绿
+- [x] ADR-0011 存在，说明 FastAPI/ASGI、后台线程 uvicorn、Pydantic 只做入口、统一错误 envelope，并取代 `DESIGN.md` §12 的 FastAPI 条目
+- [x] ADR-0012 存在，说明分页只对单 Instrument 生效、按 `open_ts` 升序、`next_start` 为第一条未返回 Bar 的 `open_ts`
+- [x] `GLOSSARY.md` 新增 **REST API** 与 **Time Cursor**，且 REST API 条目明确避免“服务层”
+- [x] 旧 `http-server-lifecycle` spec 顶部标记 superseded，并指向本 feature spec
+- [x] 无生产代码行为变化；测试全绿
+
+## Comments
+
+- Resolved on `integration/fastapi-rest-api` (merge `6581eb2`; code-review fixes `c067310`). ADR-0011（FastAPI/ASGI 取代 aiohttp）、ADR-0012（单 Instrument 分页）已写入，GLOSSARY 新增 REST API 与 Time Cursor，旧 `http-server-lifecycle` spec 标记 superseded（Status: wontfix）。 Full offline suite: 698 passed, 5 known Typer/Click baseline failures, no new failures.

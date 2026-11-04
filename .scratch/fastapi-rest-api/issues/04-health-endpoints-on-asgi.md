@@ -4,10 +4,14 @@
 
 **Blocked by:** 03 (AsgiServer 生命周期模块)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] `ServiceHealthServer` 使用 `AsgiServer`，不再自己创建 aiohttp 生命周期
-- [ ] `/healthz`、`/readyz`、`/metrics`、`/status` 的行为与迁移前一致
-- [ ] collector 与 replay 的多进程测试全绿
-- [ ] 线程名仍可区分具体 Service Role
-- [ ] api Service Role 仍走旧实现，行为不变
+- [x] `ServiceHealthServer` 使用 `AsgiServer`，不再自己创建 aiohttp 生命周期
+- [x] `/healthz`、`/readyz`、`/metrics`、`/status` 的行为与迁移前一致
+- [x] collector 与 replay 的多进程测试全绿
+- [x] 线程名仍可区分具体 Service Role
+- [x] api Service Role 仍走旧实现，行为不变
+
+## Comments
+
+- Resolved on `integration/fastapi-rest-api` (merge `0c3b7b7`; code-review fixes `c067310`). `ServiceHealthServer` 改用 `AsgiServer` + Starlette Router；`/healthz`、`/readyz`、`/metrics`、`/status`、线程名与 `base_url`/`bound_port` 语义不变；多进程测试通过。 Full offline suite: 698 passed, 5 known Typer/Click baseline failures, no new failures.

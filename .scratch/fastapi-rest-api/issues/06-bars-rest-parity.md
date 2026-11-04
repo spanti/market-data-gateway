@@ -4,12 +4,16 @@
 
 **Blocked by:** 05 (FastAPI 应用骨架、运维与 Instrument 端点对等)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] JSON Bars 的 envelope、decimal 字符串、纳秒时间与 100,000 行上限与迁移前一致
-- [ ] Arrow 流的 schema、Content-Type 与逐批流式行为与迁移前一致
-- [ ] CSV 文本、Content-Type 与“绝不经过浮点”的约束与迁移前一致
-- [ ] export 的 Parquet/Arrow 文件、Content-Type 与临时文件清理与迁移前一致
-- [ ] 参数校验与错误映射复用 05 的统一错误层
-- [ ] characterization 测试全部通过
-- [ ] 生产仍走旧 aiohttp 应用；既有测试全绿
+- [x] JSON Bars 的 envelope、decimal 字符串、纳秒时间与 100,000 行上限与迁移前一致
+- [x] Arrow 流的 schema、Content-Type 与逐批流式行为与迁移前一致
+- [x] CSV 文本、Content-Type 与“绝不经过浮点”的约束与迁移前一致
+- [x] export 的 Parquet/Arrow 文件、Content-Type 与临时文件清理与迁移前一致
+- [x] 参数校验与错误映射复用 05 的统一错误层
+- [x] characterization 测试全部通过
+- [x] 生产仍走旧 aiohttp 应用；既有测试全绿
+
+## Comments
+
+- Resolved on `integration/fastapi-rest-api` (merge `a74aa43`; code-review fixes `c067310`). `/api/v1/bars` 与 `/api/v1/bars/export` 的 JSON/Arrow/CSV/Parquet 语义、Content-Type、100,000 行上限、流式输出与临时文件清理对齐 characterization；22 个测试。 Full offline suite: 698 passed, 5 known Typer/Click baseline failures, no new failures.

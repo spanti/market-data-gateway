@@ -4,10 +4,14 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] JSON Bars 的 envelope、decimal 字符串、纳秒时间与响应头被语义化冻结
-- [ ] Arrow 响应以表语义相等断言，CSV 以文本断言
-- [ ] 错误响应冻结为 `{"error": {code, message, details, request_id}}`，并验证 `X-Request-ID`
-- [ ] WebSocket 订阅、事件与 `lag_notice` 行为被冻结
-- [ ] 测试在当前 aiohttp 实现上全绿，且不修改生产代码
+- [x] JSON Bars 的 envelope、decimal 字符串、纳秒时间与响应头被语义化冻结
+- [x] Arrow 响应以表语义相等断言，CSV 以文本断言
+- [x] 错误响应冻结为 `{"error": {code, message, details, request_id}}`，并验证 `X-Request-ID`
+- [x] WebSocket 订阅、事件与 `lag_notice` 行为被冻结
+- [x] 测试在当前 aiohttp 实现上全绿，且不修改生产代码
+
+## Comments
+
+- Resolved on `integration/fastapi-rest-api` (merge `c9d2827`; code-review fixes `c067310`). `tests/integration/test_api_characterization.py` 以 11 个测试冻结 JSON/Arrow/CSV/export、错误 envelope、X-Request-ID 与 WebSocket/lag_notice 语义；迁移前后均通过。 Full offline suite: 698 passed, 5 known Typer/Click baseline failures, no new failures.

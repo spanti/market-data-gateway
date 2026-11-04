@@ -4,11 +4,15 @@
 
 **Blocked by:** 04 (健康端点迁移), 09 (切换生产到 FastAPI 应用 + AsgiServer), 13 (HTTP 延迟 histogram)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] observability 部署目录包含 Prometheus 配置、Grafana datasource 与一个 dashboard
-- [ ] `docker-compose.observability.yml` 启动 Prometheus 9090 与 Grafana 3000
-- [ ] Prometheus 抓取 collector、api、replay 的 `/metrics`
-- [ ] 抓取间隔默认 15 秒
-- [ ] 默认 `docker compose up` 不启动 Prometheus/Grafana
-- [ ] 配置可解析；dashboard 至少展示请求速率、延迟与限流命中
+- [x] observability 部署目录包含 Prometheus 配置、Grafana datasource 与一个 dashboard
+- [x] `docker-compose.observability.yml` 启动 Prometheus 9090 与 Grafana 3000
+- [x] Prometheus 抓取 collector、api、replay 的 `/metrics`
+- [x] 抓取间隔默认 15 秒
+- [x] 默认 `docker compose up` 不启动 Prometheus/Grafana
+- [x] 配置可解析；dashboard 至少展示请求速率、延迟与限流命中
+
+## Comments
+
+- Resolved on `integration/fastapi-rest-api` (merge `21ff82b`; code-review fixes `c067310`). 新增 `observability/`（Prometheus 15s 抓取 collector/api/replay、Grafana datasource + dashboard）与 `docker-compose.observability.yml`（9090/3000）；默认 `docker compose up` 不启动它们。 Full offline suite: 698 passed, 5 known Typer/Click baseline failures, no new failures.

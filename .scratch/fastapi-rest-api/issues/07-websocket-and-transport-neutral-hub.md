@@ -4,12 +4,16 @@
 
 **Blocked by:** 05 (FastAPI 应用骨架、运维与 Instrument 端点对等)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 新应用提供 `/ws`，Starlette `WebSocket` 可直接交给 hub
-- [ ] `WebSocketHub` 不再 import 或注解 aiohttp 类型
-- [ ] 订阅、取消订阅与 `ping`/`pong` 行为与迁移前一致
-- [ ] Message Envelope 与 `lag_notice` 行为与迁移前一致
-- [ ] 慢消费者被丢弃消息但连接不断开
-- [ ] 现有 `websockets` 客户端测试在新应用上通过
-- [ ] 生产仍走旧 aiohttp 应用；既有测试全绿
+- [x] 新应用提供 `/ws`，Starlette `WebSocket` 可直接交给 hub
+- [x] `WebSocketHub` 不再 import 或注解 aiohttp 类型
+- [x] 订阅、取消订阅与 `ping`/`pong` 行为与迁移前一致
+- [x] Message Envelope 与 `lag_notice` 行为与迁移前一致
+- [x] 慢消费者被丢弃消息但连接不断开
+- [x] 现有 `websockets` 客户端测试在新应用上通过
+- [x] 生产仍走旧 aiohttp 应用；既有测试全绿
+
+## Comments
+
+- Resolved on `integration/fastapi-rest-api` (merge `581b733`; code-review fixes `c067310`). FastAPI `/ws` 路由与传输中性 `WebSocketTransport` Protocol；订阅、ping/pong、Message Envelope、lag_notice 与慢消费者不断连语义不变；8 个测试。 Full offline suite: 698 passed, 5 known Typer/Click baseline failures, no new failures.
