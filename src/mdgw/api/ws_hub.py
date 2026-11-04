@@ -1,7 +1,8 @@
 """WebSocket fan-out hub for the Streaming Interface.
 
-The hub lives on the aiohttp event loop. ZMQ subscriber threads never touch
-asyncio objects directly: they hand already-encoded messages to the hub with
+The hub lives on the server's event loop and depends only on the
+`WebSocketTransport` protocol. ZMQ subscriber threads never touch asyncio
+objects directly: they hand already-encoded messages to the hub with
 `loop.call_soon_threadsafe`.
 
 Each session owns one bounded queue. A producer that outpaces the socket drops
@@ -16,17 +17,27 @@ import asyncio
 import json
 import logging
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from mdgw.core.time import datetime_to_ns, ns_to_iso, utc_now
 
-if TYPE_CHECKING:
-    from aiohttp import web
-
 logger = logging.getLogger(__name__)
 
 EventMessage = tuple[str, dict[str, Any]]
+
+
+class WebSocketTransport(Protocol):
+    """Transport surface the hub needs; no aiohttp/Starlette type leaks in.
+
+    Both Starlette's `WebSocket` and aiohttp's `WebSocketResponse` satisfy it.
+    `close` returns `None` on Starlette and `bool` on aiohttp, so the protocol
+    promises only an awaitable value.
+    """
+
+    async def send_json(self, payload: Any) -> None: ...
+
+    async def close(self) -> object: ...
 
 
 def valid_topics(value: Any) -> list[str]:
@@ -45,7 +56,7 @@ class WebSocketSession:
 
     def __init__(
         self,
-        ws: web.WebSocketResponse,
+        ws: WebSocketTransport,
         *,
         queue_size: int,
         lag_notice_interval_s: float,
@@ -215,7 +226,7 @@ class WebSocketHub:
         """Total messages dropped by all sessions for backpressure."""
         return sum(session.dropped_total for session in self._sessions)
 
-    def register(self, ws: web.WebSocketResponse) -> WebSocketSession:
+    def register(self, ws: WebSocketTransport) -> WebSocketSession:
         if self._closed:
             raise _HubClosedError
         session = WebSocketSession(
