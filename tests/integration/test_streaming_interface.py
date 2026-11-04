@@ -19,9 +19,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-import aiohttp
 import pyarrow as pa
 import pytest
+import websockets
 import zmq
 
 from mdgw.streaming import ipc_to_table
@@ -289,29 +289,26 @@ def test_external_zmq_prefix_sub_gets_multiple_instruments(tmp_path: Path) -> No
         assert table.column("interval").to_pylist() == ["1m"]
 
 
-async def _connect_ws(runtime: GatewayRuntime) -> tuple[aiohttp.ClientSession, Any]:
-    session = aiohttp.ClientSession()
+async def _connect_ws(runtime: GatewayRuntime) -> Any:
     url = runtime.base_url.replace("http://", "ws://", 1) + "/ws"
-    ws = await session.ws_connect(url)
-    return session, ws
+    return await websockets.connect(url)
 
 
 async def _ping(ws) -> None:
-    await ws.send_json({"op": "ping"})
+    await ws.send(json.dumps({"op": "ping"}))
     await _await_op(ws, "pong")
 
 
 async def _await_op(ws, op: str, *, timeout: float = 3.0) -> dict:
-    deadline = asyncio.get_running_loop().time() + timeout
-    while True:
-        remaining = deadline - asyncio.get_running_loop().time()
-        if remaining <= 0:
-            raise AssertionError(f"timed out waiting for WS op {op!r}")
-        message = await asyncio.wait_for(ws.receive(), remaining)
-        assert message.type == aiohttp.WSMsgType.TEXT, message
-        payload = json.loads(message.data)
-        if payload.get("op") == op:
-            return payload
+    async def _next_op() -> dict:
+        while True:
+            incoming = await ws.recv()
+            assert isinstance(incoming, str), incoming
+            payload = json.loads(incoming)
+            if payload.get("op") == op:
+                return payload
+
+    return await asyncio.wait_for(_next_op(), timeout)
 
 
 def test_websocket_subscribe_receives_rest_equivalent_envelope(tmp_path: Path) -> None:
@@ -319,10 +316,12 @@ def test_websocket_subscribe_receives_rest_equivalent_envelope(tmp_path: Path) -
     config = _config(tmp_path)
 
     async def scenario() -> tuple[dict, dict]:
-        session, ws = await _connect_ws(runtime)
+        ws = await _connect_ws(runtime)
         try:
-            await ws.send_json(
-                {"op": "subscribe", "topics": [f"market.bar.1m.{BTC}"]}
+            await ws.send(
+                json.dumps(
+                    {"op": "subscribe", "topics": [f"market.bar.1m.{BTC}"]}
+                )
             )
             # Pong proves the subscribe op was processed before ingestion.
             await _ping(ws)
@@ -330,7 +329,6 @@ def test_websocket_subscribe_receives_rest_equivalent_envelope(tmp_path: Path) -
             event = await _await_op(ws, "event")
         finally:
             await ws.close()
-            await session.close()
 
         with urllib.request.urlopen(
             f"{runtime.base_url}/api/v1/bars?instrument={BTC}&interval=1m"
@@ -364,16 +362,18 @@ def test_websocket_ping_and_unsubscribe_stop_events(tmp_path: Path) -> None:
     config = _config(tmp_path)
 
     async def scenario() -> None:
-        session, ws = await _connect_ws(runtime)
+        ws = await _connect_ws(runtime)
         try:
             topic = f"market.bar.1m.{BTC}"
-            await ws.send_json({"op": "subscribe", "topics": [topic]})
+            await ws.send(json.dumps({"op": "subscribe", "topics": [topic]}))
             await _ping(ws)
             runtime.ingest()
             first = await _await_op(ws, "event")
             assert first["topic"] == topic
 
-            await ws.send_json({"op": "unsubscribe", "topics": [topic]})
+            await ws.send(
+                json.dumps({"op": "unsubscribe", "topics": [topic]})
+            )
             await _ping(ws)
             runtime.ingest()
             with pytest.raises(asyncio.TimeoutError):
@@ -382,7 +382,6 @@ def test_websocket_ping_and_unsubscribe_stop_events(tmp_path: Path) -> None:
             await _ping(ws)
         finally:
             await ws.close()
-            await session.close()
 
     with GatewayRuntime(
         feed_handler=feed, config=config, data_root=tmp_path / "data"
@@ -397,9 +396,11 @@ def test_websocket_prefix_subscription_matches_multiple_topics(tmp_path: Path) -
     feed = TickingFeedHandler((BTC, ETH), start=datetime(2024, 1, 1, tzinfo=UTC))
 
     async def scenario() -> set[str]:
-        session, ws = await _connect_ws(runtime)
+        ws = await _connect_ws(runtime)
         try:
-            await ws.send_json({"op": "subscribe", "topics": ["market.bar.1m."]})
+            await ws.send(
+                json.dumps({"op": "subscribe", "topics": ["market.bar.1m."]})
+            )
             await _ping(ws)
             runtime.ingest()
             topics: set[str] = set()
@@ -409,7 +410,6 @@ def test_websocket_prefix_subscription_matches_multiple_topics(tmp_path: Path) -
             return topics
         finally:
             await ws.close()
-            await session.close()
 
     with GatewayRuntime(
         feed_handler=feed, config=config, data_root=tmp_path / "data"
@@ -428,10 +428,10 @@ def test_slow_websocket_consumer_gets_lag_notice_without_disconnect(
     config = _config(tmp_path, queue_size=1, lag_notice_interval_ms=0)
 
     async def scenario() -> tuple[dict, set[str]]:
-        session, ws = await _connect_ws(runtime)
+        ws = await _connect_ws(runtime)
         try:
             topic = f"market.bar.1m.{BTC}"
-            await ws.send_json({"op": "subscribe", "topics": [topic]})
+            await ws.send(json.dumps({"op": "subscribe", "topics": [topic]}))
             await _ping(ws)
             # One ingestion publishes all 30 Bars in a single hub fan-out, so
             # the writer cannot drain a queue of size 1 in between.
@@ -446,7 +446,6 @@ def test_slow_websocket_consumer_gets_lag_notice_without_disconnect(
             return notice, seen
         finally:
             await ws.close()
-            await session.close()
 
     with GatewayRuntime(
         feed_handler=feed, config=config, data_root=tmp_path / "data"
@@ -466,21 +465,27 @@ def test_websocket_ignores_empty_and_invalid_topics_and_messages(
     config = _config(tmp_path)
 
     async def scenario() -> dict:
-        session, ws = await _connect_ws(runtime)
+        ws = await _connect_ws(runtime)
         try:
-            await ws.send_bytes(b"{not json")
-            await ws.send_json({"op": "unknown"})
-            await ws.send_json(
-                {"op": "subscribe", "topics": ["", "   ", None, 42, f"market.bar.1m.{BTC}"]}
+            await ws.send(b"{not json")
+            await ws.send(json.dumps({"op": "unknown"}))
+            await ws.send(
+                json.dumps(
+                    {
+                        "op": "subscribe",
+                        "topics": ["", "   ", None, 42, f"market.bar.1m.{BTC}"],
+                    }
+                )
             )
-            await ws.send_json({"op": "subscribe"})
-            await ws.send_json({"op": "unsubscribe", "topics": "not-a-list"})
+            await ws.send(json.dumps({"op": "subscribe"}))
+            await ws.send(
+                json.dumps({"op": "unsubscribe", "topics": "not-a-list"})
+            )
             await _ping(ws)
             runtime.ingest()
             return await _await_op(ws, "event")
         finally:
             await ws.close()
-            await session.close()
 
     with GatewayRuntime(
         feed_handler=feed, config=config, data_root=tmp_path / "data"
@@ -498,14 +503,10 @@ def test_websocket_path_comes_from_config(tmp_path: Path) -> None:
     feed = FakeFeedHandler(instrument_id=BTC, bars=[])
 
     async def scenario() -> None:
-        session = aiohttp.ClientSession()
-        try:
-            url = runtime.base_url.replace("http://", "ws://", 1) + "/stream"
-            ws = await session.ws_connect(url)
-            await _ping(ws)
-            await ws.close()
-        finally:
-            await session.close()
+        url = runtime.base_url.replace("http://", "ws://", 1) + "/stream"
+        ws = await websockets.connect(url)
+        await _ping(ws)
+        await ws.close()
 
     with GatewayRuntime(
         feed_handler=feed, config=config, data_root=tmp_path / "data"

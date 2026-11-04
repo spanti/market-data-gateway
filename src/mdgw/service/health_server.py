@@ -84,8 +84,7 @@ class ServiceHealthServer:
         ]
         if self._status is not None:
             routes.append(Route("/status", self._status_handler))
-        # Match the old aiohttp router: a trailing slash is a 404, not an
-        # implicit redirect.
+        # A trailing slash is a 404, not an implicit redirect.
         return Router(routes=routes, redirect_slashes=False)
 
     def _running_server(self) -> AsgiServer:
