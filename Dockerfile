@@ -7,7 +7,10 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY src ./src
-RUN pip install .
+
+# Install Python dependencies from pyproject.toml and update pip
+RUN pip install --upgrade pip && \
+    pip install --index-url https://pypi.org/simple/ .
 
 COPY config ./config
 RUN mkdir -p /app/data
