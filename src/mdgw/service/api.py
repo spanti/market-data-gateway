@@ -8,8 +8,8 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from mdgw.api.http_server import HttpServer
-from mdgw.api.server import create_app
+from mdgw.api.app import create_app
+from mdgw.api.asgi_server import AsgiServer
 from mdgw.api.ws_hub import WebSocketHub
 from mdgw.core.envelope import table_to_messages
 from mdgw.metrics import MetricsRegistry
@@ -54,7 +54,7 @@ class ApiService:
         self._streaming: StreamingInterface | None = None
 
         self._hub: WebSocketHub | None = None
-        self._http = HttpServer()
+        self._http = AsgiServer()
 
         self._stop = threading.Event()
         self._started = False
@@ -129,8 +129,8 @@ class ApiService:
 
     # -- properties --------------------------------------------------------
 
-    def _started_http(self) -> HttpServer:
-        """Return the started `HttpServer`, or raise this service's error."""
+    def _started_http(self) -> AsgiServer:
+        """Return the started `AsgiServer`, or raise this service's error."""
         try:
             _ = self._http.bound_port
         except RuntimeError as exc:
@@ -155,7 +155,7 @@ class ApiService:
     # -- collector subscription -------------------------------------------
 
     def _on_bar(self, topic: str, table: pa.Table) -> None:
-        """Runs on the streaming subscriber thread; never touches aiohttp."""
+        """Runs on the streaming subscriber thread; never touches server objects."""
         self._messages_received += 1
         self.metrics.inc("mdgw_api_messages_received_total")
         # The module already forwarded the raw frame before calling us.
@@ -178,7 +178,7 @@ class ApiService:
             self._http.call_soon_threadsafe(hub.publish, topic, messages)
 
     def _on_status(self, status: dict) -> None:
-        """Runs on the streaming subscriber thread; never touches aiohttp."""
+        """Runs on the streaming subscriber thread; never touches server objects."""
         self._collector_status = status
         self._mark_ready_when_collector_ready()
 
