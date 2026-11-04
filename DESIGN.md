@@ -193,6 +193,8 @@ stop(session_id)
 
 ## 4. HTTP 与 WebSocket API
 
+HTTP 面（REST、WebSocket 与运维端点）统一由 FastAPI（Starlette/ASGI）承担，旧的手写 aiohttp 分发与 `HttpServer` 已退役。生命周期由 `AsgiServer` 持有：它在 daemon 线程上运行私有事件循环与纯 `uvicorn`（`log_config=None`、`access_log=False`），保留 `start`、`stop`、`call_soon_threadsafe`、`bound_port`、`base_url` 五个公共成员，以及幂等启停、端口 0 解析、通配地址回显 `127.0.0.1`、启动失败完整回滚后重抛原异常的语义。路由按资源拆分在 `routes/bars.py`、`routes/instruments.py`、`routes/ops.py`、`routes/websocket.py`；中间件分层为请求上下文（`X-Request-ID`、请求指标、完成日志）与限流，二者都不缓冲 Arrow/CSV 流式响应体。`redirect_slashes=False`，末尾斜杠不会触发隐式重定向；不注册 HEAD 路由，HEAD 行为不在契约内。决策记录见 [ADR-0011](docs/adr/0011-fastapi-asgi-http-surface.md) 与 [ADR-0012](docs/adr/0012-single-instrument-pagination.md)。
+
 ### 4.1 REST
 
 ```
@@ -207,10 +209,13 @@ GET /metrics
 ```
 
 - `interval` 必填。
-- 分页只用时间游标，不支持 offset。
+- 分页只用时间游标（Time Cursor），不支持 offset 或不透明 cursor。分页元数据只对同时带 `instrument` 与 `limit` 的 JSON 查询生效：响应为 `{"bars": [...], "page": {"has_more": ..., "next_start": ...}}`；`next_start` 是第一条未返回 Bar 的 `open_ts`（ISO-8601 纳秒字符串），下一次作为闭区间 `start` 使用。`limit=0` 返回空 `bars` 但仍报告 `has_more` / `next_start`；分页 JSON 按 `open_ts` 升序，非分页 JSON、Arrow、CSV 与 export 保持存储顺序。多 Instrument 与 `/api/v1/instruments` 不提供分页（[ADR-0012](docs/adr/0012-single-instrument-pagination.md)）。
 - `format=arrow`：流式 Arrow IPC（decimal128 原样）；`format=csv`：流式 CSV（decimal 输出十进制原文，禁止经过 float）；`format=json`：仅允许小范围，超过 100,000 行返回 `range_too_large`，decimal 以字符串输出。
 - `format=arrow|csv` 无行数上限，边读边发，不把结果全量放进内存。
 - `export` 把同一读取器的结果落成一个 Parquet/Arrow 文件返回（一次性大文件下载）。
+- `/openapi.json` 与 `/docs` 始终开启且没有配置开关，`/redoc` 关闭。OpenAPI 只是由代码生成的发现文档，规范性真相仍是 `docs/data-contract.md` 与 Streaming Interface。
+- 限流由 `[rate_limit]` 配置控制，默认关闭；开启后按 `(源 IP, 路由模板)` 维护进程内令牌桶（`requests_per_second`、`burst`），并用 `max_ws_sessions_per_ip` 限制每个 IP 的并发 WebSocket 会话。`/healthz`、`/readyz`、`/metrics`、`/openapi.json`、`/docs` 固定豁免且不可配置；超限返回 429、`Retry-After` 与稳定错误码 `rate_limited`；WebSocket 在 `accept()` 之前拒绝。状态只在单 worker 进程内，不引入跨进程配额。
+- `/metrics` 输出 Prometheus 文本格式；除既有计数器与 gauge 外，新增 `mdgw_api_http_request_duration_seconds` histogram（标签 `method`、`path` 路由模板、`status`；桶为 0.005–5 秒与 `+Inf`）和 `mdgw_api_rate_limited_total{path}`。可选的 `docker-compose.observability.yml` 在默认 `docker compose up` 之外启动 Prometheus（9090）与 Grafana（3000），并抓取 collector、api、replay 三个 Service Role 的 `/metrics`。
 - 历史查询只读已落盘的 Data File；collector 的写缓冲（默认 1 小时）意味着**最近一段数据可能查不到**。`/api/v1/status` 必须暴露每个 Dataset 的 `last_flushed_ts`，客户端据此判断；需要实时性的消费者应使用 WebSocket / ZMQ，而不是历史接口。
 - 默认只绑定 `127.0.0.1`；v1 不做鉴权。
 
@@ -234,8 +239,7 @@ GET /metrics
 {"error": {"code": "invalid_instrument", "message": "...", "details": {}, "request_id": "..."}}
 ```
 
-稳定错误码：`invalid_instrument`、`invalid_interval`、`invalid_parameter`、`invalid_range`、`range_too_large`、`schema_version_mismatch`、`dataset_not_found`、`session_not_found`、`feed_unavailable`、`internal_error`。
-HTTP 状态码只做粗分类（400/404/409/429/500）。
+稳定错误码：`invalid_instrument`、`instrument_not_found`、`invalid_interval`、`invalid_parameter`、`invalid_format`、`invalid_range`、`range_too_large`、`schema_version_mismatch`、`session_not_found`、`not_found`、`method_not_allowed`、`rate_limited`、`internal_error`。`dataset_not_found` 与 `feed_unavailable` 仅为未来候选，当前未实现。HTTP 状态码只做粗分类（400/404/405/409/429/500）。所有 HTTP 失败——包括 404、405、429 与参数校验——都使用上述 envelope，并回写 `X-Request-ID`；FastAPI 默认的 422 与 `{"detail": ...}` 从不暴露。
 
 ## 5. 运行规则
 
@@ -331,6 +335,12 @@ schema_version = 1
 enabled = false
 bars_days = 0            # 0 = 永久
 
+[rate_limit]
+enabled = false          # 默认关闭；开启后按 (源 IP, 路由模板) 限流
+requests_per_second = 50
+burst = 100
+max_ws_sessions_per_ip = 16   # 0 = 不限
+
 [[feeds]]
 name = "binance_spot"
 kind = "ccxt"
@@ -403,7 +413,7 @@ DESIGN.md
 ## 8. 依赖与环境
 
 - 唯一环境：conda `nautilus`（Python 3.13.18），提交 `environment.yml` + `pyproject.toml`，补装 `pytest`。
-- 运行时依赖：`pyarrow`、`pyzmq`、`ccxt`、`aiohttp`（仅作 HTTP/WS 传输层，不用其框架特性）、`msgspec`/`orjson`、`PyYAML`。
+- 运行时依赖：`pyarrow`、`pyzmq`、`ccxt`、`fastapi`、`uvicorn`（纯包，不使用 `[standard]` extra）、`websockets`、`msgspec`/`orjson`、`PyYAML`。HTTP/WebSocket 面不再直接依赖 `aiohttp`；它可能仍作为 `ccxt` 的传递依赖出现在环境中。
 - **禁止**网关包 import `nautilus_trader`（CI 用 AST 扫描或 import-linter 强制）。
 - `mdgw_client` 只依赖 `pyarrow`、`pyzmq` 与 schema 定义。
 - decimal128 的 pandas 表示：`to_pandas()` 返回 `object` dtype 的 `decimal.Decimal`（pandas 无原生 decimal dtype）；SDK 文档必须写明，避免使用者误用 `astype(float)`。需要高性能数值计算的使用者应留在 Arrow 层或显式量化。
@@ -414,19 +424,21 @@ DESIGN.md
 
 仓库从零开始，无既有 seam。按"尽可能高、尽可能少"的原则，确定 **四个**：
 
-1. **`GatewayRuntime` 端到端（主 seam）**：组合根接收配置、一个实现 `FeedHandler` Protocol 的假数据源、一个临时数据目录，在单进程内用 `inproc://` ZMQ 跑起 collector → Parquet → api → replay。所有行为测试从这里进入。
-2. **线上字节（Data Contract seam）**：Arrow schema 黄金文件、Arrow IPC 往返、`_dataset.json`/`_manifest.json` 校验、topic 与路径编码。它不是行为 seam，而是 Data Contract 夹具。
-3. **`HttpServer` 与 `ApiService` 的公共接口（HTTP 生命周期 seam）**：刻意新增的第三个 seam。用真实 socket 与端口 0 直接验证启停、失败回滚与跨线程派发，不经过完整的 feed → collector → api → replay 链路；全链路行为仍从 `GatewayRuntime` 进入。
-4. **`StreamingInterface` 的公共接口（Streaming Interface seam）**：用真实 ZMQ 在 `inproc://` 与端口 0 上验证 topic 语法、Arrow IPC 往返、READY、计数器与转发，不经过 aiohttp；全链路行为仍从 `GatewayRuntime` 进入。
+1. **`GatewayRuntime` 端到端（主 seam）**：组合根接收配置、一个实现 `FeedHandler` Protocol 的假数据源、一个临时数据目录，在单进程内用 `inproc://` ZMQ 跑起 collector → Parquet → api → replay。所有用户可见的 REST / WebSocket / 运维行为从这里进入，包括错误 envelope、分页、限流与豁免、`/openapi.json`、`/docs`、`/metrics`、`/healthz`、`/readyz` 与 `/status`。
+2. **线上字节（Data Contract seam）**：Arrow schema 黄金文件、Arrow IPC 往返、`_dataset.json`/`_manifest.json` 校验、topic 与路径编码。它不是行为 seam，而是 Data Contract 夹具；迁移前捕获的 characterization 黄金样本（JSON envelope、Arrow 表语义、CSV 文本、decimal 字符串、纳秒时间、错误体）在删除 aiohttp 实现后必须原样通过。
+3. **`AsgiServer` 与 `ApiService` 的公共接口（HTTP 生命周期 seam）**：刻意新增的第三个 seam。用真实 socket 与端口 0 直接验证启动、幂等、停止、失败回滚、`base_url`/`bound_port` 与跨线程派发，不经过完整的 feed → collector → api → replay 链路；全链路行为仍从 `GatewayRuntime` 进入。
+4. **`StreamingInterface` 的公共接口（Streaming Interface seam）**：用真实 ZMQ 在 `inproc://` 与端口 0 上验证 topic 语法、Arrow IPC 往返、READY、计数器与转发，不经过 HTTP 服务器；全链路行为仍从 `GatewayRuntime` 进入。
+
+令牌桶（注入假时钟）、histogram 文本渲染与配置校验是纯单元测试，不构成新的功能 seam。
 
 真实 Binance 只出现在 `@pytest.mark.network` 的测试里，默认跳过。
 
 ### 9.2 测试内容
 
 - Data Contract 测试：Arrow schema 黄金文件；Arrow IPC 与 JSON 编解码往返；Parquet 目录布局；`_dataset.json`/`_manifest.json` 校验。
-- 单元测试：1m 收口、Bar Aggregation、revision、HWM 推进、topic/路径编码、错误码映射、decimal 不经浮点。
-- 集成测试：假 Feed Handler → collector → Parquet → api → replay 全链路，不触网。
-- HTTP 生命周期测试：`HttpServer` 与 `ApiService` 在端口 0 上用真实 socket 验证启动、幂等、停止、失败回滚与跨线程派发；不构造完整链路。
+- 单元测试：1m 收口、Bar Aggregation、revision、HWM 推进、topic/路径编码、错误码映射、decimal 不经浮点；令牌桶注入假时钟；`MetricsRegistry.render()` 的 histogram `_bucket`/`_sum`/`_count` 与 `le` 标签；`[rate_limit]` 配置校验。
+- 集成测试：假 Feed Handler → collector → Parquet → api → replay 全链路，不触网；错误 envelope（404/405/429/校验失败/500）、分页、限流豁免、`/openapi.json`、`/docs` 与 `/redoc` 404。
+- HTTP 生命周期测试：`AsgiServer` 与 `ApiService` 在端口 0 上用真实 socket 验证启动、幂等、停止、失败回滚、`base_url`/`bound_port` 与跨线程派发；不构造完整链路。
 - 回放确定性：同一 Replay Session 跑两次，输出事件序列逐字节相同。
 - 验收标准：
   1. 新数据源只实现 `FeedHandler` Protocol + 配置即可接入，不改核心代码。
@@ -458,11 +470,16 @@ DESIGN.md
 - **Bar Revision 的下游幂等**：接入方必须按最大 revision 去重，文档需显著提示。
 - **Retention 与补采的边界**：REST 回溯上限必须 ≤ Retention，配置加载时校验。
 - **历史接口的新鲜度**：写缓冲意味着最近 1 小时可能查不到；`/status.last_flushed_ts` 必须被客户端尊重。
+- **uvicorn 在后台线程中的启动**：端口 0 必须从自有 socket 解析实际绑定端口；启动失败（例如端口占用或 lifespan startup 异常）要先清理线程、事件循环与 socket，再重抛原始异常，避免孤儿线程。`AsgiServer` 的端口 0 与失败回滚测试覆盖这一风险。
+- **ASGI lifespan 与 `on_shutdown` 顺序**：`on_shutdown` 在 lifespan shutdown 阶段、应用自身 shutdown handler 之后运行；其异常被记录并吞掉，不能阻止后续拆除。hub 关闭顺序由 `GatewayRuntime` 端到端测试覆盖。
+- **ASGI 流式响应**：请求中间件只能观察 response start，绝不能缓冲或重读 body；Arrow / CSV / Parquet 仍逐批发送，限流也只限制请求建立。
+- **uvicorn 日志覆盖**：必须保持 `log_config=None`、`access_log=False`，否则 uvicorn 会在后台线程重配日志并压掉网关自己的结构化日志。
 
 ## 12. 已拒绝的方案（备查）
 
 - 在网关内实现 NautilusTrader catalog/DataClient 适配。
-- Flask + gevent 或 FastAPI 等 Web 框架。
+- ~~Flask + gevent 或 FastAPI 等 Web 框架。~~ **已被 [ADR-0011](docs/adr/0011-fastapi-asgi-http-surface.md) 推翻**：HTTP 面现在同时包含 REST、WebSocket、运维指标与机器可读文档，手写 aiohttp 分发会让参数校验、错误映射、限流与可观测性在多个 handler 中重复；因此 HTTP 面统一迁移到 FastAPI + ASGI。原条目保留在此以示该决定是显式取代，而非静默删除。
+- 多 Instrument 的时间游标分页：单个 `next_start` 无法同时表达每个 Instrument 的读取进度，取最小或最大 `open_ts` 都会导致重复或跳过。要让多 Instrument 分页正确，必须引入 `(open_ts, instrument_id)` 复合游标或每 Instrument 一份游标，并额外定义同一时间戳的稳定次序与客户端状态管理，复杂度不划算（[ADR-0012](docs/adr/0012-single-instrument-pagination.md)）。消费方应逐 Instrument 查询，或使用 Arrow/CSV 一次性下载后自行排序。
 - Redis 作为总线或实时缓存。
 - ZMQ 上使用 JSON / msgpack。
 - 逐笔成交 / 盘口进入 v1（存储与复杂度超出日增 <10GB 的目标）。
