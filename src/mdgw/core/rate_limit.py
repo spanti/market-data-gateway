@@ -17,8 +17,22 @@ import asyncio
 import math
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 Clock = Callable[[], float]
+
+
+@dataclass(frozen=True, slots=True)
+class RateDecision:
+    """The explicit outcome of one limiter acquisition.
+
+    ``allowed`` is true when a token was granted. ``retry_after_s`` is only
+    meaningful when the request was denied and reports the whole seconds a
+    client should wait before retrying.
+    """
+
+    allowed: bool
+    retry_after_s: int = 0
 
 
 def _retry_after_seconds(deficit: float, rate: float) -> int:
@@ -53,20 +67,19 @@ class TokenBucket:
         self._tokens = float(burst)
         self._last = clock()
 
-    def consume(self) -> int | None:
-        """Consume one token.
-
-        Returns ``None`` when the request is allowed, otherwise the number of
-        whole seconds a client should wait before retrying.
-        """
+    def consume(self) -> RateDecision:
+        """Consume one token and report the decision explicitly."""
         now = self._clock()
         elapsed = max(0.0, now - self._last)
         self._last = now
         self._tokens = min(self._burst, self._tokens + elapsed * self._rate)
         if self._tokens >= 1.0:
             self._tokens -= 1.0
-            return None
-        return _retry_after_seconds(1.0 - self._tokens, self._rate)
+            return RateDecision(allowed=True)
+        return RateDecision(
+            allowed=False,
+            retry_after_s=_retry_after_seconds(1.0 - self._tokens, self._rate),
+        )
 
 
 class RateLimiter:
@@ -88,8 +101,8 @@ class RateLimiter:
         self._ws_sessions: dict[str, int] = {}
         self._lock = asyncio.Lock()
 
-    async def acquire(self, source_ip: str, route: str) -> int | None:
-        """Take one token for this key; ``None`` means allowed."""
+    async def acquire(self, source_ip: str, route: str) -> RateDecision:
+        """Take one token for this key and report the decision."""
         async with self._lock:
             key = (source_ip, route)
             bucket = self._buckets.get(key)
@@ -127,4 +140,4 @@ class RateLimiter:
                 self._ws_sessions[source_ip] = count - 1
 
 
-__all__ = ["RateLimiter", "TokenBucket"]
+__all__ = ["RateDecision", "RateLimiter", "TokenBucket"]

@@ -14,6 +14,7 @@ from uuid import uuid4
 from starlette.datastructures import Headers, MutableHeaders
 
 from mdgw.api.errors import REQUEST_ID_STATE_KEY, error_response
+from mdgw.api.routing import route_template
 from mdgw.core.errors import INTERNAL_ERROR
 from mdgw.metrics import DEFAULT_HTTP_DURATION_BUCKETS
 
@@ -150,11 +151,10 @@ def _request_id(scope: MutableMapping[str, Any]) -> str:
 
 
 def _route_label(scope: MutableMapping[str, Any]) -> str:
-    route = scope.get("route")
-    path = getattr(route, "path", None)
-    if isinstance(path, str) and path:
-        return path
-    return str(scope.get("path", ""))
+    # The rate limiter resolves the template *before* routing, so it is the
+    # only source for a 429. Once routing has run, `scope["route"].path` is
+    # preferred. Both are bounded templates, never an arbitrary request path.
+    return route_template(scope, fallback=str(scope.get("path", "")))
 
 
 __all__ = ["RequestContextMiddleware"]

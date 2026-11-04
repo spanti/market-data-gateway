@@ -283,6 +283,33 @@ def test_malformed_instrument_id_returns_400_invalid_instrument(tmp_path: Path) 
     assert error["request_id"]
 
 
+def test_trailing_slash_instrument_lookup_is_not_found(tmp_path: Path) -> None:
+    """`/api/v1/instruments/` matches the `:path` route with an empty id.
+
+    The retired `{instrument_id:.+}` route returned 404, so this keeps that
+    parity instead of reporting `invalid_instrument`.
+    """
+    with _runtime(tmp_path, _write_instruments(tmp_path / "config")) as runtime:
+        runtime.start()
+        status, headers, body = _get(
+            f"{runtime.base_url}/api/v1/instruments/"
+        )
+
+    error = json.loads(body)["error"]
+    assert status == 404
+    assert error["code"] == "not_found"
+    assert error["details"] == {}
+    assert error["request_id"]
+    assert _header(headers, "X-Request-ID") == error["request_id"]
+
+
+def _header(headers: dict[str, str], name: str) -> str | None:
+    for key, value in headers.items():
+        if key.lower() == name.lower():
+            return value
+    return None
+
+
 def test_empty_instrument_directory_serves_an_empty_list(tmp_path: Path) -> None:
     empty = tmp_path / "config"
     empty.mkdir()

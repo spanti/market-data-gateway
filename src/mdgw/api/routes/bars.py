@@ -22,6 +22,15 @@ import pyarrow.parquet as pq
 from fastapi import APIRouter, Query
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
+from mdgw.api.formats import (
+    ARROW_FILE_MEDIA_TYPE,
+    ARROW_STREAM_MEDIA_TYPE,
+    BARS_FORMATS,
+    CSV_MEDIA_TYPE,
+    EXPORT_FORMATS,
+    PARQUET_MEDIA_TYPE,
+    content_disposition,
+)
 from mdgw.core.envelope import decimal_to_str, table_to_messages
 from mdgw.core.errors import (
     INVALID_FORMAT,
@@ -36,22 +45,15 @@ from mdgw.core.schema import BAR_SCHEMA, INTERVALS
 from mdgw.core.time import iso_to_ns, ns_to_iso
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator
 
     from mdgw.store.parquet_dataset import ParquetBarStore
 
 logger = logging.getLogger(__name__)
 
 JSON_ROW_LIMIT = 100_000
-BARS_FORMATS = frozenset({"json", "arrow", "csv"})
-EXPORT_FORMATS = frozenset({"parquet", "arrow"})
 TIMESTAMP_COLUMNS = ("open_ts", "close_ts", "event_ts", "ingest_ts")
 DECIMAL_COLUMNS = ("open", "high", "low", "close", "volume")
-
-ARROW_STREAM_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
-ARROW_FILE_CONTENT_TYPE = "application/vnd.apache.arrow.file"
-PARQUET_CONTENT_TYPE = "application/vnd.apache.parquet"
-CSV_CONTENT_TYPE = "text/csv; charset=utf-8"
 
 _EXPORT_PREFIX = "mdgw-export-"
 _READ_CHUNK_SIZE = 1_048_576
@@ -79,13 +81,24 @@ class _RangeTooLargeError(GatewayError):
 
 
 @dataclass(frozen=True, slots=True)
+class _ExportSpec:
+    """Everything that differs between the two file-export formats."""
+
+    content_type: str
+    suffix: str
+    writer: Callable[
+        [Iterator[pa.RecordBatch], Path, ParquetBarStore], None
+    ]
+
+
+@dataclass(frozen=True, slots=True)
 class _RawQuery:
     interval: str
     instrument: str | None
     start: str | None
     end: str | None
     limit: str | None
-    output_format: str | None
+    format: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +143,7 @@ def create_router(*, store: ParquetBarStore) -> APIRouter:
                 start=start,
                 end=end,
                 limit=limit,
-                output_format=output_format,
+                format=output_format,
             ),
             formats=BARS_FORMATS,
             default_format="json",
@@ -167,7 +180,7 @@ def create_router(*, store: ParquetBarStore) -> APIRouter:
                 start=start,
                 end=end,
                 limit=limit,
-                output_format=output_format,
+                format=output_format,
             ),
             formats=EXPORT_FORMATS,
             default_format="parquet",
@@ -200,7 +213,7 @@ def _validate_query(
             raise InvalidInstrumentError(message) from None
 
     output_format = (
-        default_format if raw.output_format is None else raw.output_format
+        default_format if raw.format is None else raw.format
     )
     if output_format not in formats:
         message = (
@@ -248,17 +261,74 @@ def _parse_limit(raw_limit: str | None) -> int | None:
     return limit
 
 
+# -- storage access ---------------------------------------------------------
+#
+# Every read helper takes the validated `BarQuery` instead of re-exploding the
+# same `(instrument_id, interval, start_ns, end_ns, limit)` clump at each call
+# site. The store API stays primitive; only this module knows the mapping.
+
+
+def _query_filters(query: BarQuery) -> dict[str, Any]:
+    return {
+        "instrument_id": query.instrument,
+        "interval": query.interval,
+        "start_ns": query.start_ns,
+        "end_ns": query.end_ns,
+    }
+
+
+def _count_store_bars(store: ParquetBarStore, query: BarQuery) -> int:
+    return store.count_bars(**_query_filters(query))
+
+
+def _read_store_bars(
+    store: ParquetBarStore,
+    query: BarQuery,
+    *,
+    limit: int | None,
+) -> pa.Table:
+    return store.read_bars(**_query_filters(query), limit=limit)
+
+
+def _iter_store_batches(
+    store: ParquetBarStore,
+    query: BarQuery,
+    *,
+    limit: int | None,
+) -> Iterator[pa.RecordBatch]:
+    return store.iter_batches(**_query_filters(query), limit=limit)
+
+
+def _read_earliest_bars(
+    store: ParquetBarStore,
+    query: BarQuery,
+    *,
+    keep: int,
+) -> pa.Table:
+    """Return the globally earliest ``keep`` Bars in ascending `open_ts` order.
+
+    Storage order is not a time order (Manifest entries are append-ordered and
+    Data Files may overlap), so a plain `limit` read cannot produce a page.
+    Scanning every matching row and retaining only the smallest ``keep`` rows
+    keeps memory bounded by the page size while preserving Arrow types exactly
+    (no Python datetime/decimal round-trip).
+    """
+    selected: pa.Table | None = None
+    for batch in _iter_store_batches(store, query, limit=None):
+        table = pa.Table.from_batches([batch], schema=BAR_SCHEMA)
+        if selected is not None:
+            table = pa.concat_tables([selected, table])
+        selected = table.sort_by([("open_ts", "ascending")]).slice(0, keep)
+    if selected is None:
+        return pa.Table.from_batches([], schema=BAR_SCHEMA)
+    return selected
+
+
 # -- JSON -------------------------------------------------------------------
 
 
 async def _respond_json(store: ParquetBarStore, query: BarQuery) -> Response:
-    total = await asyncio.to_thread(
-        store.count_bars,
-        instrument_id=query.instrument,
-        interval=query.interval,
-        start_ns=query.start_ns,
-        end_ns=query.end_ns,
-    )
+    total = await asyncio.to_thread(_count_store_bars, store, query)
     # `limit` caps the response, so only the rows that would actually be
     # rendered count against the JSON ceiling.
     effective_total = total if query.limit is None else min(total, query.limit)
@@ -275,27 +345,22 @@ async def _respond_json(store: ParquetBarStore, query: BarQuery) -> Response:
     # Pagination metadata is a single-Instrument feature: it needs both
     # `instrument` and `limit` (limit=0 counts) to be unambiguous.
     paginated = query.instrument is not None and query.limit is not None
-    # Read one extra row so the next page's inclusive `start` is known.
-    read_limit = query.limit + 1 if paginated else query.limit
-
-    table = await asyncio.to_thread(
-        store.read_bars,
-        instrument_id=query.instrument,
-        interval=query.interval,
-        start_ns=query.start_ns,
-        end_ns=query.end_ns,
-        limit=read_limit,
-    )
     if not paginated:
+        table = await asyncio.to_thread(
+            _read_store_bars, store, query, limit=query.limit
+        )
         return JSONResponse({"bars": table_to_messages(table)})
 
     assert query.limit is not None  # narrowed by `paginated`
     limit = query.limit
     # The paginated JSON surface has an explicit ordering contract: open_ts
-    # ascending. Non-paginated JSON and the streaming formats keep storage
-    # order.
-    if table.num_rows > 1:
-        table = table.sort_by([("open_ts", "ascending")])
+    # ascending. Storage order is not ordered (the Manifest is append-ordered
+    # and files may overlap), so reading `limit + 1` rows first would pick the
+    # wrong page. Stream every matching row and retain only the smallest
+    # `limit + 1` by `open_ts`, then render them in ascending order.
+    table = await asyncio.to_thread(
+        _read_earliest_bars, store, query, keep=limit + 1
+    )
 
     has_more = table.num_rows > limit
     next_start: str | None = None
@@ -321,9 +386,9 @@ async def _stream_arrow(
     return StreamingResponse(
         _arrow_body(store, query),
         headers={
-            "Content-Type": ARROW_STREAM_CONTENT_TYPE,
-            "Content-Disposition": (
-                f'inline; filename="{query.interval}-bars.arrow"'
+            "Content-Type": ARROW_STREAM_MEDIA_TYPE,
+            "Content-Disposition": content_disposition(
+                "inline", f"{query.interval}-bars.arrow"
             ),
         },
     )
@@ -369,9 +434,9 @@ async def _stream_csv(
     return StreamingResponse(
         _csv_body(store, query),
         headers={
-            "Content-Type": CSV_CONTENT_TYPE,
-            "Content-Disposition": (
-                f'inline; filename="{query.interval}-bars.csv"'
+            "Content-Type": CSV_MEDIA_TYPE,
+            "Content-Disposition": content_disposition(
+                "inline", f"{query.interval}-bars.csv"
             ),
         },
     )
@@ -393,13 +458,7 @@ async def _iter_batches(
     query: BarQuery,
 ) -> AsyncIterator[pa.RecordBatch]:
     """Iterate Bar batches on worker threads so the event loop stays free."""
-    iterator = store.iter_batches(
-        instrument_id=query.instrument,
-        interval=query.interval,
-        start_ns=query.start_ns,
-        end_ns=query.end_ns,
-        limit=query.limit,
-    )
+    iterator = _iter_store_batches(store, query, limit=query.limit)
     while True:
         batch = await asyncio.to_thread(next, iterator, _END_OF_BATCHES)
         if batch is _END_OF_BATCHES:
@@ -444,19 +503,13 @@ async def _export_file(
         _remove_export(path)
         raise
 
-    if query.format == "parquet":
-        content_type = PARQUET_CONTENT_TYPE
-        suffix = "parquet"
-    else:
-        content_type = ARROW_FILE_CONTENT_TYPE
-        suffix = "arrow"
-
+    spec = _EXPORT_SPECS[query.format]
     return StreamingResponse(
         _file_body(path),
         headers={
-            "Content-Type": content_type,
-            "Content-Disposition": (
-                f'attachment; filename="{query.interval}-bars.{suffix}"'
+            "Content-Type": spec.content_type,
+            "Content-Disposition": content_disposition(
+                "attachment", f"{query.interval}-bars.{spec.suffix}"
             ),
             "Content-Length": str(stat.st_size),
         },
@@ -480,22 +533,13 @@ async def _file_body(path: Path) -> AsyncIterator[bytes]:
 
 def _write_export_file(store: ParquetBarStore, query: BarQuery) -> Path:
     """Materialize the query into one temporary Parquet/Arrow file."""
+    spec = _EXPORT_SPECS[query.format]
     tempdir = Path(tempfile.mkdtemp(prefix=_EXPORT_PREFIX))
-    suffix = "parquet" if query.format == "parquet" else "arrow"
-    path = tempdir / f"{query.interval}-bars.{suffix}"
+    path = tempdir / f"{query.interval}-bars.{spec.suffix}"
 
     try:
-        batches = store.iter_batches(
-            instrument_id=query.instrument,
-            interval=query.interval,
-            start_ns=query.start_ns,
-            end_ns=query.end_ns,
-            limit=query.limit,
-        )
-        if query.format == "parquet":
-            _write_parquet_export(batches, path, store)
-        else:
-            _write_arrow_export(batches, path)
+        batches = _iter_store_batches(store, query, limit=query.limit)
+        spec.writer(batches, path, store)
     except Exception:
         shutil.rmtree(tempdir, ignore_errors=True)
         raise
@@ -524,6 +568,7 @@ def _write_parquet_export(
 def _write_arrow_export(
     batches: Iterator[pa.RecordBatch],
     path: Path,
+    _store: ParquetBarStore,
 ) -> None:
     with (
         pa.OSFile(str(path), "wb") as sink,
@@ -531,6 +576,18 @@ def _write_arrow_export(
     ):
         for batch in batches:
             writer.write_batch(batch)
+
+
+# One mapping owns the `format` -> media type, suffix and writer choice, so the
+# response headers and the materialized file cannot disagree.
+_EXPORT_SPECS: dict[str, _ExportSpec] = {
+    "parquet": _ExportSpec(
+        PARQUET_MEDIA_TYPE, "parquet", _write_parquet_export
+    ),
+    "arrow": _ExportSpec(
+        ARROW_FILE_MEDIA_TYPE, "arrow", _write_arrow_export
+    ),
+}
 
 
 def _remove_export(path: Path) -> None:
@@ -575,13 +632,9 @@ def _empty_batch() -> pa.RecordBatch:
 
 
 __all__ = [
-    "ARROW_FILE_CONTENT_TYPE",
-    "ARROW_STREAM_CONTENT_TYPE",
     "BARS_FORMATS",
-    "CSV_CONTENT_TYPE",
     "EXPORT_FORMATS",
     "JSON_ROW_LIMIT",
-    "PARQUET_CONTENT_TYPE",
     "BarQuery",
     "create_router",
 ]

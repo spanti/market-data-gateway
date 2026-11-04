@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse
 
 from mdgw.core.errors import (
@@ -48,6 +49,11 @@ def create_router(*, instrument_store: InstrumentStore | None) -> APIRouter:
 
     @router.get("/api/v1/instruments/{instrument_id:path}")
     async def get_instrument(instrument_id: str) -> JSONResponse:
+        if not instrument_id:
+            # `/api/v1/instruments/` matches the `:path` converter with an
+            # empty id. The retired `{instrument_id:.+}` route returned 404,
+            # so keep that parity instead of reporting an invalid InstrumentId.
+            raise StarletteHTTPException(status_code=404, detail="not found")
         try:
             InstrumentId.parse(instrument_id)
         except ValueError:

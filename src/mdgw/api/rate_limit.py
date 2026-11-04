@@ -7,7 +7,8 @@ request id, request metrics and the completion log.
 
 Keys are the client IP from `scope["client"]` (``X-Forwarded-For`` is never
 trusted) plus the matched route template. Templates keep the metric label and
-bucket count bounded; an unmatched path falls back to the raw path.
+bucket count bounded; an unmatched path collapses onto the fixed
+``<unmatched>`` template instead of the raw, unbounded request path.
 """
 
 from __future__ import annotations
@@ -15,9 +16,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from starlette.requests import Request
-from starlette.routing import Match
 
 from mdgw.api.errors import RATE_LIMITED, error_response, get_request_id
+from mdgw.api.routing import (
+    ROUTE_TEMPLATE_SCOPE_KEY,
+    pre_match_route_template,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, MutableMapping
@@ -68,9 +72,12 @@ class RateLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        route = self._route_template(scope)
-        retry_after_s = await self.limiter.acquire(client_ip(scope), route)
-        if retry_after_s is None:
+        route = pre_match_route_template(scope, self._routes)
+        # Publish the template before the router runs. A 429 never reaches
+        # routing, and an allowed request keeps the same label either way.
+        scope[ROUTE_TEMPLATE_SCOPE_KEY] = route
+        decision = await self.limiter.acquire(client_ip(scope), route)
+        if decision.allowed:
             await self.app(scope, receive, send)
             return
 
@@ -85,19 +92,10 @@ class RateLimitMiddleware:
             message=RATE_LIMITED_MESSAGE,
             status=429,
             request_id=get_request_id(Request(scope)),
-            details={"retry_after_s": retry_after_s},
-            headers={"Retry-After": str(retry_after_s)},
+            details={"retry_after_s": decision.retry_after_s},
+            headers={"Retry-After": str(decision.retry_after_s)},
         )
         await response(scope, receive, send)
-
-    def _route_template(self, scope: MutableMapping[str, Any]) -> str:
-        for route in self._routes:
-            match, _ = route.matches(scope)
-            if match is not Match.NONE:
-                path = getattr(route, "path", None)
-                if isinstance(path, str) and path:
-                    return path
-        return str(scope.get("path", ""))
 
 
 __all__ = [
