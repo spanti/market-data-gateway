@@ -15,6 +15,7 @@ from starlette.datastructures import Headers, MutableHeaders
 
 from mdgw.api.errors import REQUEST_ID_STATE_KEY, error_response
 from mdgw.core.errors import INTERNAL_ERROR
+from mdgw.metrics import DEFAULT_HTTP_DURATION_BUCKETS
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, MutableMapping
@@ -112,16 +113,25 @@ class RequestContextMiddleware:
     ) -> None:
         path = _route_label(scope)
         method = str(scope.get("method", ""))
-        duration_ms = (time.perf_counter() - started) * 1000.0
+        duration_s = time.perf_counter() - started
+        duration_ms = duration_s * 1000.0
         if self.metrics is not None:
+            labels = {
+                "method": method,
+                "path": path,
+                "status": str(status),
+            }
             self.metrics.inc(
                 "mdgw_api_http_requests_total",
-                labels={
-                    "method": method,
-                    "path": path,
-                    "status": str(status),
-                },
+                labels=labels,
                 help="HTTP requests handled by the api role",
+            )
+            self.metrics.observe(
+                "mdgw_api_http_request_duration_seconds",
+                duration_s,
+                labels=labels,
+                help="HTTP request duration in seconds",
+                buckets=DEFAULT_HTTP_DURATION_BUCKETS,
             )
         logger.info(
             "http request completed",
