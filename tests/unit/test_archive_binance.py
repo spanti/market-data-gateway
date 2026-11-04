@@ -11,6 +11,7 @@ from decimal import Decimal
 import pytest
 
 from mdgw.archive.binance import (
+    DEFAULT_BASE_URL,
     ArchiveFormatError,
     ArchivePeriod,
     UNIT_MS,
@@ -108,6 +109,16 @@ def test_daily_and_monthly_urls_and_filenames() -> None:
     assert archive_url("https://data.binance.vision/", "spot", SYMBOL, "1m", monthly) == (
         "https://data.binance.vision/spot/monthly/klines/BTCUSDT/1m/"
         "BTCUSDT-1m-2024-01.zip"
+    )
+
+
+def test_default_base_url_includes_the_archive_data_prefix() -> None:
+    daily = ArchivePeriod("daily", DAY, DAY)
+
+    assert DEFAULT_BASE_URL == "https://data.binance.vision/data"
+    assert archive_url(DEFAULT_BASE_URL, "spot", SYMBOL, "1m", daily) == (
+        "https://data.binance.vision/data/spot/daily/klines/BTCUSDT/1m/"
+        "BTCUSDT-1m-2024-01-01.zip"
     )
 
 

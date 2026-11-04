@@ -29,6 +29,8 @@ mdgw = "mdgw.cli:main"
 [project.optional-dependencies]
 test = ["pytest>=8", "websockets>=13"]
 client-ws = ["websockets>=13"]
+# Optional consumer stack for examples/nautilus_macd_backtest.py.
+nautilus = ["nautilus-trader>=2.0.0rc7", "numpy", "pandas"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

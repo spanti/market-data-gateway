@@ -29,7 +29,7 @@ from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import ns_to_datetime
 
-DEFAULT_BASE_URL = "https://data.binance.vision"
+DEFAULT_BASE_URL = "https://data.binance.vision/data"
 SUPPORTED_GRANULARITIES = ("auto", "daily", "monthly")
 SUPPORTED_ARCHIVE_INTERVAL = "1m"
 

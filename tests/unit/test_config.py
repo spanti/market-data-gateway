@@ -383,3 +383,27 @@ def test_rate_limit_config_accepts_zero_burst_and_unlimited_sessions() -> None:
     assert config.rate_limit.requests_per_second == pytest.approx(0.5)
     assert config.rate_limit.burst == 0
     assert config.rate_limit.max_ws_sessions_per_ip == 0
+
+
+def test_feed_proxy_is_optional_stripped_and_validated() -> None:
+    feed = FeedConfig(
+        name="binance_spot",
+        venue="binance",
+        symbols=("BTC/USDT",),
+        proxy=" http://127.0.0.1:12334 ",
+    )
+    assert feed.proxy == "http://127.0.0.1:12334"
+    assert (
+        FeedConfig(
+            name="binance_spot", venue="binance", symbols=("BTC/USDT",)
+        ).proxy
+        is None
+    )
+
+    with pytest.raises(ValidationError, match="http"):
+        FeedConfig(
+            name="binance_spot",
+            venue="binance",
+            symbols=("BTC/USDT",),
+            proxy="127.0.0.1:12334",
+        )

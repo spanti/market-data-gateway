@@ -176,6 +176,9 @@ class FeedConfig(_ConfigModel):
     # Feed Handler does not consume these yet.
     batch_window_ms: int = Field(default=100, ge=0)
     batch_max_events: int = Field(default=500, ge=1)
+    # Optional HTTP proxy shared by ccxt.pro REST and WSS (e.g. Clash).
+    # This is deployment-specific; leave unset to connect directly.
+    proxy: str | None = None
     # Development/test Feed Handler (`kind = "fake"`). It emits a deterministic
     # run of closed 1m Bars and never reaches the network. `fake_bars = 0`
     # disables the generator.
@@ -210,6 +213,19 @@ class FeedConfig(_ConfigModel):
         cleaned = value.strip()
         if not cleaned:
             msg = "fake_start_ts must be an ISO-8601 string"
+            raise ValueError(msg)
+        return cleaned
+
+    @field_validator("proxy")
+    @classmethod
+    def _proxy_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        if not cleaned.startswith(("http://", "https://")):
+            msg = "proxy must be an http:// or https:// URL"
             raise ValueError(msg)
         return cleaned
 

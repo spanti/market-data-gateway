@@ -1,9 +1,10 @@
 # Consumer examples
 
-Four runnable consumers, one per interface. Every script accepts `--help`,
-takes endpoints/ports as arguments, and needs no runtime dependency beyond what
-the project already ships (`pyarrow`, `pyzmq`, the standard library, and
-`websockets` for the WebSocket example).
+Five runnable consumers, one per interface. Every script accepts `--help` and
+takes endpoints/ports as arguments. The first four need no runtime dependency
+beyond what the project already ships (`pyarrow`, `pyzmq`, the standard library,
+and `websockets` for the WebSocket example). The NautilusTrader example needs
+the optional `nautilus` extra.
 
 ## Start the demo stack
 
@@ -100,6 +101,68 @@ python examples/replay.py \
 `asap` pushes as fast as possible. `realtime` paces Bars by `--speed`; use a
 large value such as `--speed 1000` for a short demo. The script prints the
 End of Session message (`reason` and `bars_sent`) when the range is exhausted.
+
+## 5. NautilusTrader MACD backtest
+
+`nautilus_macd_backtest.py` fetches Arrow Bar history with `mdgw_client`,
+converts it to a pandas frame (latest revision, ascending time), and uses
+NautilusTrader's `BarDataWrangler` to produce `Bar` objects, then runs a MACD
+crossover strategy through `BacktestEngine`. Decimals and nanosecond timestamps
+stay exact; no price passes through a float.
+
+Install the optional consumer stack (NautilusTrader 2.x is a pre-release):
+
+```bash
+pip install -e ".[nautilus]"
+# or: pip install -U --pre nautilus_trader numpy pandas
+```
+
+Then, with the Docker stack running (`docker compose up -d`):
+
+```bash
+python examples/nautilus_macd_backtest.py \
+    --base-url http://127.0.0.1:8080 \
+    --instrument binance:BTC/USDT --interval 1m --reports
+```
+
+The Compose demo feed emits a flat price series, so MACD produces zero
+crossings. Point `--base-url` at a gateway with real history (or backfilled /
+replayed data) to see signals, fills and PnL. The script prints the fetched Bar
+count, MACD crossings, submitted entries, fills and the final account total.
+
+### Real history
+
+Two ways to give the gateway real Bars:
+
+```bash
+# A) Live ccxt collector (needs network access to the venue; backfills 24h)
+pip install -e .
+mdgw up --config config/gateway.toml --root data-live --log-level INFO
+
+# B) Binance archive backfill (no venue API key; uses data.binance.vision)
+mdgw backfill --archive --config config/gateway.toml --root data-real \
+    --instrument binance:BTC/USDT --venue binance --market-type spot \
+    --interval 1m --start 2025-01-01 --end 2025-01-03
+mdgw run --service api --config config/gateway.toml --root data-real
+```
+
+Stop Docker first (`docker compose down`) so the local API can bind 8080. Then
+run the example as above with `--base-url http://127.0.0.1:8080`. The archive
+mode reads the public Binance K-line ZIPs and writes the same Parquet Dataset,
+so the REST/WS contract and the example are unchanged. `--start/--end` select
+the real window; one day of 1m Bars is already enough for MACD(12, 26, 9).
+
+If the venue API requires a proxy, add it to the `[[feeds]]` entry; the same
+proxy is used for ccxt.pro REST and WSS:
+
+```toml
+[[feeds]]
+# ...
+proxy = "http://127.0.0.1:12334"
+```
+
+The gateway itself never imports NautilusTrader; this is a pure consumer
+example. `ADR-0001` still holds: no framework adapters live under `src/`.
 
 ## Notes
 

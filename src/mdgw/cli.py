@@ -316,9 +316,9 @@ def backfill(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
         help="read archives from this local directory; never touches the network",
     ),
     base_url: str = typer.Option(
-        "https://data.binance.vision",
+        "https://data.binance.vision/data",
         "--base-url",
-        help="data.binance.vision base URL",
+        help="archive base URL (includes the /data prefix)",
     ),
     timeout_s: float = typer.Option(30.0, "--timeout-s"),
     retries: int = typer.Option(3, "--retries"),

@@ -810,9 +810,13 @@ def _create_exchange(feed_config: FeedConfig):
     if exchange_class is None:
         msg = f"unknown ccxt Venue: {feed_config.venue!r}"
         raise ValueError(msg)
-    return exchange_class(
-        {
-            "enableRateLimit": feed_config.enable_rate_limit,
-            "options": {"defaultType": feed_config.market_type},
-        }
-    )
+    options: dict = {
+        "enableRateLimit": feed_config.enable_rate_limit,
+        "options": {"defaultType": feed_config.market_type},
+    }
+    if feed_config.proxy:
+        # ccxt.pro uses aiohttp for REST and websockets for WSS. The proxy
+        # applies to both so the watcher does not bypass it.
+        options["aiohttp_proxy"] = feed_config.proxy
+        options["wss_proxy"] = feed_config.proxy
+    return exchange_class(options)

@@ -59,13 +59,25 @@ BAR = Bar(
 BAR_PAYLOAD = table_to_ipc(bars_to_logical_table([BAR]))
 
 
+def _unused_endpoint() -> str:
+    """A loopback tcp endpoint with no listener, isolated from a real stack."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind((HOST, 0))
+        return f"tcp://{HOST}:{probe.getsockname()[1]}"
+
+
 def _config():
     config = load_config(PROJECT_ROOT / "config" / "gateway.toml")
     server = config.server.model_copy(
         update={"http_port": 0, "host": HOST}
     )
     bus = config.bus.model_copy(
-        update={"api_pub_bind": "tcp://127.0.0.1:0"}
+        update={
+            "api_pub_bind": "tcp://127.0.0.1:0",
+            # Do not accidentally connect to a collector from a running
+            # Docker stack on the default 5555 port.
+            "collector_pub_connect": _unused_endpoint(),
+        }
     )
     return config.model_copy(update={"server": server, "bus": bus})
 

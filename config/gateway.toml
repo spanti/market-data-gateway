@@ -110,6 +110,8 @@ data_types = ["bar"]
 symbols = ["BTC/USDT", "ETH/USDT"]
 backfill_hours = 24
 stale_after_s = 120
+# Optional HTTP proxy for ccxt.pro REST and WSS (e.g. Clash).
+proxy = "http://127.0.0.1:12334"
 # Retained for the collector batching ticket; not consumed by the Feed Handler.
 batch_window_ms = 100
 batch_max_events = 500

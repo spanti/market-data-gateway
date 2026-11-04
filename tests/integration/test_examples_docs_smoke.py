@@ -183,6 +183,15 @@ def test_examples_help_exits_zero(script: Path) -> None:
     assert "usage" in result.stdout.lower()
 
 
+def test_nautilus_macd_example_help_exits_zero() -> None:
+    # NautilusTrader is an optional consumer extra; skip where it is absent.
+    pytest.importorskip("nautilus_trader")
+    result = _run(EXAMPLES / "nautilus_macd_backtest.py", "--help")
+
+    assert result.returncode == 0, result.stderr
+    assert "usage" in result.stdout.lower()
+
+
 @pytest.mark.parametrize(
     "script",
     [
