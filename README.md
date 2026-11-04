@@ -56,6 +56,20 @@ docker compose up --build
 This starts collector, api and replay from `config/gateway.docker.toml`. The
 fake feed never reaches a Venue. API: <http://127.0.0.1:8080>.
 
+If a previous attempt left containers or ports behind, reset before retrying:
+
+```bash
+docker compose down --remove-orphans
+docker compose up --build -d
+```
+
+If dependency installation is slow or blocked, point pip at a mirror without
+editing the Dockerfile:
+
+```bash
+PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple docker compose up --build -d
+```
+
 ### Optional observability stack
 
 Prometheus and Grafana are opt-in. Plain `docker compose up` does not start
@@ -69,7 +83,8 @@ Prometheus listens on <http://localhost:9090> and scrapes the collector, api
 and replay `/metrics` endpoints every 15 seconds. Grafana listens on
 <http://localhost:3000> (admin password from `GRAFANA_ADMIN_PASSWORD`, default
 `admin` for local use) with the Prometheus datasource and the gateway
-dashboard pre-provisioned.
+dashboard pre-provisioned. Registry mirrors can be supplied with
+`PROMETHEUS_IMAGE` and `GRAFANA_IMAGE`.
 
 ### Local Python
 

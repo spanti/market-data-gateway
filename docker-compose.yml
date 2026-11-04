@@ -1,6 +1,19 @@
+# All three Service Roles run the same image. Sharing one image tag guarantees
+# every role runs identical code instead of three separately tagged copies.
+# Override PIP_INDEX_URL for a package mirror, e.g.
+#   PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple docker compose up --build -d
+# If a previous attempt left containers or ports behind:
+#   docker compose down --remove-orphans
+x-mdgw-image: &mdgw-image
+  image: market-data-gateway:local
+  build:
+    context: .
+    args:
+      PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple/}
+
 services:
   collector:
-    build: .
+    <<: *mdgw-image
     command:
       - mdgw
       - run
@@ -27,7 +40,7 @@ services:
     restart: unless-stopped
 
   api:
-    build: .
+    <<: *mdgw-image
     command:
       - mdgw
       - run
@@ -46,7 +59,7 @@ services:
     restart: unless-stopped
 
   replay:
-    build: .
+    <<: *mdgw-image
     command:
       - mdgw
       - run
