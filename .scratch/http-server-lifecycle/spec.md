@@ -2,7 +2,7 @@
 
 # Spec: 一个模块拥有 HTTP 服务器生命周期
 
-Status: superseded
+Status: wontfix
 
 ## Problem Statement
 

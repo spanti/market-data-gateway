@@ -178,9 +178,12 @@ python benchmarks/bench_replay.py
   total-order promise. Multi-Instrument pagination is not offered.
 - **HTTP surface details.** HEAD is not part of the contract, trailing slashes
   are not redirected (`redirect_slashes=False`), and `/docs` cannot be
-  disabled (Swagger UI is always served; `/redoc` is not). Errors always use
-  the `{"error": {code, message, details, request_id}}` envelope with
-  `X-Request-ID`.
+  disabled (Swagger UI is always served; `/redoc` is not). An empty instrument
+  id such as `/api/v1/instruments/` returns `not_found` (404), matching the
+  retired route. Errors always use the
+  `{"error": {code, message, details, request_id}}` envelope with
+  `X-Request-ID`; collector/replay health endpoints keep their existing
+  response shapes.
 - **Rate limiting is opt-in and in-process.** `[rate_limit]` is disabled by
   default. When enabled it is a per-IP/per-route token bucket with fixed
   exemptions (`/healthz`, `/readyz`, `/metrics`, `/openapi.json`, `/docs`);

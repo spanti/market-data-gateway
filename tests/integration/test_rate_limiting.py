@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
@@ -188,6 +189,79 @@ def test_rate_limited_counter_is_rendered_on_metrics(tmp_path: Path) -> None:
         f'mdgw_api_rate_limited_total{{path="{INSTRUMENTS_PATH}"}} 1'
         in rendered
     )
+
+
+def test_unmatched_paths_share_one_bucket_and_sentinel_label(
+    tmp_path: Path,
+) -> None:
+    """Random 404s must not create unbounded buckets or metric label values."""
+    config = _config(enabled=True, requests_per_second=0.001, burst=1)
+    bus = config.bus.model_copy(update={"api_pub_bind": "tcp://127.0.0.1:0"})
+    service = ApiService(
+        config.model_copy(update={"bus": bus}),
+        data_root=tmp_path,
+    )
+    try:
+        service.start()
+        statuses = [
+            _request(f"{service.base_url}/no-such-path-{index}")[0]
+            for index in range(5)
+        ]
+        _, _, body = _request(f"{service.base_url}/metrics")
+        rendered = body.decode("utf-8")
+    finally:
+        service.stop()
+
+    # The first unknown path drains the only token; every later, *distinct*
+    # unknown path is denied because they all key on the same bucket.
+    assert statuses == [404, 429, 429, 429, 429]
+    assert (
+        'mdgw_api_rate_limited_total{path="<unmatched>"} 4' in rendered
+    )
+    # Neither the bucket metric nor the request metrics leaked raw paths.
+    assert 'path="/no-such-path-' not in rendered
+
+
+def test_429_before_routing_uses_the_matched_route_template_label(
+    tmp_path: Path,
+) -> None:
+    """A 429 never reaches routing, so the preset template must label it."""
+    config = _config(enabled=True, requests_per_second=50, burst=0)
+    bus = config.bus.model_copy(update={"api_pub_bind": "tcp://127.0.0.1:0"})
+    service = ApiService(
+        config.model_copy(update={"bus": bus}),
+        data_root=tmp_path,
+    )
+    series = (
+        'method="GET",path="/api/v1/instruments/{instrument_id:path}",'
+        'status="429"'
+    )
+    rendered = ""
+    try:
+        service.start()
+        status, _, _ = _request(
+            f"{service.base_url}/api/v1/instruments/binance:BTC/USDT"
+        )
+        assert status == 429
+
+        deadline = time.monotonic() + WAIT_TIMEOUT_S
+        while time.monotonic() < deadline:
+            _, _, body = _request(f"{service.base_url}/metrics")
+            rendered = body.decode("utf-8")
+            if (
+                f"mdgw_api_http_request_duration_seconds_count{{{series}}}"
+                in rendered
+            ):
+                break
+            time.sleep(0.02)
+    finally:
+        service.stop()
+
+    assert (
+        f"mdgw_api_http_request_duration_seconds_count{{{series}}} 1"
+        in rendered
+    ), rendered
+    assert f"mdgw_api_http_requests_total{{{series}}} 1" in rendered
 
 
 def test_per_ip_ws_session_cap_rejects_the_second_connection(

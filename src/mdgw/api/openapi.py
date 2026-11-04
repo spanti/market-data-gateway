@@ -16,18 +16,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from mdgw.api.formats import (
+    ARROW_FILE_MEDIA_TYPE,
+    ARROW_STREAM_MEDIA_TYPE,
+    BARS_FORMAT_VALUES,
+    CSV_MEDIA_TYPE,
+    EXPORT_FORMAT_VALUES,
+    INTERVAL_VALUES,
+    JSON_MEDIA_TYPE,
+    PARQUET_MEDIA_TYPE,
+)
+
 if TYPE_CHECKING:
     from fastapi import FastAPI
-
-JSON_MEDIA_TYPE = "application/json"
-ARROW_STREAM_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
-ARROW_FILE_MEDIA_TYPE = "application/vnd.apache.arrow.file"
-PARQUET_MEDIA_TYPE = "application/vnd.apache.parquet"
-CSV_MEDIA_TYPE = "text/csv; charset=utf-8"
-
-INTERVAL_VALUES = ("1m", "5m", "15m", "1h", "1d")
-BARS_FORMAT_VALUES = ("json", "arrow", "csv")
-EXPORT_FORMAT_VALUES = ("parquet", "arrow")
 
 _TIMESTAMP_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z$"
 _DECIMAL_PATTERN = r"^-?\d+(?:\.\d+)?$"

@@ -1,7 +1,10 @@
 """FastAPI application factory for the REST / WebSocket / ops HTTP surface.
 
-It keeps the same name and keyword-only parameter shape as the retired
-`mdgw.api.server.create_app` so production call sites did not need rewriting.
+It keeps the retired `mdgw.api.server.create_app` name and every existing
+keyword-only parameter (same names and order), so production call sites stayed
+source-compatible. The one deliberate addition is the keyword-only
+``rate_limit: RateLimitConfig | None = None`` parameter; omitting it preserves
+the previous unthrottled behaviour.
 """
 
 from __future__ import annotations
@@ -57,9 +60,6 @@ def create_app(  # ruff: ignore[too-many-arguments]  # keyword-only app configur
     install_exception_handlers(app)
 
     limiter = _build_rate_limiter(rate_limit)
-    # The WebSocket route reads the limiter from here for its handshake and
-    # per-IP session cap.
-    app.state.rate_limiter = limiter
 
     app.include_router(
         ops.create_router(
@@ -76,7 +76,11 @@ def create_app(  # ruff: ignore[too-many-arguments]  # keyword-only app configur
     app.include_router(bars.create_router(store=store))
     if ws_hub is not None:
         app.include_router(
-            websocket.create_router(ws_hub=ws_hub, ws_path=ws_path)
+            websocket.create_router(
+                ws_hub=ws_hub,
+                ws_path=ws_path,
+                rate_limiter=limiter,
+            )
         )
 
     if limiter is not None:

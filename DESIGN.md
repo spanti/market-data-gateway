@@ -193,7 +193,7 @@ stop(session_id)
 
 ## 4. HTTP 与 WebSocket API
 
-HTTP 面（REST、WebSocket 与运维端点）统一由 FastAPI（Starlette/ASGI）承担，旧的手写 aiohttp 分发与 `HttpServer` 已退役。生命周期由 `AsgiServer` 持有：它在 daemon 线程上运行私有事件循环与纯 `uvicorn`（`log_config=None`、`access_log=False`），保留 `start`、`stop`、`call_soon_threadsafe`、`bound_port`、`base_url` 五个公共成员，以及幂等启停、端口 0 解析、通配地址回显 `127.0.0.1`、启动失败完整回滚后重抛原异常的语义。路由按资源拆分在 `routes/bars.py`、`routes/instruments.py`、`routes/ops.py`、`routes/websocket.py`；中间件分层为请求上下文（`X-Request-ID`、请求指标、完成日志）与限流，二者都不缓冲 Arrow/CSV 流式响应体。`redirect_slashes=False`，末尾斜杠不会触发隐式重定向；不注册 HEAD 路由，HEAD 行为不在契约内。决策记录见 [ADR-0011](docs/adr/0011-fastapi-asgi-http-surface.md) 与 [ADR-0012](docs/adr/0012-single-instrument-pagination.md)。
+HTTP 面（REST、WebSocket 与运维端点）统一由 FastAPI（Starlette/ASGI）承担，旧的手写 aiohttp 分发与 `HttpServer` 已退役。生命周期由 `AsgiServer` 持有：它在 daemon 线程上运行私有事件循环与纯 `uvicorn`（`log_config=None`、`access_log=False`），保留 `start`、`stop`、`call_soon_threadsafe`、`bound_port`、`base_url` 五个公共成员，以及幂等启停、端口 0 解析、通配地址回显 `127.0.0.1`、启动失败完整回滚后重抛原异常的语义。路由按资源拆分在 `routes/bars.py`、`routes/instruments.py`、`routes/ops.py`、`routes/websocket.py`；中间件分层为请求上下文（`X-Request-ID`、请求指标、完成日志）与限流，二者都不缓冲 Arrow/CSV 流式响应体。`redirect_slashes=False`，末尾斜杠不会触发隐式重定向；`/api/v1/instruments/`（空 instrument id）返回 `not_found` 404；不注册 HEAD 路由，HEAD 行为不在契约内。决策记录见 [ADR-0011](docs/adr/0011-fastapi-asgi-http-surface.md) 与 [ADR-0012](docs/adr/0012-single-instrument-pagination.md)。
 
 ### 4.1 REST
 
@@ -214,7 +214,7 @@ GET /metrics
 - `format=arrow|csv` 无行数上限，边读边发，不把结果全量放进内存。
 - `export` 把同一读取器的结果落成一个 Parquet/Arrow 文件返回（一次性大文件下载）。
 - `/openapi.json` 与 `/docs` 始终开启且没有配置开关，`/redoc` 关闭。OpenAPI 只是由代码生成的发现文档，规范性真相仍是 `docs/data-contract.md` 与 Streaming Interface。
-- 限流由 `[rate_limit]` 配置控制，默认关闭；开启后按 `(源 IP, 路由模板)` 维护进程内令牌桶（`requests_per_second`、`burst`），并用 `max_ws_sessions_per_ip` 限制每个 IP 的并发 WebSocket 会话。`/healthz`、`/readyz`、`/metrics`、`/openapi.json`、`/docs` 固定豁免且不可配置；超限返回 429、`Retry-After` 与稳定错误码 `rate_limited`；WebSocket 在 `accept()` 之前拒绝。状态只在单 worker 进程内，不引入跨进程配额。
+- 限流由 `[rate_limit]` 配置控制，默认关闭；开启后按 `(源 IP, 路由模板)` 维护进程内令牌桶（`requests_per_second`、`burst`），并用 `max_ws_sessions_per_ip` 限制每个 IP 的并发 WebSocket 会话。`/healthz`、`/readyz`、`/metrics`、`/openapi.json`、`/docs` 固定豁免且不可配置；未匹配任何路由的请求使用固定 `<unmatched>` 模板作为桶键与指标标签，避免随机 404 造成基数膨胀；超限返回 429、`Retry-After` 与稳定错误码 `rate_limited`；WebSocket 在 `accept()` 之前拒绝。状态只在单 worker 进程内，不引入跨进程配额。
 - `/metrics` 输出 Prometheus 文本格式；除既有计数器与 gauge 外，新增 `mdgw_api_http_request_duration_seconds` histogram（标签 `method`、`path` 路由模板、`status`；桶为 0.005–5 秒与 `+Inf`）和 `mdgw_api_rate_limited_total{path}`。可选的 `docker-compose.observability.yml` 在默认 `docker compose up` 之外启动 Prometheus（9090）与 Grafana（3000），并抓取 collector、api、replay 三个 Service Role 的 `/metrics`。
 - 历史查询只读已落盘的 Data File；collector 的写缓冲（默认 1 小时）意味着**最近一段数据可能查不到**。`/api/v1/status` 必须暴露每个 Dataset 的 `last_flushed_ts`，客户端据此判断；需要实时性的消费者应使用 WebSocket / ZMQ，而不是历史接口。
 - 默认只绑定 `127.0.0.1`；v1 不做鉴权。
@@ -239,7 +239,7 @@ GET /metrics
 {"error": {"code": "invalid_instrument", "message": "...", "details": {}, "request_id": "..."}}
 ```
 
-稳定错误码：`invalid_instrument`、`instrument_not_found`、`invalid_interval`、`invalid_parameter`、`invalid_format`、`invalid_range`、`range_too_large`、`schema_version_mismatch`、`session_not_found`、`not_found`、`method_not_allowed`、`rate_limited`、`internal_error`。`dataset_not_found` 与 `feed_unavailable` 仅为未来候选，当前未实现。HTTP 状态码只做粗分类（400/404/405/409/429/500）。所有 HTTP 失败——包括 404、405、429 与参数校验——都使用上述 envelope，并回写 `X-Request-ID`；FastAPI 默认的 422 与 `{"detail": ...}` 从不暴露。
+稳定错误码：`invalid_instrument`、`instrument_not_found`、`invalid_interval`、`invalid_parameter`、`invalid_format`、`invalid_range`、`range_too_large`、`schema_version_mismatch`、`session_not_found`、`not_found`、`method_not_allowed`、`rate_limited`、`internal_error`。`dataset_not_found` 与 `feed_unavailable` 仅为未来候选，当前未实现。HTTP 状态码只做粗分类（400/404/405/409/429/500）。REST API 的所有失败——包括 404、405、429 与参数校验——都使用上述 envelope，并回写 `X-Request-ID`；FastAPI 默认的 422 与 `{"detail": ...}` 从不暴露。collector / replay 的 `ServiceHealthServer` 运维端点（`/healthz`、`/readyz`、`/metrics`、`/status`）保留既有响应形状，不套用该 envelope。
 
 ## 5. 运行规则
 

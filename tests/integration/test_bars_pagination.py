@@ -153,6 +153,29 @@ def test_multi_page_walk_has_no_duplicates_or_gaps_across_a_time_gap(
         assert len(page["bars"]) <= 2
 
 
+def test_pages_are_globally_ordered_when_storage_order_is_not(
+    tmp_path: Path,
+) -> None:
+    """Storage order is append order; pages must still be earliest-first."""
+    minutes = [5, 0, 4, 1, 3, 2]
+    with _runtime(
+        tmp_path, [_bar_input(minute) for minute in minutes]
+    ) as runtime:
+        runtime.start()
+        runtime.ingest()
+        seen, pages = _walk_pages(runtime.base_url, limit=2)
+
+    expected = [_iso(minute) for minute in sorted(minutes)]
+    assert seen == expected
+    assert len(seen) == len(set(seen))
+    assert pages[0]["page"] == {"has_more": True, "next_start": _iso(2)}
+    assert pages[1]["page"] == {"has_more": True, "next_start": _iso(4)}
+    assert pages[2]["page"] == {"has_more": False, "next_start": None}
+    for page in pages:
+        assert _open_times(page) == sorted(_open_times(page))
+        assert len(page["bars"]) <= 2
+
+
 def test_end_boundary_ignores_rows_outside_the_window(tmp_path: Path) -> None:
     minutes = [0, 1, 2, 3]
     with _runtime(tmp_path, [_bar_input(minute) for minute in minutes]) as runtime:

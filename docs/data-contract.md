@@ -372,7 +372,7 @@ the status.
 |---|---|---|
 | `invalid_instrument` | malformed `<venue>:<symbol>` | 400 |
 | `instrument_not_found` | unknown Instrument in the snapshot | 404 |
-| `not_found` | unknown path or unmatched route (including `/redoc`) | 404 |
+| `not_found` | unknown path or unmatched route (including `/redoc` and an empty instrument id such as `/api/v1/instruments/`) | 404 |
 | `method_not_allowed` | known path with an unsupported HTTP method (HEAD is not in the contract) | 405 |
 | `invalid_interval` | interval outside the Data Contract | 400 |
 | `invalid_parameter` | missing/invalid control or query field | 400 |
