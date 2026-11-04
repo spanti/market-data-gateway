@@ -13,6 +13,7 @@ from fastapi import FastAPI
 
 from mdgw.api.errors import install_exception_handlers
 from mdgw.api.middleware import RequestContextMiddleware
+from mdgw.api.openapi import install_openapi
 from mdgw.api.routes import bars, instruments, ops, websocket
 
 if TYPE_CHECKING:
@@ -48,6 +49,7 @@ def create_app(  # ruff: ignore[too-many-arguments]  # keyword-only app configur
         redoc_url=None,
         redirect_slashes=False,
     )
+    install_openapi(app)
     install_exception_handlers(app)
     app.add_middleware(RequestContextMiddleware, metrics=metrics)
 
