@@ -1,0 +1,16 @@
+# Grafana dashboard provisioning for the optional observability stack.
+#
+# The provider scans the mounted dashboard directory; the directory is also
+# mounted by docker-compose.observability.yml at the same container path.
+
+apiVersion: 1
+
+providers:
+  - name: Market Data Gateway
+    orgId: 1
+    folder: Market Data Gateway
+    type: file
+    disableDeletion: true
+    editable: false
+    options:
+      path: /var/lib/grafana/dashboards

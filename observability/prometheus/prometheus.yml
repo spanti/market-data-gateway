@@ -1,0 +1,30 @@
+# Optional Prometheus deployment for the Market Data Gateway.
+#
+# Loaded by docker-compose.observability.yml; the default `docker compose up`
+# never starts Prometheus. Each Service Role exposes the same text exposition
+# format on /metrics, so one job per role keeps the role label queryable.
+
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: collector
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["collector:8081"]
+    labels:
+      role: collector
+
+  - job_name: api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8080"]
+    labels:
+      role: api
+
+  - job_name: replay
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["replay:8082"]
+    labels:
+      role: replay
