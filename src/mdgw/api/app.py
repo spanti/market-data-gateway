@@ -13,12 +13,15 @@ from fastapi import FastAPI
 from mdgw.api.errors import install_exception_handlers
 from mdgw.api.middleware import RequestContextMiddleware
 from mdgw.api.openapi import install_openapi
+from mdgw.api.rate_limit import RateLimitMiddleware
 from mdgw.api.routes import bars, instruments, ops, websocket
+from mdgw.core.rate_limit import RateLimiter
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mdgw.api.ws_hub import WebSocketHub
+    from mdgw.config import RateLimitConfig
     from mdgw.metrics import MetricsRegistry
     from mdgw.reference import InstrumentStore
     from mdgw.store.parquet_dataset import ParquetBarStore
@@ -35,11 +38,13 @@ def create_app(  # ruff: ignore[too-many-arguments]  # keyword-only app configur
     status_provider: Callable[[], dict] | None = None,
     ready_provider: Callable[[], dict] | None = None,
     service_role: str | None = None,
+    rate_limit: RateLimitConfig | None = None,
 ) -> FastAPI:
     """Build the FastAPI application.
 
     Bars and ops are always registered; the WebSocket route only when the
-    runtime supplies a hub.
+    runtime supplies a hub. ``rate_limit=None`` (and a disabled config) leave
+    the app unthrottled.
     """
     app = FastAPI(
         title="Market Data Gateway API",
@@ -50,7 +55,11 @@ def create_app(  # ruff: ignore[too-many-arguments]  # keyword-only app configur
     )
     install_openapi(app)
     install_exception_handlers(app)
-    app.add_middleware(RequestContextMiddleware, metrics=metrics)
+
+    limiter = _build_rate_limiter(rate_limit)
+    # The WebSocket route reads the limiter from here for its handshake and
+    # per-IP session cap.
+    app.state.rate_limiter = limiter
 
     app.include_router(
         ops.create_router(
@@ -69,7 +78,31 @@ def create_app(  # ruff: ignore[too-many-arguments]  # keyword-only app configur
         app.include_router(
             websocket.create_router(ws_hub=ws_hub, ws_path=ws_path)
         )
+
+    if limiter is not None:
+        # Starlette prepends each added middleware, so adding the rate limiter
+        # first keeps it *inside* the request-context middleware: a 429 still
+        # gets `X-Request-ID`, request metrics and the completion log.
+        app.add_middleware(
+            RateLimitMiddleware,
+            limiter=limiter,
+            metrics=metrics,
+            routes=app.routes,
+        )
+    app.add_middleware(RequestContextMiddleware, metrics=metrics)
     return app
+
+
+def _build_rate_limiter(
+    rate_limit: RateLimitConfig | None,
+) -> RateLimiter | None:
+    if rate_limit is None or not rate_limit.enabled:
+        return None
+    return RateLimiter(
+        requests_per_second=rate_limit.requests_per_second,
+        burst=rate_limit.burst,
+        max_ws_sessions_per_ip=rate_limit.max_ws_sessions_per_ip,
+    )
 
 
 __all__ = ["create_app"]

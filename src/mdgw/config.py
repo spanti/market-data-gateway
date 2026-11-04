@@ -126,6 +126,18 @@ class StreamingConfig(_ConfigModel):
     lag_notice_interval_ms: int = Field(default=1000, ge=0)
 
 
+class RateLimitConfig(_ConfigModel):
+    """Default-off per-IP / per-route HTTP and WebSocket rate limiting."""
+
+    enabled: bool = False
+    # Steady-state refill per `(source_ip, route_template)` bucket.
+    requests_per_second: float = Field(default=50, gt=0)
+    # Bucket capacity; 0 denies the first request.
+    burst: int = Field(default=100, ge=0)
+    # Per-IP concurrent WebSocket sessions; 0 means unlimited.
+    max_ws_sessions_per_ip: int = Field(default=16, ge=0)
+
+
 
 class StorageConfig(_ConfigModel):
     root: Path = Path("./data")
@@ -310,6 +322,7 @@ class GatewayConfig(_ConfigModel):
     bus: BusConfig = Field(default_factory=BusConfig)
     service: ServiceConfig = Field(default_factory=ServiceConfig)
     streaming: StreamingConfig = Field(default_factory=StreamingConfig)
+    rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
     replay: ReplayConfig = Field(default_factory=ReplayConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)

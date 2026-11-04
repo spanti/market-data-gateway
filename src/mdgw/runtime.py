@@ -406,6 +406,7 @@ class GatewayRuntime:
             instrument_store=self.instrument_store,
             ws_hub=hub,
             ws_path=self.config.server.ws_path,
+            rate_limit=self.config.rate_limit,
         )
         self._http.start(
             app,

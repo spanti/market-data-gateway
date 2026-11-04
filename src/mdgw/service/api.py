@@ -310,6 +310,7 @@ class ApiService:
             status_provider=self.status_payload,
             ready_provider=self.ready_payload,
             service_role="api",
+            rate_limit=self.config.rate_limit,
         )
         self._http.start(
             app,

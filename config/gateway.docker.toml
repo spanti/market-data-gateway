@@ -38,6 +38,14 @@ api_ready_timeout_s = 60.0
 queue_size = 1000
 lag_notice_interval_ms = 1000
 
+[rate_limit]
+# Default-off per-IP / per-route token bucket. Enable per deployment.
+# `max_ws_sessions_per_ip = 0` disables the per-IP WebSocket session cap.
+enabled = false
+requests_per_second = 50
+burst = 100
+max_ws_sessions_per_ip = 16
+
 [replay]
 control_bind_host = "0.0.0.0"
 control_port = 5557

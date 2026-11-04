@@ -323,3 +323,63 @@ def test_disabled_retention_does_not_constrain_backfill() -> None:
     )
 
     assert config.collector.backfill_hours == 1000
+
+
+def test_rate_limit_config_defaults_are_disabled() -> None:
+    rate_limit = GatewayConfig().rate_limit
+
+    assert rate_limit.enabled is False
+    assert rate_limit.requests_per_second == 50
+    assert rate_limit.burst == 100
+    assert rate_limit.max_ws_sessions_per_ip == 16
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["gateway.toml", "gateway.demo.toml", "gateway.docker.toml"],
+)
+def test_repository_tomls_declare_disabled_rate_limit(name: str) -> None:
+    with (PROJECT_ROOT / "config" / name).open("rb") as handle:
+        raw = tomllib.load(handle)
+
+    section = raw["rate_limit"]
+    assert section["enabled"] is False
+    assert section["requests_per_second"] == 50
+    assert section["burst"] == 100
+    assert section["max_ws_sessions_per_ip"] == 16
+
+    config = load_config(PROJECT_ROOT / "config" / name)
+    assert config.rate_limit.enabled is False
+    assert config.rate_limit.requests_per_second == 50
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"rate_limit": {"requests_per_second": 0}},
+        {"rate_limit": {"requests_per_second": -1}},
+        {"rate_limit": {"burst": -1}},
+        {"rate_limit": {"max_ws_sessions_per_ip": -1}},
+    ],
+)
+def test_rate_limit_config_rejects_invalid_values(payload: dict) -> None:
+    with pytest.raises(ValidationError):
+        GatewayConfig.model_validate(payload)
+
+
+def test_rate_limit_config_accepts_zero_burst_and_unlimited_sessions() -> None:
+    config = GatewayConfig.model_validate(
+        {
+            "rate_limit": {
+                "enabled": True,
+                "requests_per_second": 0.5,
+                "burst": 0,
+                "max_ws_sessions_per_ip": 0,
+            }
+        }
+    )
+
+    assert config.rate_limit.enabled is True
+    assert config.rate_limit.requests_per_second == pytest.approx(0.5)
+    assert config.rate_limit.burst == 0
+    assert config.rate_limit.max_ws_sessions_per_ip == 0
