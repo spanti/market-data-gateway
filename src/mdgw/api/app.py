@@ -1,8 +1,7 @@
 """FastAPI application factory for the REST / WebSocket / ops HTTP surface.
 
-This is the ASGI replacement for `mdgw.api.server.create_app`; it keeps the
-same name and keyword-only parameter shape so ticket 09 can switch call sites
-without rewriting them. Production still serves the aiohttp app until then.
+It keeps the same name and keyword-only parameter shape as the retired
+`mdgw.api.server.create_app` so production call sites did not need rewriting.
 """
 
 from __future__ import annotations
@@ -40,7 +39,7 @@ def create_app(  # ruff: ignore[too-many-arguments]  # keyword-only app configur
     """Build the FastAPI application.
 
     Bars and ops are always registered; the WebSocket route only when the
-    runtime supplies a hub, mirroring the aiohttp app.
+    runtime supplies a hub.
     """
     app = FastAPI(
         title="Market Data Gateway API",

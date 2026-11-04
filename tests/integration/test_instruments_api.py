@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import urllib.error
 import urllib.request
@@ -11,9 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from aiohttp.test_utils import TestClient, TestServer
 
-from mdgw.api.server import create_app
+from mdgw.api.app import create_app
+from mdgw.api.asgi_server import AsgiServer
 from mdgw.config import load_config
 from mdgw.core.errors import INSTRUMENT_NOT_FOUND, UnknownInstrumentError
 from mdgw.ingest.fake import BarInput, FakeFeedHandler
@@ -318,14 +317,12 @@ def test_api_reads_only_the_snapshot_after_yaml_changes(tmp_path: Path) -> None:
         "  listing_ts: \"2020-01-01T00:00:00Z\"\n",
     )
 
-    status, payload = asyncio.run(
-        _request(
-            create_app(
-                ParquetBarStore(tmp_path / "data"),
-                instrument_store=InstrumentStore(export.path),
-            ),
-            "/api/v1/instruments",
-        )
+    status, payload = _request_app(
+        create_app(
+            ParquetBarStore(tmp_path / "data"),
+            instrument_store=InstrumentStore(export.path),
+        ),
+        "/api/v1/instruments",
     )
 
     assert status == 200
@@ -426,7 +423,17 @@ def test_rejected_batch_does_not_advance_aggregation_so_retry_emits_parent(
     assert payload["trade_count"] == 640
 
 
-async def _request(app, path: str) -> tuple[int, dict]:
-    async with TestClient(TestServer(app)) as client:
-        response = await client.get(path)
-        return response.status, await response.json()
+def _request_app(app, path: str) -> tuple[int, dict]:
+    """Serve ``app`` on a real socket and request ``path`` with urllib."""
+    server = AsgiServer()
+    try:
+        server.start(
+            app,
+            host="127.0.0.1",
+            port=0,
+            thread_name="mdgw-test-instruments-api",
+        )
+        status, _, body = _get(server.base_url + path)
+        return status, json.loads(body)
+    finally:
+        server.stop()

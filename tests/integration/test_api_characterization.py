@@ -2,9 +2,9 @@
 # ruff: file-ignore[suspicious-url-open-usage]
 """Characterization oracle for the user-visible REST / WebSocket API.
 
-These tests freeze the behaviour of the current aiohttp implementation before
-it is replaced by FastAPI. They must keep passing after the implementation
-switch, so they assert only wire semantics: status codes, media types, exact
+These tests freeze the behaviour of the pre-migration REST / WebSocket API.
+They must keep passing after the implementation switch, so they assert only
+wire semantics: status codes, media types, exact
 decimal and nanosecond timestamp strings, the Message Envelope shape, the
 unified error envelope, ``X-Request-ID`` and the WebSocket ops.
 
@@ -25,10 +25,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import aiohttp
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+import websockets
 
 from mdgw.config import GatewayConfig, load_config
 from mdgw.core.envelope import table_to_messages
@@ -138,12 +138,7 @@ def _get(
 
 
 def _media_type(headers: HTTPMessage) -> str:
-    """Return the media type without optional parameters such as charset.
-
-    aiohttp appends ``; charset=utf-8`` even to ``application/json``; the
-    FastAPI migration emits the bare media type. The media type token is the
-    stable part of the contract.
-    """
+    """Return the media type without optional parameters such as charset."""
     value = headers.get("Content-Type") or ""
     return value.split(";", 1)[0].strip().lower()
 
@@ -229,36 +224,30 @@ def _csv_row(message: dict[str, Any]) -> list[str]:
     ]
 
 
-async def _connect_ws(
-    runtime: GatewayRuntime,
-) -> tuple[aiohttp.ClientSession, aiohttp.ClientWebSocketResponse]:
-    session = aiohttp.ClientSession()
+async def _connect_ws(runtime: GatewayRuntime) -> Any:
     url = runtime.base_url.replace("http://", "ws://", 1) + "/ws"
-    ws = await session.ws_connect(url)
-    return session, ws
+    return await websockets.connect(url)
 
 
 async def _await_op(
-    ws: aiohttp.ClientWebSocketResponse,
+    ws: Any,
     op: str,
     *,
     timeout_s: float = 3.0,
 ) -> dict[str, Any]:
-    deadline = asyncio.get_running_loop().time() + timeout_s
-    while True:
-        remaining = deadline - asyncio.get_running_loop().time()
-        if remaining <= 0:
-            message = f"timed out waiting for WS op {op!r}"
-            raise AssertionError(message)
-        incoming = await asyncio.wait_for(ws.receive(), remaining)
-        assert incoming.type == aiohttp.WSMsgType.TEXT, incoming
-        payload = json.loads(incoming.data)
-        if payload.get("op") == op:
-            return payload
+    async def _next_op() -> dict[str, Any]:
+        while True:
+            incoming = await ws.recv()
+            assert isinstance(incoming, str), incoming
+            payload = json.loads(incoming)
+            if payload.get("op") == op:
+                return payload
+
+    return await asyncio.wait_for(_next_op(), timeout_s)
 
 
-async def _ping(ws: aiohttp.ClientWebSocketResponse) -> None:
-    await ws.send_json({"op": "ping"})
+async def _ping(ws: Any) -> None:
+    await ws.send(json.dumps({"op": "ping"}))
     assert await _await_op(ws, "pong") == {"op": "pong"}
 
 
@@ -517,16 +506,18 @@ def test_websocket_subscribe_event_ping_and_unsubscribe(tmp_path: Path) -> None:
     bars = [_bar_input(0), _bar_input(1)]
 
     async def scenario() -> dict[str, Any]:
-        session, ws = await _connect_ws(runtime)
+        ws = await _connect_ws(runtime)
         try:
-            await ws.send_json({"op": "subscribe", "topics": [TOPIC]})
+            await ws.send(json.dumps({"op": "subscribe", "topics": [TOPIC]}))
             # Pong proves the subscribe op was processed before ingestion.
             await _ping(ws)
             runtime.ingest()
             event = await _await_op(ws, "event")
             assert event["topic"] == TOPIC
 
-            await ws.send_json({"op": "unsubscribe", "topics": [TOPIC]})
+            await ws.send(
+                json.dumps({"op": "unsubscribe", "topics": [TOPIC]})
+            )
             await _ping(ws)
             runtime.ingest()
             with pytest.raises(asyncio.TimeoutError):
@@ -536,7 +527,6 @@ def test_websocket_subscribe_event_ping_and_unsubscribe(tmp_path: Path) -> None:
             return event
         finally:
             await ws.close()
-            await session.close()
 
     with _runtime(tmp_path, bars) as runtime:
         runtime.start()
@@ -559,9 +549,9 @@ def test_websocket_slow_consumer_gets_lag_notice_without_disconnect(
     bars = [_bar_input(minute) for minute in range(30)]
 
     async def scenario() -> tuple[dict[str, Any], set[str]]:
-        session, ws = await _connect_ws(runtime)
+        ws = await _connect_ws(runtime)
         try:
-            await ws.send_json({"op": "subscribe", "topics": [TOPIC]})
+            await ws.send(json.dumps({"op": "subscribe", "topics": [TOPIC]}))
             await _ping(ws)
             # One ingestion publishes all Bars in a single hub fan-out, so the
             # writer cannot drain a queue of size 1 in between.
@@ -576,7 +566,6 @@ def test_websocket_slow_consumer_gets_lag_notice_without_disconnect(
             return notice, seen
         finally:
             await ws.close()
-            await session.close()
 
     with _runtime(
         tmp_path,
