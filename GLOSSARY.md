@@ -88,6 +88,14 @@ _Avoid_: Feed API、Pub/Sub API
 回放会话的命令与语义：创建、暂停、恢复、定位、调速、步进、停止。
 _Avoid_: Playback API
 
+**REST API**:
+api Service Role 对外提供的历史查询 HTTP 接口，包括 `/api/v1/instruments`、`/api/v1/bars`、`/api/v1/bars/export`、`/api/v1/status`，以及 `/healthz`、`/readyz`、`/metrics` 等运维端点。它只是 Data Contract 的一种读取方式，不定义第二套 schema、错误语义或排序契约。
+_Avoid_: 服务层、Service Layer、Web 层、API 层（api 是 Service Role，不是分层架构中的一层）
+
+**Time Cursor**:
+历史查询的读取游标，由闭区间 `start`、开区间 `end` 与分页响应给出的 `next_start` 组成。`next_start` 是第一条未返回 Bar 的 `open_ts`，下一次请求应把它作为闭区间 `start` 传回，从而逐页读取且不重不漏。它只表达时间位置，不携带行数或 offset。
+_Avoid_: Offset、Page Token、Opaque Cursor、Watermark
+
 **Message Envelope**:
 每条流式消息的统一封装头：`schema_version, data_type, instrument_id, event_ts, ingest_ts, feed, seq`。
 _Avoid_: Header、Metadata

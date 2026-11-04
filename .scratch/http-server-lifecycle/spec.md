@@ -1,6 +1,8 @@
+> **Superseded** — 本 spec 已被 [`fastapi-rest-api/spec.md`](../fastapi-rest-api/spec.md) 取代。HTTP 面统一迁移到 FastAPI + ASGI；本文描述的 aiohttp `HttpServer` 生命周期迁移不再实现，保留仅作历史记录。
+
 # Spec: 一个模块拥有 HTTP 服务器生命周期
 
-Status: ready-for-agent
+Status: superseded
 
 ## Problem Statement
 
