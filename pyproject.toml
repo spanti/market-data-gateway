@@ -17,6 +17,11 @@ dependencies = [
     "typer>=0.9",
     # Imported directly by mdgw.cli; newer Typer releases no longer pull it in.
     "click>=8.1",
+    # ASGI HTTP surface. Plain uvicorn (no [standard] extra) still needs a
+    # WebSocket implementation for /ws; websockets also backs the SDK client.
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "websockets>=13",
 ]
 
 [project.scripts]
