@@ -1,23 +1,28 @@
-"""Lightweight health/metrics HTTP server for collector and replay roles.
+"""Lightweight health/metrics ASGI server for collector and replay roles.
 
 The api role exposes the same endpoints on its main REST port; this small
-server exists so collector and replay can be probed by `mdgw up`, Docker
-health checks, and operators without pulling in the REST application.
+Starlette application exists so collector and replay can be probed by
+`mdgw up`, Docker health checks, and operators without pulling in the REST
+application. `AsgiServer` supplies the background thread and event loop.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from aiohttp import web
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Route, Router
 
-from mdgw.api.http_server import HttpServer
+from mdgw.api.asgi_server import AsgiServer
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from starlette.requests import Request
+
 ReadyResult = tuple[bool, str]
 _NOT_RUNNING_MESSAGE = "health server is not running"
+_METRICS_CONTENT_TYPE = "text/plain; version=0.0.4"
 
 
 class ServiceHealthServer:
@@ -40,79 +45,84 @@ class ServiceHealthServer:
         self._metrics_render = metrics_render
         self._status = status
 
-        self._http: HttpServer | None = None
+        self._server: AsgiServer | None = None
 
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
-        if self._http is not None:
+        if self._server is not None:
             return
-        app = web.Application()
-        app.router.add_get("/healthz", self._healthz)
-        app.router.add_get("/readyz", self._readyz)
-        app.router.add_get("/metrics", self._metrics)
-        if self._status is not None:
-            app.router.add_get("/status", self._status_handler)
-
-        http = HttpServer()
-        self._http = http
+        server = AsgiServer()
+        self._server = server
         try:
-            http.start(
-                app,
+            server.start(
+                self._build_app(),
                 host=self.host,
                 port=self.port,
                 thread_name=f"mdgw-{self.service}-health",
             )
         except BaseException:
-            self._http = None
+            self._server = None
             raise
 
     def stop(self) -> None:
-        http = self._http
-        if http is None:
+        server = self._server
+        if server is None:
             return
         try:
-            http.stop()
+            server.stop()
         finally:
-            self._http = None
+            self._server = None
 
     # -- endpoints ---------------------------------------------------------
 
-    def _running_http(self) -> HttpServer:
-        """Return the running `HttpServer`, or raise this server's error."""
-        http = self._http
-        if http is None:
+    def _build_app(self) -> Router:
+        routes = [
+            Route("/healthz", self._healthz),
+            Route("/readyz", self._readyz),
+            Route("/metrics", self._metrics),
+        ]
+        if self._status is not None:
+            routes.append(Route("/status", self._status_handler))
+        # Match the old aiohttp router: a trailing slash is a 404, not an
+        # implicit redirect.
+        return Router(routes=routes, redirect_slashes=False)
+
+    def _running_server(self) -> AsgiServer:
+        """Return the running `AsgiServer`, or raise this server's error."""
+        server = self._server
+        if server is None:
             raise RuntimeError(_NOT_RUNNING_MESSAGE)
-        return http
+        return server
 
     @property
     def bound_port(self) -> int:
-        return self._running_http().bound_port
+        return self._running_server().bound_port
 
     @property
     def base_url(self) -> str:
-        return self._running_http().base_url
+        return self._running_server().base_url
 
-    async def _healthz(self, _request: web.Request) -> web.Response:
-        return web.json_response({"status": "ok", "service": self.service})
+    async def _healthz(self, _request: Request) -> JSONResponse:
+        return JSONResponse({"status": "ok", "service": self.service})
 
-    async def _readyz(self, _request: web.Request) -> web.Response:
+    async def _readyz(self, _request: Request) -> JSONResponse:
         ready, reason = self._ready()
-        return web.json_response(
+        return JSONResponse(
             {"ready": ready, "reason": reason, "service": self.service},
-            status=200 if ready else 503,
+            status_code=200 if ready else 503,
         )
 
-    async def _metrics(self, _request: web.Request) -> web.Response:
+    async def _metrics(self, _request: Request) -> Response:
         text = "" if self._metrics_render is None else self._metrics_render()
-        return web.Response(
-            body=text.encode("utf-8"),
-            headers={"Content-Type": "text/plain; version=0.0.4"},
+        return Response(
+            content=text,
+            headers={"Content-Type": _METRICS_CONTENT_TYPE},
         )
 
-    async def _status_handler(self, _request: web.Request) -> web.Response:
+    async def _status_handler(self, _request: Request) -> JSONResponse:
         assert self._status is not None
-        return web.json_response(self._status())
+        return JSONResponse(self._status())
 
 
 __all__ = ["ServiceHealthServer"]
