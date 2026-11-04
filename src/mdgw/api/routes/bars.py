@@ -1,9 +1,8 @@
 """Bar history endpoints: JSON, Arrow IPC stream, CSV and file export.
 
-This is the FastAPI port of the aiohttp Bar handlers. Every format reads
-through the same batch iterator, so JSON / Arrow / CSV / export cannot drift
-apart. Store calls run on worker threads; streaming bodies are never
-materialised in full.
+Every format reads through the same batch iterator, so JSON / Arrow / CSV /
+export cannot drift apart. Store calls run on worker threads; streaming bodies
+are never materialised in full.
 """
 
 from __future__ import annotations

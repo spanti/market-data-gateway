@@ -28,11 +28,10 @@ EventMessage = tuple[str, dict[str, Any]]
 
 
 class WebSocketTransport(Protocol):
-    """Transport surface the hub needs; no aiohttp/Starlette type leaks in.
+    """Transport surface the hub needs; no framework type leaks in.
 
-    Both Starlette's `WebSocket` and aiohttp's `WebSocketResponse` satisfy it.
-    `close` returns `None` on Starlette and `bool` on aiohttp, so the protocol
-    promises only an awaitable value.
+    `close` returns `None` on Starlette and `bool` on other transports, so the
+    protocol promises only an awaitable value.
     """
 
     async def send_json(self, payload: Any) -> None: ...
