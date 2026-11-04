@@ -271,12 +271,46 @@ def _bars_response_schema() -> dict[str, Any]:
     return {
         "title": "BarsResponse",
         "type": "object",
-        "description": "JSON form of a Bar history query.",
+        "description": (
+            "JSON form of a Bar history query. `page` is present only when "
+            "both `instrument` and `limit` are supplied."
+        ),
         "required": ["bars"],
         "properties": {
             "bars": {
                 "type": "array",
                 "items": {"$ref": "#/components/schemas/MessageEnvelope"},
+            },
+            "page": {
+                "type": "object",
+                "description": (
+                    "Pagination metadata for a single-Instrument query. "
+                    "Present only when both `instrument` and `limit` are "
+                    "supplied (including `limit=0`)."
+                ),
+                "required": ["has_more", "next_start"],
+                "properties": {
+                    "has_more": {
+                        "type": "boolean",
+                        "description": (
+                            "True when another Bar exists within `end` "
+                            "after the Bars returned on this page."
+                        ),
+                        "example": True,
+                    },
+                    "next_start": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "`open_ts` of the first Bar not returned, as an "
+                            "ISO-8601 UTC string with exactly nine "
+                            "fractional digits and a trailing 'Z'. Use it as "
+                            "the next request's inclusive `start`; null when "
+                            "there is no more data."
+                        ),
+                        "pattern": _TIMESTAMP_PATTERN,
+                        "example": "2026-10-30T12:35:00.000000000Z",
+                    },
+                },
             },
         },
         "example": {"bars": [_ENVELOPE_EXAMPLE]},
@@ -695,7 +729,12 @@ def _decorate(schema: dict[str, Any]) -> None:
             "`format=arrow` streams an Arrow IPC stream; `format=csv` "
             "streams UTF-8 CSV. JSON decimals are exact decimal strings and "
             "timestamps are ISO-8601 nanosecond strings; Arrow and CSV keep "
-            "the canonical Bar types and never pass a price through a float."
+            "the canonical Bar types and never pass a price through a float. "
+            "When both `instrument` and `limit` are supplied, the JSON "
+            "response also carries a `page` object with `has_more` and "
+            "`next_start`; otherwise the response is exactly "
+            '`{"bars": [...]}`. Paginated JSON Bars are ordered by '
+            "`open_ts` ascending; the streaming formats keep storage order."
         ),
         response_description="Bar history in the requested format.",
         content=_bars_content(),
