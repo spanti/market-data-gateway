@@ -45,6 +45,29 @@ _INSTRUMENT_ID_DESCRIPTION = (
     "'binance:BTC/USDT'."
 )
 
+_ENVELOPE_EXAMPLE: dict[str, Any] = {
+    "schema_version": 1,
+    "data_type": "bar",
+    "instrument_id": "binance:BTC/USDT",
+    "event_ts": "2026-10-30T12:35:00.000000000Z",
+    "ingest_ts": "2026-10-30T12:35:00.130000000Z",
+    "feed": "binance_spot",
+    "seq": 123456,
+    "payload": {
+        "interval": "1m",
+        "open_ts": "2026-10-30T12:34:00.000000000Z",
+        "close_ts": "2026-10-30T12:35:00.000000000Z",
+        "aggregation_source": "external",
+        "open": "65000.1",
+        "high": "65010.0",
+        "low": "64990.0",
+        "close": "65005.5",
+        "volume": "12.34",
+        "trade_count": 128,
+        "revision": 0,
+    },
+}
+
 OPENAPI_DESCRIPTION = (
     "REST API of the Market Data Gateway. The Data Contract "
     "(`docs/data-contract.md`) is the normative source for every field, wire "
@@ -240,6 +263,7 @@ def _message_envelope_schema() -> dict[str, Any]:
             },
             "payload": {"$ref": "#/components/schemas/BarPayload"},
         },
+        "example": _ENVELOPE_EXAMPLE,
     }
 
 
@@ -255,6 +279,7 @@ def _bars_response_schema() -> dict[str, Any]:
                 "items": {"$ref": "#/components/schemas/MessageEnvelope"},
             },
         },
+        "example": {"bars": [_ENVELOPE_EXAMPLE]},
     }
 
 
@@ -411,6 +436,17 @@ def _error_envelope_schema() -> dict[str, Any]:
                         ),
                     },
                 },
+            },
+        },
+        "example": {
+            "error": {
+                "code": "invalid_interval",
+                "message": (
+                    "query parameter 'interval' is required and must be a "
+                    "Bar Interval"
+                ),
+                "details": {},
+                "request_id": "0123456789abcdef0123456789abcdef",
             },
         },
     }
