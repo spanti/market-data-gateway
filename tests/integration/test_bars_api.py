@@ -7,6 +7,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -19,6 +20,9 @@ from mdgw.core.schema import BAR_SCHEMA
 from mdgw.core.time import utc_now
 from mdgw.ingest.fake import BarInput, FakeFeedHandler
 from mdgw.runtime import GatewayRuntime
+
+if TYPE_CHECKING:
+    from http.client import HTTPMessage
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 UTC = timezone.utc
@@ -72,12 +76,15 @@ def _runtime(tmp_path: Path, bars: list[BarInput]) -> GatewayRuntime:
     return GatewayRuntime(feed_handler=feed, config=_config(), data_root=tmp_path)
 
 
-def _get(url: str) -> tuple[int, dict[str, str], bytes]:
+def _get(url: str) -> tuple[int, HTTPMessage, bytes]:
+    # Return the header mapping as-is so lookups stay case-insensitive: aiohttp
+    # emitted "Content-Type" while uvicorn emits "content-type". Header names
+    # are case-insensitive per HTTP; the media-type value is the contract.
     try:
         with urllib.request.urlopen(url, timeout=15) as response:
-            return response.status, dict(response.headers), response.read()
+            return response.status, response.headers, response.read()
     except urllib.error.HTTPError as error:
-        return error.code, dict(error.headers), error.read()
+        return error.code, error.headers, error.read()
 
 
 def test_bars_json_filters_by_open_ts_half_open_range(tmp_path: Path) -> None:
@@ -392,7 +399,7 @@ def test_json_arrow_csv_and_exports_return_the_same_semantics(tmp_path: Path) ->
 def test_json_limit_bounds_the_range_too_large_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("mdgw.api.server.JSON_ROW_LIMIT", 1)
+    monkeypatch.setattr("mdgw.api.routes.bars.JSON_ROW_LIMIT", 1)
     with _runtime(
         tmp_path, [_bar_input(0), _bar_input(1), _bar_input(2)]
     ) as runtime:

@@ -14,8 +14,8 @@ from typing import TYPE_CHECKING, Self
 from uuid import uuid4
 
 from mdgw.aggregate import BarAggregator
-from mdgw.api.http_server import HttpServer
-from mdgw.api.server import create_app
+from mdgw.api.app import create_app
+from mdgw.api.asgi_server import AsgiServer
 from mdgw.api.ws_hub import WebSocketHub
 from mdgw.core.envelope import table_to_messages
 from mdgw.core.errors import UnknownInstrumentError
@@ -99,7 +99,7 @@ class GatewayRuntime:
         # ReplayService costs nothing until its first Session. No ZMQ server is
         # started here, so no port is bound unless the caller asks for replay.
         self._replay_service: ReplayService | None = None
-        self._http = HttpServer()
+        self._http = AsgiServer()
         self._started = False
 
         self._received_condition = threading.Condition()
@@ -364,14 +364,14 @@ class GatewayRuntime:
 
         # This runs on the Streaming Interface subscriber thread. Hand JSON
         # messages to the event-loop hub via call_soon_threadsafe; never touch
-        # aiohttp objects from here. The external ZMQ consumer already received
+        # server objects from here. The external ZMQ consumer already received
         # the same frames straight from the PUB socket.
         hub = self._hub
         if hub is None:
             return
         messages = table_to_messages(table)
         with suppress(RuntimeError):
-            # The HttpServer event loop is already shutting down.
+            # The AsgiServer event loop is already shutting down.
             self._http.call_soon_threadsafe(hub.publish, topic, messages)
 
     def _wait_for_received(self, target: int) -> None:
@@ -393,7 +393,7 @@ class GatewayRuntime:
 
     def _start_http(self) -> None:
         # Building the hub and the app does not need a running event loop, so
-        # both happen synchronously before the `HttpServer` owns the lifecycle.
+        # both happen synchronously before the `AsgiServer` owns the lifecycle.
         # The runtime keeps ownership of the hub and passes it into the app so
         # ZMQ fan-out and the WebSocket route share one registry.
         hub = WebSocketHub(
