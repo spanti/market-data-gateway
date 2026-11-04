@@ -1,0 +1,15 @@
+# Grafana datasource provisioning for the optional observability stack.
+#
+# The URL uses the compose service name; Grafana and Prometheus start together
+# from docker-compose.observability.yml on the shared default network.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

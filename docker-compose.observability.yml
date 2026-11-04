@@ -1,0 +1,35 @@
+# Optional observability stack. This file is an override: the default
+# `docker compose up` behaviour is unchanged and starts neither service.
+#
+# Start the full stack with:
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+#
+# Prometheus is exposed on http://localhost:9090 and Grafana on
+# http://localhost:3000. Grafana's admin password comes from
+# GRAFANA_ADMIN_PASSWORD and defaults to `admin` for local use only.
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
