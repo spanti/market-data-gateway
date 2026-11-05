@@ -113,7 +113,7 @@ def test_restart_backfills_from_hwm_and_is_idempotent(tmp_path: Path) -> None:
 
         # start() backfilled, without publishing historical Bars.
         assert resumed.received_bar_count == 0
-        assert [row["open_ts"] for row in _rows(resumed, "1m")] == [
+        assert sorted(row["open_ts"] for row in _rows(resumed, "1m")) == [
             _at(minute=minute) for minute in range(10)
         ]
         assert sorted(row["open_ts"] for row in _rows(resumed, "5m")) == [

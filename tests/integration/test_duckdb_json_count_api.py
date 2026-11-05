@@ -1,11 +1,10 @@
 """REST JSON history on the DuckDB count and non-paginated read seam.
 
-Ticket 06 moves the JSON row-ceiling count and the non-paginated JSON response
-onto the DuckDB scan, while the paginated page reader stays on PyArrow. These
-tests enter through the real ASGI app on an ephemeral socket and compare the
-wire response with the pre-migration PyArrow Store read: exact Message
-Envelope strings, decimal text, nanosecond timestamps, nulls, duplicate and
-raw-Revision multiplicity, and the stable error envelopes.
+The JSON row-ceiling count, the non-paginated JSON response and the paginated
+page reader all use the DuckDB scan. These tests enter through the real ASGI
+app on an ephemeral socket and compare the wire response with the Store read:
+exact Message Envelope strings, decimal text, nanosecond timestamps, nulls,
+duplicate and raw-Revision multiplicity, and the stable error envelopes.
 """
 
 # ruff: file-ignore[implicit-namespace-package]
@@ -124,7 +123,7 @@ def _canonical(messages: list[dict[str, Any]]) -> Counter:
     return Counter(json.dumps(message, sort_keys=True) for message in messages)
 
 
-def _old_messages(
+def _store_messages(
     store: ParquetBarStore,
     *,
     instrument_id: str | None = INSTRUMENT,
@@ -132,7 +131,7 @@ def _old_messages(
     start_ns: int | None = None,
     end_ns: int | None = None,
 ) -> list[dict[str, Any]]:
-    """The pre-migration PyArrow Store read, used as the differential oracle."""
+    """Store rows in REST message shape, used as the parity oracle."""
     table = store.read_bars(
         instrument_id=instrument_id,
         interval=interval,
@@ -149,7 +148,7 @@ def _iso(minute: int, *, base: datetime = START) -> str:
 # -- value and multiplicity parity -----------------------------------------
 
 
-def test_non_paginated_json_matches_pyarrow_for_multi_file_revisions(
+def test_non_paginated_json_matches_the_store_for_multi_file_revisions(
     tmp_path: Path,
 ) -> None:
     store = ParquetBarStore(tmp_path)
@@ -158,7 +157,7 @@ def test_non_paginated_json_matches_pyarrow_for_multi_file_revisions(
     _write(store, [duplicate, duplicate])
     _write(store, [_bar(0, revision=1), _bar(1, open_value=precise)])
     _write(store, [_bar(0, revision=2), _bar(2, revision=3, seq=7)])
-    expected = _old_messages(store)
+    expected = _store_messages(store)
 
     with _serve(create_app(store)) as server:
         status, _, body = _get(_url(server.base_url, interval="1m"))
@@ -204,7 +203,7 @@ def test_revision_heavy_non_paginated_json_preserves_every_row(
     for revision in range(4):
         _write(store, [_bar(0, revision=revision)])
     _write(store, [_bar(minute) for minute in range(1, 6)])
-    expected = _old_messages(store)
+    expected = _store_messages(store)
 
     with _serve(create_app(store)) as server:
         payload = _json(_url(server.base_url, interval="1m"))
@@ -266,7 +265,7 @@ def test_non_paginated_limit_only_caps_rows_from_the_matching_set(
         payload = _json(_url(server.base_url, interval="1m", limit=limit))
 
     assert len(payload["bars"]) == expected_rows
-    full = _canonical(_old_messages(store, instrument_id=None))
+    full = _canonical(_store_messages(store, instrument_id=None))
     returned = _canonical(payload["bars"])
     for message, count in returned.items():
         # LIMIT may select any scan-order rows, but never invents rows or

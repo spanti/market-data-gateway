@@ -58,11 +58,12 @@ def test_history_matches_store_semantics(tmp_path: Path) -> None:
         expected = runtime.store.read_bars(instrument_id=BTC, interval="1m")
 
     assert table.schema == BAR_SCHEMA
-    assert table.equals(expected)
+    # Non-paginated Arrow history has no ordering contract.
+    assert table.sort_by("open_ts").equals(expected.sort_by("open_ts"))
     assert table.num_rows == 3
     assert table.column("instrument_id").to_pylist() == [BTC, BTC, BTC]
     assert table.column("open").to_pylist() == [Decimal("65000.1")] * 3
-    assert table.column("open_ts").to_pylist() == [
+    assert sorted(table.column("open_ts").to_pylist()) == [
         datetime(2024, 1, 1, 0, minute, tzinfo=UTC) for minute in range(3)
     ]
 
