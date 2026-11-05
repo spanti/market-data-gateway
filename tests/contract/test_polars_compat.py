@@ -19,7 +19,6 @@ import duckdb
 import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pytest
 
 from mdgw.core.schema import BAR_SCHEMA
 
