@@ -222,6 +222,34 @@ class DuckDBArrowScanner:
         finally:
             self.close()
 
+    def count(self, files: Sequence[str], query: BarReadQuery) -> int:
+        """Exact raw-row count for the selected Data Files of one Snapshot.
+
+        The count runs as its own query, separate from the response read, on
+        the same Manifest Snapshot and Read Lease. There is no window SQL,
+        `DISTINCT` or other implicit dedup: every stored Revision and duplicate
+        row is counted. The Arrow Reader is closed and the connection is
+        released before this returns; a failed count closes the connection.
+        """
+        try:  # ruff: ignore[too-many-statements-in-try-clause] - explicit resource scope
+            self._connect()
+            sql, params = _build_count_sql(files, query)
+            reader = self._open_sql_reader(sql, params, batch_size=1)
+            try:
+                counted = self._next_batch(reader)
+            finally:
+                self._close_reader()
+            if counted is _END_OF_STREAM:  # pragma: no cover - defensive
+                msg = "DuckDB returned no row for the Bar count"
+                raise RuntimeError(msg)  # ruff: ignore[raise-within-try]
+            self._exhausted = True
+            return int(counted.column(0)[0].as_py())
+        except BaseException:
+            self._failed = True
+            raise
+        finally:
+            self.close()
+
     def close(self) -> None:
         """Cancel an in-flight query and release Reader/connection resources."""
         with self._lock:
@@ -278,6 +306,15 @@ class DuckDBArrowScanner:
         limit: int | None,
     ):
         sql, params = _build_scan_sql(files, query, limit=limit)
+        return self._open_sql_reader(sql, params, batch_size=batch_size)
+
+    def _open_sql_reader(
+        self,
+        sql: str,
+        params: dict[str, Any],
+        *,
+        batch_size: int,
+    ):
         with self._busy():
             connection = self._connection
             if connection is None:
@@ -327,14 +364,10 @@ def _close_connection(connection: Any) -> None:
         connection.close()
 
 
-def _build_scan_sql(
-    files: Sequence[str],
-    query: BarReadQuery,
-    *,
-    limit: int | None,
-) -> tuple[str, dict[str, Any]]:
-    """Static SQL plus bound values; no caller input becomes SQL text."""
-    params: dict[str, Any] = {"files": [str(path) for path in files]}
+def _predicate_clauses(
+    query: BarReadQuery, params: dict[str, Any]
+) -> list[str]:
+    """Bound-value predicates shared by the count and read queries."""
     clauses: list[str] = []
     if query.instrument_id is not None:
         clauses.append("instrument_id = $instrument")
@@ -347,6 +380,18 @@ def _build_scan_sql(
     if query.end_ns is not None:
         clauses.append("open_ts < $end::TIMESTAMPTZ_NS")
         params["end"] = ns_to_iso(int(query.end_ns))
+    return clauses
+
+
+def _build_scan_sql(
+    files: Sequence[str],
+    query: BarReadQuery,
+    *,
+    limit: int | None,
+) -> tuple[str, dict[str, Any]]:
+    """Static SQL plus bound values; no caller input becomes SQL text."""
+    params: dict[str, Any] = {"files": [str(path) for path in files]}
+    clauses = _predicate_clauses(query, params)
     # The SQL text is static; every value below is a bound `$parameter`.
     select = _SELECT_PHYSICAL
     sql = (
@@ -359,6 +404,23 @@ def _build_scan_sql(
     if limit is not None:
         sql = f"{sql} LIMIT $row_limit"
         params["row_limit"] = int(limit)
+    return sql, params
+
+
+def _build_count_sql(
+    files: Sequence[str],
+    query: BarReadQuery,
+) -> tuple[str, dict[str, Any]]:
+    """Static exact-count SQL; raw rows, never a deduplicated relation."""
+    params: dict[str, Any] = {"files": [str(path) for path in files]}
+    clauses = _predicate_clauses(query, params)
+    sql = (
+        "SELECT count(*) AS row_count "
+        "FROM read_parquet($files, hive_partitioning = false)"
+    )
+    if clauses:
+        predicate = " AND ".join(clauses)
+        sql = f"{sql} WHERE {predicate}"
     return sql, params
 
 

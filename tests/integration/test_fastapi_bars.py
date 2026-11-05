@@ -259,13 +259,18 @@ def test_json_bars_envelope_decimals_and_nanosecond_timestamps(
     assert set(payload) == {"bars"}
     messages = payload["bars"]
     assert len(messages) == 2
-    for index, message in enumerate(messages):
-        _assert_message_envelope(message, minute=index)
+    # Non-paginated JSON has no ordering contract: validate each message from
+    # its own open_ts instead of relying on physical scan order.
+    for message in messages:
+        minute_index = int(message["payload"]["open_ts"][14:16])
+        _assert_message_envelope(message, minute=minute_index)
 
-    assert messages[0]["payload"]["open"] == precise
-    assert messages[0]["payload"]["high"] == "65010.0"
-    assert messages[0]["payload"]["volume"] == "12.34"
-    assert messages[1]["payload"]["open"] == "65000.1"
+    by_open = {message["payload"]["open"]: message for message in messages}
+    assert by_open[precise]["payload"]["high"] == "65010.0"
+    assert by_open[precise]["payload"]["volume"] == "12.34"
+    assert by_open["65000.1"]["payload"]["open_ts"].endswith(
+        "T00:01:00.000000000Z"
+    )
 
 
 def test_json_limit_caps_rows_and_empty_result_is_an_empty_array(
@@ -377,10 +382,14 @@ def test_csv_text_header_and_exact_decimal_rendering(tmp_path: Path) -> None:
         ",".join(_csv_row(message))
         for message in json.loads(json_body)["bars"]
     ]
-    assert lines[1:] == expected
+    # CSV and JSON now use different scans; non-paginated output has no
+    # ordering contract, so compare exact rows and multiplicity.
+    assert sorted(lines[1:]) == sorted(expected)
     open_index = BAR_SCHEMA.names.index("open")
-    assert expected[0].split(",")[open_index] == precise
-    assert "e-" not in expected[0].lower()
+    assert any(
+        line.split(",")[open_index] == precise for line in expected
+    )
+    assert "e-" not in "".join(expected).lower()
 
 
 def test_empty_csv_is_header_only(tmp_path: Path) -> None:
@@ -417,6 +426,9 @@ def test_export_formats_preserve_headers_length_and_table_semantics(
         )
 
     messages = json.loads(json_body)["bars"]
+    canonical = sorted(
+        json.dumps(message, sort_keys=True) for message in messages
+    )
 
     assert parquet_status == 200
     assert _header(parquet_headers, "Content-Type") == PARQUET
@@ -430,7 +442,10 @@ def test_export_formats_preserve_headers_length_and_table_semantics(
     parquet_table = pq.read_table(pa.BufferReader(parquet_body))
     assert parquet_table.schema == BAR_SCHEMA
     assert parquet_table.num_rows == 2
-    assert table_to_messages(parquet_table) == messages
+    assert sorted(
+        json.dumps(message, sort_keys=True)
+        for message in table_to_messages(parquet_table)
+    ) == canonical
 
     assert arrow_status == 200
     assert _header(arrow_headers, "Content-Type") == ARROW_FILE
@@ -444,7 +459,10 @@ def test_export_formats_preserve_headers_length_and_table_semantics(
     arrow_table = pa.ipc.open_file(pa.BufferReader(arrow_body)).read_all()
     assert arrow_table.schema == BAR_SCHEMA
     assert arrow_table.num_rows == 2
-    assert table_to_messages(arrow_table) == messages
+    assert sorted(
+        json.dumps(message, sort_keys=True)
+        for message in table_to_messages(arrow_table)
+    ) == canonical
 
 
 def test_empty_exports_are_valid_files_with_the_canonical_schema(

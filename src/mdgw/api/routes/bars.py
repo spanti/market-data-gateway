@@ -315,7 +315,10 @@ async def _respond_json(store: ParquetBarStore, query: BarQuery) -> Response:
 def _build_json_payload(store: ParquetBarStore, query: BarQuery) -> dict:
     """Count and read on one Snapshot, so the ceiling cannot disagree with rows."""
     with _open_store_read(store, query) as read:
-        total = read.count()
+        # The exact raw-row count runs through DuckDB on this request's
+        # Snapshot and Lease. It is a separate query from the read, so no
+        # window SQL or implicit dedup can change the ceiling.
+        total = read.count_arrow()
         # `limit` caps the response, so only the rows that would actually be
         # rendered count against the JSON ceiling.
         effective_total = (
@@ -335,7 +338,9 @@ def _build_json_payload(store: ParquetBarStore, query: BarQuery) -> dict:
         # `instrument` and `limit` (limit=0 counts) to be unambiguous.
         paginated = query.instrument is not None and query.limit is not None
         if not paginated:
-            table = read.read_bars(limit=query.limit)
+            # Non-paginated JSON has no ordering contract: read through
+            # DuckDB, where LIMIT only caps returned rows.
+            table = read.read_arrow_bars(limit=query.limit)
             return {"bars": table_to_messages(table)}
 
         assert query.limit is not None  # narrowed by `paginated`
@@ -396,7 +401,7 @@ async def _arrow_body(
     wrote_any = False
     closed = False
     try:
-        # Only this call site chooses the DuckDB Relation Arrow Reader. JSON,
+        # Only this call site streams the DuckDB Relation Arrow Reader.
         # CSV and export keep the existing PyArrow scan.
         async for batch in _iter_arrow_batches(read, query):
             writer.write_batch(batch)
