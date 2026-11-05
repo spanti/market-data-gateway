@@ -3,8 +3,8 @@
 The public `/api/v1/bars?format=arrow` response is compared with the
 pre-migration PyArrow Store read: exact per-row content, duplicate counts and
 the exact Data Contract schema. Non-paginated output has no ordering contract,
-so row comparisons are order insensitive. Other surfaces (JSON, CSV, export)
-are asserted to keep using the existing PyArrow scan.
+so row comparisons are order insensitive. Ticket 08 extended this seam to CSV
+and export; JSON keeps the existing Store read/count.
 """
 
 # ruff: file-ignore[implicit-namespace-package]
@@ -202,11 +202,11 @@ class _RecordingStore(ParquetBarStore):
 
 
 def test_each_format_chooses_the_documented_store_scan(tmp_path: Path) -> None:
-    """Freeze the per-call-site migration boundary (tickets 05 and 06).
+    """Freeze the per-call-site migration boundary (tickets 05, 06 and 08).
 
-    Arrow streams through DuckDB; non-paginated JSON counts and reads through
-    DuckDB; paginated JSON counts through DuckDB but keeps the ordered PyArrow
-    page reader; CSV and export stay on the PyArrow scan.
+    Arrow, CSV and export stream through the DuckDB Relation reader;
+    non-paginated JSON counts and reads through DuckDB; paginated JSON counts
+    through DuckDB but keeps the ordered PyArrow page reader.
     """
     store = _RecordingStore(tmp_path)
     _write(store, [_bar(0)])
@@ -234,20 +234,15 @@ def test_each_format_chooses_the_documented_store_scan(tmp_path: Path) -> None:
         _get(_url(server.base_url, EXPORT, interval="1m", format="parquet"))
         export_call = list(store.reads[-1].calls)
 
+        _get(_url(server.base_url, EXPORT, interval="1m", format="arrow"))
+        arrow_export_call = list(store.reads[-1].calls)
+
     assert arrow_call == ["iter_arrow_batches"]
     assert json_call == ["count_arrow", "read_arrow_bars"]
     assert paginated_json_call == ["count_arrow", "iter_batches"]
-    assert csv_call == ["iter_batches"]
-    assert export_call == ["iter_batches"]
-    assert all(
-        "iter_arrow_batches" not in call
-        for call in (
-            json_call,
-            paginated_json_call,
-            csv_call,
-            export_call,
-        )
-    )
+    assert csv_call == ["iter_arrow_batches"]
+    assert export_call == ["iter_arrow_batches"]
+    assert arrow_export_call == ["iter_arrow_batches"]
 
 
 # -- content and schema parity ---------------------------------------------

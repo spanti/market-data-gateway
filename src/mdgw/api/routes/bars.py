@@ -1,8 +1,11 @@
 """Bar history endpoints: JSON, Arrow IPC stream, CSV and file export.
 
-Every format reads through the same batch iterator, so JSON / Arrow / CSV /
-export cannot drift apart. Store calls run on worker threads; streaming bodies
-are never materialised in full.
+Every streaming format reads through the Store's DuckDB Manifest-Snapshot
+scan and every format renders the same contract RecordBatches, so JSON /
+Arrow / CSV / export cannot drift apart. Store calls run on worker threads;
+streaming bodies are never materialised in full. A failure after the response
+has started propagates and aborts the transfer; it is never appended to the
+body or turned into a normal end of stream.
 """
 
 from __future__ import annotations
@@ -21,7 +24,6 @@ from typing import TYPE_CHECKING, Annotated, Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 from fastapi import APIRouter, Query
-from starlette.background import BackgroundTask
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from mdgw.api.formats import (
@@ -375,17 +377,15 @@ async def _stream_arrow(
     # race still yields the stable JSON error envelope.
     read = await asyncio.to_thread(_open_store_read, store, query)
     try:
-        return StreamingResponse(
+        return _CleanupStreamingResponse(
             _arrow_body(read, query),
+            cleanup=read.close,
             headers={
                 "Content-Type": ARROW_STREAM_MEDIA_TYPE,
                 "Content-Disposition": content_disposition(
                     "inline", f"{query.interval}-bars.arrow"
                 ),
             },
-            # Safety net when the client disconnects before the body iterator
-            # is ever started; the normal path closes in `_arrow_body`.
-            background=BackgroundTask(read.close),
         )
     except BaseException:
         read.close()
@@ -401,8 +401,6 @@ async def _arrow_body(
     wrote_any = False
     closed = False
     try:
-        # Only this call site streams the DuckDB Relation Arrow Reader.
-        # CSV and export keep the existing PyArrow scan.
         async for batch in _iter_arrow_batches(read, query):
             writer.write_batch(batch)
             wrote_any = True
@@ -433,15 +431,15 @@ async def _stream_csv(
 ) -> Response:
     read = await asyncio.to_thread(_open_store_read, store, query)
     try:
-        return StreamingResponse(
+        return _CleanupStreamingResponse(
             _csv_body(read, query),
+            cleanup=read.close,
             headers={
                 "Content-Type": CSV_MEDIA_TYPE,
                 "Content-Disposition": content_disposition(
                     "inline", f"{query.interval}-bars.csv"
                 ),
             },
-            background=BackgroundTask(read.close),
         )
     except BaseException:
         read.close()
@@ -453,23 +451,15 @@ async def _csv_body(
     query: BarQuery,
 ) -> AsyncIterator[bytes]:
     try:
+        # The header is the first chunk; from then on each bounded DuckDB
+        # batch is rendered and yielded as it arrives.
         yield (",".join(BAR_SCHEMA.names) + "\n").encode("utf-8")
-        async for batch in _iter_batches(read, query):
+        async for batch in _iter_arrow_batches(read, query):
             text = _batch_to_csv(batch)
             if text:
                 yield text.encode("utf-8")
     finally:
         read.close()
-
-
-async def _iter_batches(
-    read: StoreRead,
-    query: BarQuery,
-) -> AsyncIterator[pa.RecordBatch]:
-    """Iterate the existing PyArrow Bar batches on worker threads."""
-    iterator = read.iter_batches(limit=query.limit)
-    async for batch in _pump_batches(iterator):
-        yield batch
 
 
 async def _iter_arrow_batches(
@@ -540,8 +530,10 @@ async def _export_file(
         raise
 
     spec = _EXPORT_SPECS[query.format]
-    return StreamingResponse(
-        _file_body(path),
+    body = _ExportFileBody(path)
+    return _CleanupStreamingResponse(
+        body,
+        cleanup=body.close,
         headers={
             "Content-Type": spec.content_type,
             "Content-Disposition": content_disposition(
@@ -552,19 +544,37 @@ async def _export_file(
     )
 
 
-async def _file_body(path: Path) -> AsyncIterator[bytes]:
-    handle = None
-    try:
-        handle = await asyncio.to_thread(path.open, "rb")
-        while True:
-            chunk = await asyncio.to_thread(handle.read, _READ_CHUNK_SIZE)
-            if not chunk:
-                break
-            yield chunk
-    finally:
+class _ExportFileBody:
+    """Stream one materialized export file and remove it on every exit."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._handle: Any = None
+        self._closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        try:
+            self._handle = await asyncio.to_thread(self._path.open, "rb")
+            while True:
+                chunk = await asyncio.to_thread(
+                    self._handle.read, _READ_CHUNK_SIZE
+                )
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        """Close the handle (once) and remove the file and its directory."""
+        if self._closed:
+            return
+        self._closed = True
+        handle, self._handle = self._handle, None
         if handle is not None:
-            handle.close()
-        _remove_export(path)
+            with suppress(Exception):
+                handle.close()
+        _remove_export(self._path)
 
 
 def _write_export_file(store: ParquetBarStore, query: BarQuery) -> Path:
@@ -575,7 +585,10 @@ def _write_export_file(store: ParquetBarStore, query: BarQuery) -> Path:
 
     try:
         with _open_store_read(store, query) as read:
-            batches = read.iter_batches(limit=query.limit)
+            # One Manifest Snapshot and one DuckDB Reader produce the whole
+            # file. The response is not started until this function returns,
+            # so every generation failure stays a stable error envelope.
+            batches = read.iter_arrow_batches(limit=query.limit)
             spec.writer(batches, path, store)
     except Exception:
         shutil.rmtree(tempdir, ignore_errors=True)
@@ -639,6 +652,34 @@ def _remove_export(path: Path) -> None:
 
 
 # -- helpers ----------------------------------------------------------------
+
+
+class _CleanupStreamingResponse(StreamingResponse):
+    """Run `cleanup` on every exit from the response call.
+
+    Starlette does not finalize the body iterator when the client disconnects
+    or when `send` itself fails, so a `finally` around the whole ASGI call is
+    the only place that releases the Reader/Read Lease and removes export
+    files on every path. The cleanup callables are idempotent.
+    """
+
+    def __init__(
+        self,
+        content: AsyncIterator[bytes],
+        *,
+        cleanup: Callable[[], None],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(content, **kwargs)
+        self._cleanup = cleanup
+
+    async def __call__(
+        self, scope: Any, receive: Any, send: Any
+    ) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._cleanup()
 
 
 class _ChunkSink:

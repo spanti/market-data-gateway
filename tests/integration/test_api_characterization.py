@@ -361,14 +361,16 @@ def test_csv_text_header_and_exact_decimal_rendering(tmp_path: Path) -> None:
         ",".join(_csv_row(message))
         for message in json.loads(json_body)["bars"]
     ]
-    # CSV and JSON now use different scans; non-paginated output has no
-    # ordering contract, so compare exact rows and multiplicity.
+    # Non-paginated output has no ordering contract; compare exact content and
+    # multiplicity instead of physical scan order.
     assert sorted(lines[1:]) == sorted(expected)
     open_index = BAR_SCHEMA.names.index("open")
-    assert any(
-        line.split(",")[open_index] == precise for line in expected
+    precise_row = next(
+        line
+        for line in lines[1:]
+        if line.split(",")[open_index] == precise
     )
-    assert "e-" not in "".join(expected).lower()
+    assert "e-" not in precise_row.lower()
 
 
 # -- export -----------------------------------------------------------------
@@ -394,10 +396,17 @@ def test_export_formats_preserve_headers_and_table_semantics(
             "?interval=1m&format=arrow"
         )
 
-    messages = json.loads(json_body)["bars"]
-    canonical = sorted(
-        json.dumps(message, sort_keys=True) for message in messages
+    # Non-paginated exports have no ordering contract; compare exact content
+    # and multiplicity, not physical scan order.
+    messages = sorted(
+        json.dumps(message, sort_keys=True)
+        for message in json.loads(json_body)["bars"]
     )
+
+    def canonical(messages_: list[dict]) -> list[str]:
+        return sorted(
+            json.dumps(message, sort_keys=True) for message in messages_
+        )
 
     assert parquet_status == 200
     assert parquet_headers.get("Content-Type") == PARQUET
@@ -408,10 +417,7 @@ def test_export_formats_preserve_headers_and_table_semantics(
     parquet_table = pq.read_table(pa.BufferReader(parquet_body))
     assert parquet_table.schema == BAR_SCHEMA
     assert parquet_table.num_rows == 2
-    assert sorted(
-        json.dumps(message, sort_keys=True)
-        for message in table_to_messages(parquet_table)
-    ) == canonical
+    assert canonical(table_to_messages(parquet_table)) == messages
 
     assert arrow_status == 200
     assert arrow_headers.get("Content-Type") == ARROW_FILE
@@ -422,10 +428,7 @@ def test_export_formats_preserve_headers_and_table_semantics(
     arrow_table = pa.ipc.open_file(pa.BufferReader(arrow_body)).read_all()
     assert arrow_table.schema == BAR_SCHEMA
     assert arrow_table.num_rows == 2
-    assert sorted(
-        json.dumps(message, sort_keys=True)
-        for message in table_to_messages(arrow_table)
-    ) == canonical
+    assert canonical(table_to_messages(arrow_table)) == messages
 
 
 # -- errors and request ids -------------------------------------------------
