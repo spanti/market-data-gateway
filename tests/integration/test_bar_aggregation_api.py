@@ -120,7 +120,8 @@ def test_configured_intervals_are_aggregated_together(tmp_path: Path) -> None:
         fifteen_minute = _get(f"{base}&interval=15m")["bars"]
         hourly = _get(f"{base}&interval=1h")["bars"]
 
-    assert [bar["payload"]["open_ts"] for bar in five_minute] == [
+    # Non-paginated JSON has no ordering contract.
+    assert sorted(bar["payload"]["open_ts"] for bar in five_minute) == [
         "2024-01-01T00:00:00.000000000Z",
         "2024-01-01T00:05:00.000000000Z",
         "2024-01-01T00:10:00.000000000Z",

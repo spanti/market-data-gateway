@@ -619,11 +619,11 @@ class StoreRead:
     ):
         """Yield contract Bar RecordBatches from DuckDB's Relation Arrow Reader.
 
-        This is the ticket-05 migration seam: only call sites that explicitly
-        choose it (the REST Arrow response) use DuckDB. It reads exactly the
-        active Data Files of this read's fixed Manifest Snapshot, streams
-        bounded batches and holds the Read Lease until the generator finishes,
-        fails or is closed.
+        Call sites that explicitly choose this scan (the REST Arrow stream and
+        the non-paginated JSON read) use DuckDB. It reads exactly the active
+        Data Files of this read's fixed Manifest Snapshot, streams bounded
+        batches and holds the Read Lease until the generator finishes, fails or
+        is closed.
         """
         self._ensure_open()
         query = self._resolve_query(instrument_id, interval, start_ns, end_ns)
@@ -677,6 +677,46 @@ class StoreRead:
             )
         )
 
+    def count_arrow(
+        self,
+        *,
+        instrument_id: Any = _UNSET,
+        interval: Any = _UNSET,
+        start_ns: Any = _UNSET,
+        end_ns: Any = _UNSET,
+    ) -> int:
+        """Exact raw-row count through DuckDB on this read's Snapshot.
+
+        This is the JSON row-ceiling count. It executes as a separate query on
+        the same Snapshot and Lease as the response read, so both observe one
+        Manifest generation. Every Revision and duplicate row is counted.
+        """
+        self._ensure_open()
+        query = self._resolve_query(
+            instrument_id, interval, start_ns, end_ns
+        )
+        self._scans += 1
+        files = [
+            file
+            for _interval, group in self._arrow_scan_groups(query)
+            for file in group
+        ]
+        if not files:
+            return 0
+        scanner = DuckDBArrowScanner(self._store.duckdb_connections)
+        with self._close_lock:
+            if self._closed:
+                msg = "StoreRead is closed"
+                raise RuntimeError(msg)
+            self._active_scanner = scanner
+        try:
+            return scanner.count(files, query)
+        finally:
+            scanner.close()
+            with self._close_lock:
+                if self._active_scanner is scanner:
+                    self._active_scanner = None
+
     def read_bars(
         self,
         *,
@@ -688,6 +728,34 @@ class StoreRead:
     ) -> pa.Table:
         batches = list(
             self.iter_batches(
+                instrument_id=instrument_id,
+                interval=interval,
+                start_ns=start_ns,
+                end_ns=end_ns,
+                limit=limit,
+            )
+        )
+        if not batches:
+            return empty_logical_table()
+        return pa.Table.from_batches(batches, schema=BAR_SCHEMA)
+
+    def read_arrow_bars(
+        self,
+        *,
+        instrument_id: Any = _UNSET,
+        interval: Any = _UNSET,
+        start_ns: Any = _UNSET,
+        end_ns: Any = _UNSET,
+        limit: int | None = None,
+    ) -> pa.Table:
+        """Materialize contract Bars through the DuckDB scan on this Snapshot.
+
+        This is the non-paginated JSON read. Row selection follows the DuckDB
+        scan order; `limit` only caps the number of rows and no global
+        `ORDER BY` is added. The Arrow schema is restored per batch.
+        """
+        batches = list(
+            self.iter_arrow_batches(
                 instrument_id=instrument_id,
                 interval=interval,
                 start_ns=start_ns,

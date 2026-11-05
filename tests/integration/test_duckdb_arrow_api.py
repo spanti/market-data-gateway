@@ -162,9 +162,17 @@ class _RecordingRead:
         self.calls.append("count")
         return self._inner.count(*args, **kwargs)
 
+    def count_arrow(self, *args, **kwargs):
+        self.calls.append("count_arrow")
+        return self._inner.count_arrow(*args, **kwargs)
+
     def read_bars(self, *args, **kwargs):
         self.calls.append("read_bars")
         return self._inner.read_bars(*args, **kwargs)
+
+    def read_arrow_bars(self, *args, **kwargs):
+        self.calls.append("read_arrow_bars")
+        return self._inner.read_arrow_bars(*args, **kwargs)
 
     def iter_batches(self, *args, **kwargs):
         self.calls.append("iter_batches")
@@ -193,7 +201,13 @@ class _RecordingStore(ParquetBarStore):
         return read
 
 
-def test_only_the_arrow_route_chooses_the_duckdb_scan(tmp_path: Path) -> None:
+def test_each_format_chooses_the_documented_store_scan(tmp_path: Path) -> None:
+    """Freeze the per-call-site migration boundary (tickets 05 and 06).
+
+    Arrow streams through DuckDB; non-paginated JSON counts and reads through
+    DuckDB; paginated JSON counts through DuckDB but keeps the ordered PyArrow
+    page reader; CSV and export stay on the PyArrow scan.
+    """
     store = _RecordingStore(tmp_path)
     _write(store, [_bar(0)])
     with _serve(create_app(store)) as server:
@@ -203,6 +217,17 @@ def test_only_the_arrow_route_chooses_the_duckdb_scan(tmp_path: Path) -> None:
         _get(_url(server.base_url, BARS, interval="1m"))
         json_call = list(store.reads[-1].calls)
 
+        _get(
+            _url(
+                server.base_url,
+                BARS,
+                interval="1m",
+                instrument=INSTRUMENT,
+                limit=5,
+            )
+        )
+        paginated_json_call = list(store.reads[-1].calls)
+
         _get(_url(server.base_url, BARS, interval="1m", format="csv"))
         csv_call = list(store.reads[-1].calls)
 
@@ -210,13 +235,18 @@ def test_only_the_arrow_route_chooses_the_duckdb_scan(tmp_path: Path) -> None:
         export_call = list(store.reads[-1].calls)
 
     assert arrow_call == ["iter_arrow_batches"]
-    assert "iter_batches" not in arrow_call
-    assert "iter_batches" in csv_call
-    assert "iter_batches" in export_call
-    assert "count" in json_call
+    assert json_call == ["count_arrow", "read_arrow_bars"]
+    assert paginated_json_call == ["count_arrow", "iter_batches"]
+    assert csv_call == ["iter_batches"]
+    assert export_call == ["iter_batches"]
     assert all(
         "iter_arrow_batches" not in call
-        for call in (json_call, csv_call, export_call)
+        for call in (
+            json_call,
+            paginated_json_call,
+            csv_call,
+            export_call,
+        )
     )
 
 

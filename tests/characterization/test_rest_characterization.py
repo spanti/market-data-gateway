@@ -12,6 +12,7 @@ strings, the exact Arrow schema, CSV text, export bytes, media types,
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 
 import pyarrow as pa
@@ -20,7 +21,7 @@ import pyarrow.parquet as pq
 from mdgw.api.routes.bars import JSON_ROW_LIMIT
 from mdgw.core.envelope import table_to_messages
 from mdgw.core.schema import BAR_SCHEMA
-from mdgw.core.time import datetime_to_ns, ns_to_iso
+from mdgw.core.time import datetime_to_ns, iso_to_ns, ns_to_iso
 
 from .dataset_builder import (
     BTC,
@@ -109,16 +110,12 @@ def test_json_returns_raw_revisions_and_duplicate_rows(tmp_path: Path) -> None:
     with running_runtime(duplicates.root) as runtime:
         duplicate_payload = get_json(f"{runtime.base_url}{BARS}?interval=1m")
 
-    assert [bar["payload"]["revision"] for bar in revision_payload["bars"]] == [
-        0,
-        1,
-        2,
-    ]
-    assert [bar["payload"]["open"] for bar in revision_payload["bars"]] == [
-        "100.0",
-        "101.0",
-        "102.0",
-    ]
+    # Non-paginated output has no ordering contract; compare every Revision by
+    # content instead of pinning a physical scan order.
+    assert {
+        bar["payload"]["revision"]: bar["payload"]["open"]
+        for bar in revision_payload["bars"]
+    } == {0: "100.0", 1: "101.0", 2: "102.0"}
     # Raw Revisions are not deduplicated: three identical stored rows -> three
     # JSON messages.
     assert len(duplicate_payload["bars"]) == 3
@@ -150,7 +147,9 @@ def test_json_decimals_are_exact_strings_and_timestamps_have_nine_digits(
         payload = get_json(f"{runtime.base_url}{BARS}?interval=1m")
 
     assert len(payload["bars"]) == 2  # first fixture row + precise row
-    precise_bar = payload["bars"][1]
+    precise_bar = next(
+        bar for bar in payload["bars"] if bar["payload"]["open"] == precise
+    )
     for field in ("open", "high", "low", "close"):
         assert precise_bar["payload"][field] == precise
     assert isinstance(precise_bar["payload"]["volume"], str)
@@ -181,8 +180,15 @@ def test_json_row_ceiling_counts_raw_rows_but_limit_caps_the_check(
     }
     # `limit` participates in the ceiling check, so a small page is allowed
     # even though the total number of matching rows exceeds the ceiling.
+    # LIMIT does not promise the old physical scan order; the returned row
+    # must simply be one of the stored Bars in the requested range.
     assert len(limited["bars"]) == 1
-    assert limited["bars"][0]["payload"]["open_ts"] == _iso(0)
+    returned_ts = limited["bars"][0]["payload"]["open_ts"]
+    assert NS_TIMESTAMP.fullmatch(returned_ts) is not None
+    index = (
+        iso_to_ns(returned_ts) - datetime_to_ns(minute(0))
+    ) // 60_000_000_000
+    assert 0 <= index < JSON_ROW_LIMIT + 1
 
 
 def test_non_paginated_limit_matches_the_store_raw_row_cap(tmp_path: Path) -> None:
@@ -190,11 +196,18 @@ def test_non_paginated_limit_matches_the_store_raw_row_cap(tmp_path: Path) -> No
     with running_runtime(dataset.root) as runtime:
         payload = get_json(f"{runtime.base_url}{BARS}?interval=1m&limit=2")
 
-    # Non-paginated responses make no ordering promise; parity with the Store
-    # seam freezes row selection and multiplicity, not physical order.
-    expected = table_to_messages(dataset.store.read_bars(interval="1m", limit=2))
-    assert payload["bars"] == expected
+    # Non-paginated responses make no ordering or row-selection promise for
+    # LIMIT. The returned rows must come from the frozen Snapshot's raw rows
+    # without inventing rows or increasing a row's multiplicity.
+    stored = Counter(
+        json.dumps(message, sort_keys=True)
+        for message in table_to_messages(dataset.store.read_bars(interval="1m"))
+    )
+    returned = Counter(
+        json.dumps(message, sort_keys=True) for message in payload["bars"]
+    )
     assert len(payload["bars"]) == 2
+    assert returned <= stored
 
 
 # -- pagination and half-open windows --------------------------------------
