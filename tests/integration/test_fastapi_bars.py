@@ -317,11 +317,18 @@ def test_arrow_stream_is_table_semantically_equal_to_json(
     table = pa.ipc.open_stream(pa.BufferReader(body)).read_all()
     assert table.schema == BAR_SCHEMA
     assert table.num_rows == 2
-    assert table.column("open").to_pylist() == [
-        Decimal(precise),
-        Decimal("65000.1"),
-    ]
-    assert table_to_messages(table) == json.loads(json_body)["bars"]
+    assert sorted(table.column("open").to_pylist()) == sorted(
+        [Decimal(precise), Decimal("65000.1")]
+    )
+    # Non-paginated responses have no ordering contract; compare exact message
+    # content and multiplicity, not physical scan order.
+    assert sorted(
+        json.dumps(message, sort_keys=True)
+        for message in table_to_messages(table)
+    ) == sorted(
+        json.dumps(message, sort_keys=True)
+        for message in json.loads(json_body)["bars"]
+    )
 
 
 def test_empty_arrow_stream_is_a_valid_stream_with_the_canonical_schema(
