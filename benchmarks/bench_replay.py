@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Replay benchmark: push a seeded Dataset through `ReplayService` in asap mode.
+"""Replay benchmark: push a seeded Dataset through `ReplayService`.
 
 Measures the full Replay Session worker path: read + deduplicate + order the
 Bars, encode each as a one-row Arrow IPC stream, and call a no-op publisher.
 Transport fan-out is excluded on purpose so the number reflects the gateway's
-own work.
+own work. `--mode realtime` runs the same bounded stream paced by the Replay
+Clock; use a high `--speed` so the benchmark measures throughput rather than
+the Clock.
 
 Examples:
     python benchmarks/bench_replay.py
     python benchmarks/bench_replay.py --rows 200000 --repeat 3
+    python benchmarks/bench_replay.py --mode realtime --memory
 """
 
 from __future__ import annotations
@@ -92,9 +95,11 @@ class _ArrowPeakRead:
         self._inner = inner
         self._peaks = peaks
 
-    def iter_replay_batches(self, queries, *, batch_size=None):
+    def iter_replay_batches(
+        self, queries, *, batch_size=None, cancellation=None
+    ):
         for batch in self._inner.iter_replay_batches(
-            queries, batch_size=batch_size
+            queries, batch_size=batch_size, cancellation=cancellation
         ):
             # The batch is alive here, before the Session converts it to
             # Python Bar values. `nbytes` covers DuckDB-exported Arrow
@@ -134,6 +139,8 @@ def _parse_row_counts(raw: str) -> list[int]:
 def _run_memory_pass(
     row_counts: list[int],
     *,
+    mode: str,
+    speed: float,
     memory_limit: str,
     batch_size: int,
     prefetch_batches: int,
@@ -141,7 +148,7 @@ def _run_memory_pass(
 ) -> int:
     """Prove the read-side process memory is bounded while result size grows.
 
-    One asap Session runs per row count with the same query and a DuckDB memory
+    One Session runs per row count with the same query and a DuckDB memory
     limit low enough to force an external sort at the larger sizes. Python
     (`tracemalloc`), Arrow native (largest handed-over RecordBatch) and RSS
     (sampled, optional psutil) peaks are reported next to the sampled DuckDB
@@ -149,7 +156,7 @@ def _run_memory_pass(
     the bounded-prefetch proof; temp files are never a second result copy.
     """
     typer.echo(
-        "memory scaling (same query, increasing result size; "
+        f"memory scaling, mode={mode} (same query, increasing result size; "
         f"DuckDB memory_limit={memory_limit}, threads=1)"
     )
     typer.echo(
@@ -219,7 +226,8 @@ def _run_memory_pass(
                 ),
                 start_ts_ns=start_ns,
                 end_ts_ns=end_ns,
-                replay_mode="asap",
+                replay_mode=mode,
+                speed=speed,
             )
             started = time.perf_counter()
             session_id = service.create_session(spec)
@@ -278,6 +286,16 @@ def replay(
         "--timeout-s",
         help="abort a session after this many seconds (default: 120)",
     ),
+    mode: str = typer.Option(
+        "asap",
+        "--mode",
+        help="Replay mode for the timed and memory passes (asap|realtime)",
+    ),
+    speed: float = typer.Option(
+        1_000_000.0,
+        "--speed",
+        help="Realtime Clock speed for --mode realtime (default: 1000000)",
+    ),
     batch_size: int = typer.Option(
         4_096,
         "--batch-size",
@@ -319,6 +337,12 @@ def replay(
             "--prefetch-batches must be positive",
             param_hint="--prefetch-batches",
         )
+    if mode not in {"asap", "realtime"}:
+        raise typer.BadParameter(
+            "--mode must be 'asap' or 'realtime'", param_hint="--mode"
+        )
+    if speed <= 0:
+        raise typer.BadParameter("--speed must be positive", param_hint="--speed")
 
     bars = make_bars(rows, instrument_id=instrument, interval=interval)
     start_ns, end_ns = bar_range_ns(bars)
@@ -402,8 +426,8 @@ def replay(
                 subscriptions=(subscription,),
                 start_ts_ns=start_ns,
                 end_ts_ns=end_ns,
-                replay_mode="asap",
-                speed=1.0,
+                replay_mode=mode,
+                speed=speed,
             )
             started = time.perf_counter()
             session_id = service.create_session(spec)
@@ -430,7 +454,9 @@ def replay(
     stream_median = statistics.median(stream_durations)
     legacy_best = min(legacy_query_durations)
     legacy_median = statistics.median(legacy_query_durations)
-    typer.echo(f"mode: asap replay  rows: {sent:,}  passes: {repeat}")
+    typer.echo(
+        f"mode: {mode} replay  rows: {sent:,}  passes: {repeat}  speed: {speed:g}"
+    )
     typer.echo(
         f"query prep (duckdb materialized): best {query_best:.3f}s "
         f"({format_rate(query_rows, query_best)})  "
@@ -452,6 +478,8 @@ def replay(
     if memory:
         return _run_memory_pass(
             _parse_row_counts(memory_rows),
+            mode=mode,
+            speed=speed,
             memory_limit=memory_limit,
             batch_size=batch_size,
             prefetch_batches=prefetch_batches,

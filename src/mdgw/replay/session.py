@@ -1,21 +1,24 @@
 """Replay Session value objects, Replay Protocol parsing and the push loops.
 
 One `ReplaySession` owns one daemon worker thread. The worker acquires one
-Manifest Snapshot and one Dataset Read Lease for the whole Session, reads all
-matching Bars, then publishes them one ZMQ message per Bar
-(`[topic][Arrow IPC stream]`) and finishes with an End of Session control
-message. The lease's heartbeat keeps `_sessions/<id>.lock` fresh so
-Compaction / GC cannot delete the Dataset mid-session — including while the
-session is paused — and its subscription records preserve the existing
-partition-protection behaviour.
+Manifest Snapshot and one Dataset Read Lease for the whole Session, consumes
+the matching Bars through a bounded prefetch and publishes them one ZMQ
+message per Bar (`[topic][Arrow IPC stream]`), then finishes with an End of
+Session control message. The lease's heartbeat keeps `_sessions/<id>.lock`
+fresh so Compaction / GC cannot delete the Dataset mid-session — including
+while the session is paused — and its subscription records preserve the
+existing partition-protection behaviour.
 
 Three Replay Modes share the same deterministic ordering and End of Session:
 
-- `asap`     one pass at full speed, no Replay Clock throttling.
-- `realtime` a Replay Clock paces Bars by `speed`; `pause`/`resume`/`seek`/
-             `set_speed` are legal.
+- `asap`     one bounded streaming pass at full speed, no Clock throttling.
+- `realtime` the same bounded stream paced by a Replay Clock; a seek starts a
+             new query generation on the same fixed Snapshot while
+             `pause`/`resume`/`set_speed` stay legal.
 - `step`     the session starts paused and waits for Step Credits; `step(n)`
-             grants n more Bars. `seek` is legal while (always) paused.
+             grants n more Bars. `seek` is legal while (always) paused. Step
+             keeps its materialized read until ticket 15 moves it onto the
+             same stream.
 """
 
 from __future__ import annotations
@@ -40,7 +43,7 @@ from mdgw.core.time import datetime_to_ns, iso_to_ns, ns_to_iso
 from mdgw.replay.clock import ReplayClock, validate_speed
 from mdgw.replay.prefetch import BoundedPrefetcher
 from mdgw.replay.source import ReplayBarSource, interval_ns
-from mdgw.store.parquet_dataset import BarReadQuery
+from mdgw.store.parquet_dataset import BarReadQuery, ReplayScanCancellation
 
 if TYPE_CHECKING:
     from mdgw.core.bar import Bar
@@ -263,6 +266,7 @@ class ReplaySession:
 
         # Cursor / clock / Step Credit state, guarded by `_cond`.
         self._cond = threading.Condition()
+        # Step mode still materializes (ticket 15 moves it onto the stream).
         self._bars: list[Bar] | None = None
         self._close_ts_ns: list[int] = []
         self._cursor = 0
@@ -270,6 +274,15 @@ class ReplaySession:
         self._speed = spec.speed
         self._bars_sent = 0
         self._pending_seek_ns: int | None = None
+        # Realtime query generations. A seek increments `_generation` and
+        # records its start position; the worker replaces the current bounded
+        # stream only after the old generation's Reader is cancelled.
+        self._generation = 0
+        self._generation_start_ns = spec.start_ts_ns
+        # True until the current generation's first readable batch is ready.
+        # The Clock is held (not started/resumed) during that I/O so read and
+        # seek latency never consumes virtual replay time.
+        self._awaiting_generation = True
         self._clock = ReplayClock(speed=spec.speed)
         self._clock_started = False
         # A step session is paused from the moment it is created.
@@ -347,7 +360,11 @@ class ReplaySession:
             if not self._paused:
                 return True
             self._paused = False
-            self._clock.resume()
+            # While a generation's first batch is still being read, the Clock
+            # stays held so the resumed session starts at data readiness, not
+            # at the resume command. The first batch handler resumes it.
+            if not self._awaiting_generation:
+                self._clock.resume()
             self._cond.notify_all()
         return True
 
@@ -402,7 +419,7 @@ class ReplaySession:
             position_ns = (
                 self._clock.position_ns()
                 if self._clock_started
-                else self.spec.start_ts_ns
+                else self._generation_start_ns
             )
             return {
                 "session_id": self.session_id,
@@ -431,10 +448,23 @@ class ReplaySession:
 
     def _apply_seek_locked(self, ts_ns: int) -> None:
         # A seek discards credits granted before it; credits granted after it
-        # survive, even when the Parquet read has not finished yet.
+        # survive, even when the next generation's read has not finished yet.
         self._credits = 0
-        # Before the Parquet read finishes there is no cursor to bisect; the
-        # worker applies the pending seek right after the read.
+        if self.spec.replay_mode == "realtime":
+            # Invalidate the current generation and let the worker open a new
+            # query on the same fixed Snapshot/Lease. The Clock is re-anchored
+            # to the seek position only when that generation's first batch is
+            # ready, so seek I/O never consumes virtual time.
+            self._generation += 1
+            self._generation_start_ns = ts_ns
+            self._awaiting_generation = True
+            if self._clock_started:
+                self._clock.seek(ts_ns)
+                self._clock.pause()
+            return
+        # Step keeps its materialized seek: before the Parquet read finishes
+        # there is no cursor to bisect, so the worker applies the pending seek
+        # right after the read.
         if self._bars is None:
             self._pending_seek_ns = ts_ns
             return
@@ -483,9 +513,10 @@ class ReplaySession:
                     if self._cancel.is_set()
                     else self._run_asap_streaming(read)
                 )
-            else:
-                # A read failure propagates to `_run` on purpose: it must not
-                # become an empty Bars list with a normal End of Session.
+            elif self.spec.replay_mode == "step":
+                # Step keeps its materialized read until ticket 15. A read
+                # failure propagates to `_run` on purpose: it must not become
+                # an empty Bars list with a normal End of Session.
                 bars = (
                     []
                     if self._cancel.is_set()
@@ -497,12 +528,17 @@ class ReplaySession:
                     )
                 )
                 self._install_materialized(bars)
-                if self._cancel.is_set():
-                    self._reason = "stopped"
-                elif self.spec.replay_mode == "step":
-                    self._reason = self._run_step(bars)
-                else:
-                    self._reason = self._run_realtime(bars)
+                self._reason = (
+                    "stopped" if self._cancel.is_set() else self._run_step(bars)
+                )
+            else:
+                # Realtime uses the same bounded stream as asap, paced by the
+                # Replay Clock, with one query generation per seek.
+                self._reason = (
+                    "stopped"
+                    if self._cancel.is_set()
+                    else self._run_realtime_streaming(read)
+                )
 
             if self._cancel.is_set():
                 self._reason = "stopped"
@@ -526,6 +562,7 @@ class ReplaySession:
             # `start_ts`.
             self._clock.start(self.spec.start_ts_ns)
             self._clock_started = True
+            self._awaiting_generation = False
             if self._paused and not self._clock.paused:
                 self._clock.pause()
             if self._pending_seek_ns is not None:
@@ -591,6 +628,9 @@ class ReplaySession:
             # Closing the StoreRead cancels the current query, closes the
             # Arrow Reader and its connection, and releases the lease.
             on_close=read.close,
+            # A stop must be observed even while a blocked query yields
+            # nothing to this consumer.
+            should_stop=self._cancel.is_set,
         )
         prefetcher.start()
         try:
@@ -619,35 +659,146 @@ class ReplaySession:
             self._publish_and_count(bar)
         return False
 
-    def _run_realtime(self, bars: list[Bar]) -> str:
+    def _run_realtime_streaming(self, read: StoreRead) -> str:
+        """Pace the bounded query stream, replacing it for each seek.
+
+        Every iteration owns one query generation of the Session's fixed
+        Manifest Snapshot. A seek increments the generation and records the
+        new start position; the worker observes that while pacing, closes the
+        old prefetcher (which cancels that generation's Reader/connection
+        without releasing the Snapshot or Lease) and opens a new one at the
+        seek position. Bars and failures of a superseded generation are
+        discarded, never published and never reported.
+        """
         while True:
             with self._cond:
-                while True:
+                if self._cancel.is_set():
+                    return "stopped"
+                generation = self._generation
+                start_ns = self._generation_start_ns
+            prefetcher = self._open_realtime_prefetch(
+                read, start_ns, generation
+            )
+            try:
+                outcome = self._pace_stream(prefetcher, generation, start_ns)
+            finally:
+                prefetcher.close()
+            if outcome != "superseded":
+                return outcome
+
+    def _open_realtime_prefetch(
+        self, read: StoreRead, start_ns: int, generation: int
+    ) -> BoundedPrefetcher[list[Bar]]:
+        """One generation's bounded prefetch on the shared StoreRead."""
+        cancellation = ReplayScanCancellation()
+
+        def produce():
+            return self._source.iter_bars(
+                self.spec.subscriptions,
+                start_ts_ns=start_ns,
+                end_ts_ns=self.spec.end_ts_ns,
+                read=read,
+                batch_size=self._batch_size,
+                # Replacing the generation must release only this query's
+                # Reader/connection; the Snapshot and Lease stay alive.
+                cancellation=cancellation,
+            )
+
+        return BoundedPrefetcher(
+            produce,
+            max_pending=self._prefetch_batches,
+            on_close=cancellation.cancel,
+            # A stop or a seek must end the consumer's wait even when the old
+            # generation's blocked query produces nothing more.
+            should_stop=lambda: (
+                self._cancel.is_set() or self._generation != generation
+            ),
+        ).start()
+
+    def _pace_stream(  # ruff: ignore[too-many-return-statements,too-many-branches] - one generation
+        self,
+        prefetcher: BoundedPrefetcher[list[Bar]],
+        generation: int,
+        start_ns: int,
+    ) -> str:
+        """Publish one generation's Bars at their Replay Clock positions.
+
+        Returns `exhausted` only when the generation's stream ended and every
+        prefetched Bar was published, `stopped` on stop, and `superseded` when
+        a seek replaced the generation. The Clock starts (or re-anchors) at
+        `start_ns` when the generation's first batch is ready; while paused it
+        stays frozen there.
+        """
+        started = False
+        try:  # ruff: ignore[too-many-statements-in-try-clause,too-many-nested-blocks] - explicit generation checks
+            for bars in prefetcher:
+                with self._cond:
                     if self._cancel.is_set():
                         return "stopped"
-                    # A paused seek may move the cursor past the end; that is
-                    # data exhaustion, so End of Session must not wait for a
-                    # resume.
-                    if self._cursor >= len(bars):
-                        return "exhausted"
-                    if self._paused:
-                        # Woken by resume/stop/seek/set_speed; re-evaluate.
-                        self._cond.wait()
-                        continue
-                    remaining = self._clock.seconds_until(
-                        self._close_ts_ns[self._cursor]
-                    )
-                    if remaining is None:
-                        # The clock was paused between the two checks.
-                        continue
-                    if remaining > 0:
-                        # Woken early by a control op; recompute the wait.
-                        self._cond.wait(remaining)
-                        continue
-                    bar = bars[self._cursor]
-                    self._cursor += 1
-                    break
-            self._publish_and_count(bar)
+                    if self._generation != generation:
+                        return "superseded"
+                    if not started:
+                        self._start_generation_clock_locked(start_ns)
+                        started = True
+                for bar in bars:
+                    close_ns = datetime_to_ns(bar.close_ts)
+                    with self._cond:
+                        while True:
+                            if self._cancel.is_set():
+                                return "stopped"
+                            if self._generation != generation:
+                                return "superseded"
+                            if self._paused:
+                                # Woken by resume/stop/seek/set_speed.
+                                self._cond.wait()
+                                continue
+                            remaining = self._clock.seconds_until(close_ns)
+                            if remaining is None:
+                                # The clock was paused between the checks.
+                                continue
+                            if remaining > 0:
+                                # Woken early by a control op; recompute.
+                                self._cond.wait(remaining)
+                                continue
+                            break
+                        # Narrow the stale-generation window to this final
+                        # check before the publish happens outside `_cond`.
+                        if self._cancel.is_set():
+                            return "stopped"
+                        if self._generation != generation:
+                            return "superseded"
+                    self._publish_and_count(bar)
+        except BaseException:
+            # An interrupted read is the expected consequence of stop or of a
+            # replaced generation; any other producer failure stays explicit.
+            with self._cond:
+                if self._cancel.is_set():
+                    return "stopped"
+                if self._generation != generation:
+                    return "superseded"
+            raise
+        with self._cond:
+            if self._cancel.is_set():
+                return "stopped"
+            if self._generation != generation:
+                return "superseded"
+        return "exhausted"
+
+    def _start_generation_clock_locked(self, start_ns: int) -> None:
+        """Anchor the Clock at the generation start when its data is ready.
+
+        Called under `_cond` on the first readable batch of a generation. A
+        client that paused during the I/O keeps the Clock frozen at the start
+        position; a client that resumed during the I/O starts at this point,
+        not at the resume command.
+        """
+        self._awaiting_generation = False
+        self._clock.start(start_ns)
+        self._clock_started = True
+        if self._paused:
+            self._clock.pause()
+        else:
+            self._clock.resume()
 
     def _run_step(self, bars: list[Bar]) -> str:
         while True:

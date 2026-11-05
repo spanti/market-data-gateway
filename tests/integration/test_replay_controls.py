@@ -254,10 +254,12 @@ class _GatedRead:
     def _wait(self) -> None:
         assert self._gate.wait(5), "test never released the read gate"
 
-    def iter_replay_batches(self, queries, *, batch_size=None):
+    def iter_replay_batches(
+        self, queries, *, batch_size=None, cancellation=None
+    ):
         self._wait()
         yield from self._inner.iter_replay_batches(
-            queries, batch_size=batch_size
+            queries, batch_size=batch_size, cancellation=cancellation
         )
 
     def read_replay_bars(self, queries):

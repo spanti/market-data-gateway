@@ -115,6 +115,38 @@ def test_close_interrupts_a_producer_blocked_in_the_underlying_read() -> None:
     assert not prefetcher.exhausted
 
 
+def test_an_external_should_stop_unblocks_an_empty_queue_consumer() -> None:
+    """Session controls must end the wait even when the read produces nothing.
+
+    A Realtime seek or stop is observed by the consumer loop; without an
+    external predicate it would block until the producer yields, which is
+    exactly what a blocked Query never does.
+    """
+    release = threading.Event()
+    stop = threading.Event()
+
+    def produce():
+        release.wait(10)
+        yield "late"
+
+    prefetcher = BoundedPrefetcher(
+        produce, max_pending=2, should_stop=stop.is_set
+    )
+    prefetcher.start()
+    iterator = iter(prefetcher)
+    try:
+        timer = threading.Timer(0.05, stop.set)
+        timer.start()
+        started = time.monotonic()
+        assert list(iterator) == []
+        assert time.monotonic() - started < 2
+        assert not prefetcher.exhausted
+    finally:
+        prefetcher.close()
+        release.set()
+    assert prefetcher.wait(timeout=5)
+
+
 def test_close_is_idempotent_and_calls_the_interrupt_once() -> None:
     calls: list[int] = []
 

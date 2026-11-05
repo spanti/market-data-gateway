@@ -65,7 +65,10 @@ class _LegacySource(ReplayBarSource):
         end_ts_ns: int,
         read,
         batch_size: int,
+        cancellation=None,
     ):
+        # The legacy PyArrow read has no query generation to cancel; a seek
+        # closes this generator (the prefetcher's close path) instead.
         bars = self.read(
             subscriptions,
             start_ts_ns=start_ts_ns,
@@ -90,6 +93,7 @@ class _MaterializedDuckDBSource(ReplayBarSource):
         end_ts_ns: int,
         read,
         batch_size: int,
+        cancellation=None,
     ):
         bars = super().read(
             subscriptions,
