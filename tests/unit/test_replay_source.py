@@ -7,6 +7,9 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pyarrow as pa
+import pytest
+
 from mdgw.core.bar import Bar
 from mdgw.core.schema import BAR_SCHEMA, INTERVALS, empty_logical_table
 from mdgw.core.time import datetime_to_ns
@@ -430,6 +433,82 @@ def test_duckdb_source_dedupes_identical_subscriptions_before_querying(
         (BTC, "5m"),
         (ETH, "1m"),
     ]
+
+
+def test_store_read_iter_replay_batches_streams_the_ordered_contract_batches(
+    tmp_path: Path,
+) -> None:
+    """The streaming seam yields the same ordered Bars, split into batches."""
+    store = ParquetBarStore(tmp_path)
+    store.write_bars(
+        [
+            _bar(open_minute=0, revision=0, price="100"),
+            _bar(open_minute=1, seq=3, price="100"),
+            _bar(open_minute=2, seq=None, price="100"),
+            _bar(open_minute=3, seq=1, price="100"),
+            _bar(open_minute=4, seq=None, price="100"),
+        ],
+        asset_class="crypto",
+    )
+    store.write_bars(
+        [_bar(open_minute=1, revision=2, price="200")],
+        asset_class="crypto",
+    )
+    query = _replay_query(start_minute=0, end_minute=10)
+    with store.open_read(
+        queries=(_snapshot_query(start_minute=0, end_minute=10),),
+        lease_id="unit-stream",
+    ) as read:
+        materialized = read.read_replay_bars((query,))
+        batches = list(
+            read.iter_replay_batches((query,), batch_size=2)
+        )
+
+    assert [batch.num_rows for batch in batches] == [2, 2, 1]
+    for batch in batches:
+        assert batch.schema.equals(BAR_SCHEMA, check_metadata=False)
+    streamed = pa.Table.from_batches(batches, schema=BAR_SCHEMA)
+    assert [_signature(Bar(**row)) for row in streamed.to_pylist()] == [
+        _signature(Bar(**row)) for row in materialized.to_pylist()
+    ]
+
+
+def test_store_read_iter_replay_batches_is_lazy_until_consumed(
+    tmp_path: Path,
+) -> None:
+    store = ParquetBarStore(tmp_path)
+    store.write_bars([_bar(open_minute=0)], asset_class="crypto")
+    with store.open_read(
+        queries=(_snapshot_query(start_minute=0, end_minute=2),),
+        lease_id="unit-stream-lazy",
+    ) as read:
+        batches = read.iter_replay_batches(
+            (_replay_query(start_minute=0, end_minute=2),),
+            batch_size=1,
+        )
+        # A closed StoreRead must fail when iteration actually starts; a
+        # materializing call would already have produced (or refused) here.
+        read.close()
+        with pytest.raises(RuntimeError, match="closed"):
+            next(iter(batches))
+
+
+def test_store_read_iter_replay_batches_returns_nothing_without_files(
+    tmp_path: Path,
+) -> None:
+    store = ParquetBarStore(tmp_path)
+    store.write_bars([_bar(open_minute=0)], asset_class="crypto")
+    with store.open_read(
+        queries=(_snapshot_query(start_minute=5, end_minute=8),),
+        lease_id="unit-stream-empty",
+    ) as read:
+        batches = list(
+            read.iter_replay_batches(
+                (_replay_query(start_minute=5, end_minute=8),),
+                batch_size=2,
+            )
+        )
+    assert batches == []
 
 
 def test_store_read_replay_query_returns_empty_contract_table(

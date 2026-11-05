@@ -56,6 +56,10 @@ publish_bind_host = "127.0.0.1"
 publish_port = 5558
 max_sessions = 4
 heartbeat_s = 1.0
+# asap Replay consumes the ordered DuckDB query in bounded Arrow batches.
+# In-flight Bars are roughly batch_size * (prefetch_batches + 2).
+batch_size = 4096
+prefetch_batches = 2
 
 [storage]
 # Demo data lives beside the checkout and is git-ignored, so it never mixes

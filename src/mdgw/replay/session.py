@@ -38,6 +38,7 @@ from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import datetime_to_ns, iso_to_ns, ns_to_iso
 from mdgw.replay.clock import ReplayClock, validate_speed
+from mdgw.replay.prefetch import BoundedPrefetcher
 from mdgw.replay.source import ReplayBarSource, interval_ns
 from mdgw.store.parquet_dataset import BarReadQuery
 
@@ -49,6 +50,10 @@ logger = logging.getLogger(__name__)
 
 DATA_TYPE = "bar"
 SUPPORTED_REPLAY_MODES = frozenset({"asap", "realtime", "step"})
+#: Bars DuckDB hands over per Arrow RecordBatch on the streaming asap path.
+DEFAULT_REPLAY_BATCH_SIZE = 4_096
+#: Bounded prefetch depth: batches the reader may run ahead of the publisher.
+DEFAULT_REPLAY_PREFETCH_BATCHES = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,7 +229,15 @@ class ReplaySession:
         *,
         heartbeat_s: float = 1.0,
         source: ReplayBarSource | None = None,
+        batch_size: int = DEFAULT_REPLAY_BATCH_SIZE,
+        prefetch_batches: int = DEFAULT_REPLAY_PREFETCH_BATCHES,
     ) -> None:
+        if batch_size < 1:
+            msg = "batch_size must be positive"
+            raise ValueError(msg)
+        if prefetch_batches < 1:
+            msg = "prefetch_batches must be at least 1"
+            raise ValueError(msg)
         self.session_id = session_id
         self.spec = spec
         self._store = store
@@ -234,6 +247,11 @@ class ReplaySession:
         self._publish_bar = publish_bar
         self._publish_event = publish_event
         self._heartbeat_s = heartbeat_s
+        # asap reads the ordered DuckDB query through a bounded prefetch. The
+        # materialized modes keep their existing single read until tickets
+        # 14/15 move them onto the same seam.
+        self._batch_size = batch_size
+        self._prefetch_batches = prefetch_batches
 
         self._state = SessionState.CREATED
         self._state_lock = threading.Lock()
@@ -454,48 +472,37 @@ class ReplaySession:
         read = None
         try:
             read = self._open_session_read()
-            # A read failure propagates to `_run` on purpose: it must not
-            # become an empty Bars list with a normal End of Session.
-            bars = (
-                []
-                if read is None or self._cancel.is_set()
-                else self._source.read(
-                    self.spec.subscriptions,
-                    start_ts_ns=self.spec.start_ts_ns,
-                    end_ts_ns=self.spec.end_ts_ns,
-                    read=read,
-                )
-            )
-
-            with self._cond:
-                self._bars = bars
-                self._close_ts_ns = [
-                    datetime_to_ns(bar.close_ts) for bar in bars
-                ]
-                self._cursor = 0
-                # Start the clock *after* the read; reading time must not
-                # consume replay time. A session paused during the read stays
-                # paused at `start_ts`.
-                self._clock.start(self.spec.start_ts_ns)
-                self._clock_started = True
-                if self._paused and not self._clock.paused:
-                    self._clock.pause()
-                if self._pending_seek_ns is not None:
-                    pending = self._pending_seek_ns
-                    self._pending_seek_ns = None
-                    # Credits granted *after* the seek are intentionally
-                    # preserved; the seek already reset the credits it saw.
-                    self._cursor = bisect_left(self._close_ts_ns, pending)
-                    self._clock.seek(pending)
-
-            if self._cancel.is_set():
+            if read is None:
                 self._reason = "stopped"
-            elif self.spec.replay_mode == "step":
-                self._reason = self._run_step(bars)
-            elif self.spec.replay_mode == "realtime":
-                self._reason = self._run_realtime(bars)
+            elif self.spec.replay_mode == "asap":
+                # Bounded streaming: no full Bars list or close-time array is
+                # built before the first publish. A stop that arrived while
+                # the Snapshot was being acquired never starts the query.
+                self._reason = (
+                    "stopped"
+                    if self._cancel.is_set()
+                    else self._run_asap_streaming(read)
+                )
             else:
-                self._reason = self._run_asap(bars)
+                # A read failure propagates to `_run` on purpose: it must not
+                # become an empty Bars list with a normal End of Session.
+                bars = (
+                    []
+                    if self._cancel.is_set()
+                    else self._source.read(
+                        self.spec.subscriptions,
+                        start_ts_ns=self.spec.start_ts_ns,
+                        end_ts_ns=self.spec.end_ts_ns,
+                        read=read,
+                    )
+                )
+                self._install_materialized(bars)
+                if self._cancel.is_set():
+                    self._reason = "stopped"
+                elif self.spec.replay_mode == "step":
+                    self._reason = self._run_step(bars)
+                else:
+                    self._reason = self._run_realtime(bars)
 
             if self._cancel.is_set():
                 self._reason = "stopped"
@@ -503,9 +510,31 @@ class ReplaySession:
             self._publish_end_of_session(self._reason)
         finally:
             # Normal completion, exception, cancellation and a failed read all
-            # release the whole-Session lease here.
+            # release the whole-Session lease here. `ReplaySession` keeps this
+            # call even though the streaming prefetch closes the same read, so
+            # every path is covered and repeated close is harmless.
             if read is not None:
                 read.close()
+
+    def _install_materialized(self, bars: list[Bar]) -> None:
+        with self._cond:
+            self._bars = bars
+            self._close_ts_ns = [datetime_to_ns(bar.close_ts) for bar in bars]
+            self._cursor = 0
+            # Start the clock *after* the read; reading time must not consume
+            # replay time. A session paused during the read stays paused at
+            # `start_ts`.
+            self._clock.start(self.spec.start_ts_ns)
+            self._clock_started = True
+            if self._paused and not self._clock.paused:
+                self._clock.pause()
+            if self._pending_seek_ns is not None:
+                pending = self._pending_seek_ns
+                self._pending_seek_ns = None
+                # Credits granted *after* the seek are intentionally
+                # preserved; the seek already reset the credits it saw.
+                self._cursor = bisect_left(self._close_ts_ns, pending)
+                self._clock.seek(pending)
 
     def _open_session_read(self) -> StoreRead | None:
         """Acquire the Session's one fixed Snapshot and one Lease."""
@@ -534,16 +563,61 @@ class ReplaySession:
 
     # -- push loops --------------------------------------------------------
 
-    def _run_asap(self, bars: list[Bar]) -> str:
-        while True:
-            with self._cond:
+    def _run_asap_streaming(self, read: StoreRead) -> str:
+        """Publish the ordered query batch by batch under a bounded prefetch.
+
+        The producer thread pulls RecordBatches through the same fixed
+        Snapshot/Lease, converts them to `Bar` values and queues at most
+        `prefetch_batches` of them ahead of this loop. A stop observed here
+        returns immediately; `close()` then interrupts a blocked DuckDB read.
+        The prefetcher only reports a normal end after every queued Bar has
+        already been handed to this loop, so `exhausted` cannot overtake a
+        prefetched Bar. Producer failures are re-raised, never reported as
+        end-of-stream.
+        """
+
+        def produce():
+            return self._source.iter_bars(
+                self.spec.subscriptions,
+                start_ts_ns=self.spec.start_ts_ns,
+                end_ts_ns=self.spec.end_ts_ns,
+                read=read,
+                batch_size=self._batch_size,
+            )
+
+        prefetcher = BoundedPrefetcher(
+            produce,
+            max_pending=self._prefetch_batches,
+            # Closing the StoreRead cancels the current query, closes the
+            # Arrow Reader and its connection, and releases the lease.
+            on_close=read.close,
+        )
+        prefetcher.start()
+        try:
+            try:
+                for bars in prefetcher:
+                    if self._publish_streamed_batch(bars):
+                        return "stopped"
+            except BaseException:
+                # An interrupted read is the expected consequence of stop;
+                # any other producer failure stays an explicit Session error.
                 if self._cancel.is_set():
                     return "stopped"
-                if self._cursor >= len(bars):
-                    return "exhausted"
-                bar = bars[self._cursor]
-                self._cursor += 1
+                raise
+        finally:
+            prefetcher.close()
+        if self._cancel.is_set():
+            return "stopped"
+        return "exhausted"
+
+    def _publish_streamed_batch(self, bars: list[Bar]) -> bool:
+        """Publish one prefetched batch; True when stop was observed."""
+        for bar in bars:
+            with self._cond:
+                if self._cancel.is_set():
+                    return True
             self._publish_and_count(bar)
+        return False
 
     def _run_realtime(self, bars: list[Bar]) -> str:
         while True:

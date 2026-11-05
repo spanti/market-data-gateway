@@ -299,6 +299,8 @@ def test_replay_config_defaults() -> None:
     assert replay.publish_port == 0
     assert replay.max_sessions == 4
     assert replay.heartbeat_s == 1.0
+    assert replay.batch_size == 4_096
+    assert replay.prefetch_batches == 2
 
 
 def test_repository_toml_declares_replay() -> None:
@@ -311,9 +313,13 @@ def test_repository_toml_declares_replay() -> None:
     assert raw["replay"]["publish_port"] == 0
     assert raw["replay"]["max_sessions"] == 4
     assert raw["replay"]["heartbeat_s"] == 1.0
+    assert raw["replay"]["batch_size"] == 4_096
+    assert raw["replay"]["prefetch_batches"] == 2
 
     config = load_config(PROJECT_ROOT / "config" / "gateway.toml")
     assert config.replay.max_sessions == 4
+    assert config.replay.batch_size == 4_096
+    assert config.replay.prefetch_batches == 2
 
 
 @pytest.mark.parametrize(
@@ -323,6 +329,8 @@ def test_repository_toml_declares_replay() -> None:
         {"replay": {"publish_port": -1}},
         {"replay": {"max_sessions": 0}},
         {"replay": {"heartbeat_s": 0}},
+        {"replay": {"batch_size": 0}},
+        {"replay": {"prefetch_batches": 0}},
     ],
 )
 def test_replay_config_rejects_invalid_values(payload: dict) -> None:

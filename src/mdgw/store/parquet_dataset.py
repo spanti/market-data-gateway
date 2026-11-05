@@ -61,7 +61,7 @@ from mdgw.store.manifest import (
 from mdgw.store.session_locks import DEFAULT_LOCK_TIMEOUT_S, DatasetReadLease
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
     from mdgw.core.bar import Bar
 
@@ -808,6 +808,54 @@ class StoreRead:
             return empty_logical_table()
         table = pa.Table.from_batches(batches)
         return table.select(BAR_SCHEMA.names).cast(BAR_SCHEMA)
+
+    def iter_replay_batches(
+        self,
+        queries: Sequence[ReplayReadQuery],
+        *,
+        batch_size: int | None = None,
+    ) -> Iterator[pa.RecordBatch]:
+        """Yield the ordered Replay Bars as a stream of contract RecordBatches.
+
+        This is the bounded M5B seam. It resolves the same explicit Data Files
+        from this read's fixed Manifest Snapshot as `read_replay_bars()` and
+        runs the same close-time filter, Revision choice, duplicate-subscription
+        resolution and five-key total order. Unlike that materializing call, it
+        hands each Arrow RecordBatch to the caller as soon as DuckDB produces
+        it, so a caller never needs the complete result in memory.
+
+        Consuming the returned generator is what starts the query (and the
+        single scanner); closing it, or closing this `StoreRead` from another
+        thread, interrupts an in-flight DuckDB read and releases its Reader and
+        connection. The Read Lease stays held until `StoreRead.close()`.
+        """
+        if batch_size is None:
+            batch_size = self._store.duckdb.arrow_batch_size
+        if batch_size < 1:
+            msg = "batch_size must be positive"
+            raise ValueError(msg)
+        self._ensure_open()
+        branches = self._replay_scan_branches(queries)
+        if not branches:
+            return
+        self._scans += 1
+        scanner = DuckDBArrowScanner(self._store.duckdb_connections)
+        with self._close_lock:
+            if self._closed:
+                msg = "StoreRead is closed"
+                raise RuntimeError(msg)
+            self._active_scanner = scanner
+        try:
+            for physical in scanner.iter_replay_batches(
+                branches, batch_size=batch_size
+            ):
+                self._yielded = True
+                yield physical.select(BAR_SCHEMA.names).cast(BAR_SCHEMA)
+        finally:
+            scanner.close()
+            with self._close_lock:
+                if self._active_scanner is scanner:
+                    self._active_scanner = None
 
     def read_bars(
         self,

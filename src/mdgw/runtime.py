@@ -303,6 +303,8 @@ class GatewayRuntime:
                 max_sessions=self.config.replay.max_sessions,
                 heartbeat_s=self.config.replay.heartbeat_s,
                 instrument_store=self.instrument_store,
+                batch_size=self.config.replay.batch_size,
+                prefetch_batches=self.config.replay.prefetch_batches,
             )
         return self._replay_service
 

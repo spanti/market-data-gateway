@@ -423,7 +423,7 @@ class AggregationConfig(_ConfigModel):
 
 
 class ReplayConfig(_ConfigModel):
-    """Replay Service Role endpoints and concurrency limits (DESIGN §6)."""
+    """Replay Service Role endpoints, concurrency and streaming limits."""
 
     control_bind_host: str = "127.0.0.1"
     control_port: int = Field(default=0, ge=0, le=65535)
@@ -431,6 +431,11 @@ class ReplayConfig(_ConfigModel):
     publish_port: int = Field(default=0, ge=0, le=65535)
     max_sessions: int = Field(default=4, ge=1)
     heartbeat_s: float = Field(default=1.0, gt=0)
+    # asap Replay reads the ordered DuckDB query through its Arrow batch
+    # reader. Both values are explicit memory bounds, not an engine switch:
+    # in-flight Bars are roughly `batch_size * (prefetch_batches + 2)`.
+    batch_size: int = Field(default=4_096, ge=1)
+    prefetch_batches: int = Field(default=2, ge=1)
 
 
 class GatewayConfig(_ConfigModel):

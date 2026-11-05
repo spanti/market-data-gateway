@@ -57,6 +57,49 @@ class _LegacySource(ReplayBarSource):
             end_ts_ns=end_ts_ns,
         )
 
+    def iter_bars(  # type: ignore[override] - feeds the streaming worker
+        self,
+        subscriptions,
+        *,
+        start_ts_ns: int,
+        end_ts_ns: int,
+        read,
+        batch_size: int,
+    ):
+        bars = self.read(
+            subscriptions,
+            start_ts_ns=start_ts_ns,
+            end_ts_ns=end_ts_ns,
+        )
+        for index in range(0, len(bars), batch_size):
+            yield bars[index : index + batch_size]
+
+
+class _MaterializedDuckDBSource(ReplayBarSource):
+    """Test-only: the ticket-12 materialized DuckDB read, fed in batches.
+
+    This is the direct equivalence target for the streaming asap path: the
+    query and Snapshot are identical, only the consumption differs.
+    """
+
+    def iter_bars(  # type: ignore[override] - feeds the streaming worker
+        self,
+        subscriptions,
+        *,
+        start_ts_ns: int,
+        end_ts_ns: int,
+        read,
+        batch_size: int,
+    ):
+        bars = super().read(
+            subscriptions,
+            start_ts_ns=start_ts_ns,
+            end_ts_ns=end_ts_ns,
+            read=read,
+        )
+        for index in range(0, len(bars), batch_size):
+            yield bars[index : index + batch_size]
+
 
 @dataclass
 class _Recorded:
@@ -88,11 +131,18 @@ def _run_session(
     store: ParquetBarStore,
     spec: ReplaySessionSpec,
     *,
-    legacy: bool,
+    legacy: bool = False,
+    materialized: bool = False,
     controls: Callable[[ReplaySession], None] | None = None,
+    batch_size: int = 3,
 ) -> _Recorded:
     recorder = _Recorder()
-    source = _LegacySource(store) if legacy else ReplayBarSource(store)
+    if legacy:
+        source = _LegacySource(store)
+    elif materialized:
+        source = _MaterializedDuckDBSource(store)
+    else:
+        source = ReplayBarSource(store)
     session = ReplaySession(
         "differential",
         spec,
@@ -101,6 +151,8 @@ def _run_session(
         recorder.publish_event,
         source=source,
         heartbeat_s=0.05,
+        batch_size=batch_size,
+        prefetch_batches=2,
     )
     try:
         session.start()
@@ -214,6 +266,24 @@ def _assert_same_sequence(
     end = [event for event in new.events if event["op"] == "end_of_session"]
     assert len(end) == 1
     assert end[0]["bars_sent"] == len(new.bars) == new.bars_sent
+
+
+@pytest.mark.parametrize("batch_size", [1, 2, 100])
+def test_asap_streaming_matches_the_materialized_duckdb_sequence(
+    tmp_path: Path, batch_size: int
+) -> None:
+    """The same query, streamed vs fully consumed before publishing."""
+    dataset = _rich_dataset(tmp_path / f"stream-{batch_size}")
+    spec = _spec(_SUBSCRIPTIONS)
+
+    streamed = _run_session(
+        dataset.store, spec, materialized=False, batch_size=batch_size
+    )
+    materialized = _run_session(
+        dataset.store, spec, materialized=True, batch_size=batch_size
+    )
+
+    _assert_same_sequence(streamed, materialized)
 
 
 @pytest.mark.parametrize("mode", ["asap", "realtime", "step"])

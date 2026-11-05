@@ -27,7 +27,7 @@ from mdgw.core.time import datetime_to_ns
 from mdgw.store.parquet_dataset import ReplayReadQuery
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids an import cycle
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
     from mdgw.replay.session import BarSubscription
     from mdgw.store.parquet_dataset import ParquetBarStore, StoreRead
@@ -136,6 +136,30 @@ class ReplayBarSource:
             start_ts_ns=start_ts_ns,
             end_ts_ns=end_ts_ns,
         )
+
+    def iter_bars(  # ruff: ignore[no-self-use] - overridden by migration sources
+        self,
+        subscriptions: Sequence[BarSubscription],
+        *,
+        start_ts_ns: int,
+        end_ts_ns: int,
+        read: StoreRead,
+        batch_size: int,
+    ) -> Iterator[list[Bar]]:
+        """Yield the same ordered Bars batch by batch from the fixed Snapshot.
+
+        This is the bounded M5B read: each DuckDB Arrow RecordBatch is converted
+        to `Bar` values and handed to the caller immediately. The query (close
+        window, Revision choice, duplicate-subscription resolution and five-key
+        order) is identical to `read()`; only the materialization is removed.
+        """
+        queries = replay_read_queries(
+            subscriptions,
+            start_ts_ns=start_ts_ns,
+            end_ts_ns=end_ts_ns,
+        )
+        for batch in read.iter_replay_batches(queries, batch_size=batch_size):
+            yield [Bar(**row) for row in batch.to_pylist()]
 
     def _read_legacy(
         self,

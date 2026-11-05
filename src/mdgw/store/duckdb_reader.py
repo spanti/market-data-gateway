@@ -319,6 +319,40 @@ class DuckDBArrowScanner:
         finally:
             self.close()
 
+    def iter_replay_batches(
+        self,
+        branches: Sequence[ReplayScanBranch],
+        *,
+        batch_size: int,
+    ) -> Iterator[pa.RecordBatch]:
+        """Yield the five-key ordered Replay batches as DuckDB produces them.
+
+        This is the streaming M5B seam: the query still does the close-time
+        filter, Revision choice, duplicate-subscription resolution and total
+        order, but each Arrow RecordBatch is handed to the caller immediately
+        instead of being accumulated. The Reader and connection are closed on
+        exhaustion, exception and cancellation; `close()` from another thread
+        interrupts the blocking `read_next_batch()` call.
+        """
+        try:  # ruff: ignore[too-many-statements-in-try-clause] - explicit resource scope
+            self._connect()
+            sql, params = _build_replay_sql(branches)
+            reader = self._open_sql_reader(sql, params, batch_size=batch_size)
+            try:
+                while True:
+                    batch = self._next_batch(reader)
+                    if batch is _END_OF_STREAM:
+                        break
+                    yield batch
+            finally:
+                self._close_reader()
+            self._exhausted = True
+        except BaseException:
+            self._failed = True
+            raise
+        finally:
+            self.close()
+
     def count(self, files: Sequence[str], query: BarReadQuery) -> int:
         """Exact raw-row count for the selected Data Files of one Snapshot.
 
