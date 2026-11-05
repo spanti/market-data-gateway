@@ -17,8 +17,8 @@ re-raised by the consumer; it is never translated into end-of-stream.
 Cancelled iteration likewise never reports exhaustion, so the Session can
 distinguish `stopped` from `exhausted`.
 
-The abstraction is generic over the item type; tickets 14/15 reuse it for the
-realtime and step push loops.
+The abstraction is generic over the item type; the asap, realtime and step
+push loops all use it.
 """
 
 from __future__ import annotations

@@ -7,9 +7,10 @@ one Bar Interval: `start_ts` is inclusive and `end_ts` is exclusive.
 M5A queries the Session's fixed Manifest Snapshot through DuckDB. One query
 does the close-time filter, the highest-Revision choice (latest `ingest_ts` on
 a tie), duplicate-subscription resolution and the five-key total order.
-`iter_bars()` exposes that same query as a bounded batch stream; asap and
-realtime consume it (realtime per query generation), while `read()` keeps the
-full `list[Bar]` materialization for step until ticket 15.
+`iter_bars()` exposes that same query as a bounded batch stream, consumed by
+all three Replay Modes (realtime and step once per query generation).
+`read()` keeps a full `list[Bar]` materialization only for migration
+differential tests and benchmarks.
 
 The pre-DuckDB PyArrow read is kept as a private, test-only path
 (`read(..., read=None)`) for migration differential tests and benchmarks.

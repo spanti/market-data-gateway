@@ -236,7 +236,7 @@ class _GatedRead:
     def iter_replay_batches(
         self, queries, *, batch_size=None, cancellation=None
     ):
-        # asap and realtime consume this seam; it must block before DuckDB
+        # Every Replay Mode consumes this seam; it must block before DuckDB
         # starts.
         self._wait()
         yield from self._inner.iter_replay_batches(
@@ -244,7 +244,7 @@ class _GatedRead:
         )
 
     def read_replay_bars(self, queries):
-        # step still materializes through this seam (ticket 15).
+        # Migration differential/benchmark seam; no Replay Mode uses it.
         self._wait()
         return self._inner.read_replay_bars(queries)
 
