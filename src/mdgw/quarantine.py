@@ -233,17 +233,11 @@ class QuarantineStore:
         self._validate(items)
 
         write_ts = utc_now()
-        table = self._build_table(items, write_ts)
-        groups: dict[tuple[int, int], list[int]] = {}
-        for index, record in enumerate(items):
-            recorded = to_utc(
-                write_ts if record.recorded_ts is None else record.recorded_ts
-            )
-            groups.setdefault((recorded.year, recorded.month), []).append(index)
-
         created_paths: list[Path] = []
         entries: list[dict[str, Any]] = []
         try:
+            table = self._build_table(items, write_ts)
+            groups = self._group_indices(items, write_ts)
             created_paths, entries = self._write_data_files(table, groups)
             self._append_manifest(entries)
         except Exception as exc:
@@ -269,6 +263,18 @@ class QuarantineStore:
                 key = (record.source_stage, record.reason_code)
                 self._by_stage_reason[key] = self._by_stage_reason.get(key, 0) + 1
         return entries
+
+    @staticmethod
+    def _group_indices(
+        items: Sequence[QuarantineRecord], write_ts: datetime
+    ) -> dict[tuple[int, int], list[int]]:
+        groups: dict[tuple[int, int], list[int]] = {}
+        for index, record in enumerate(items):
+            recorded = to_utc(
+                write_ts if record.recorded_ts is None else record.recorded_ts
+            )
+            groups.setdefault((recorded.year, recorded.month), []).append(index)
+        return groups
 
     def _write_data_files(
         self,
