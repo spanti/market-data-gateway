@@ -695,6 +695,9 @@ def _build_store(
         format_version=config.storage.format_version,
         schema_version=config.storage.schema_version,
         duckdb=config.storage.duckdb.to_options(),
+        # New Manifest entries carry the configured audit Rule Version so the
+        # operator CLI and the archive importer share one lineage identity.
+        rule_versions=[config.storage.quarantine.rule_version],
     )
 
 
@@ -870,6 +873,9 @@ def _run_archive_backfill(  # ruff: ignore[too-many-arguments, too-many-statemen
             granularity=granularity,
             retention_bars_days=retention_bars_days,
             quarantine=quarantine,
+            # The configured audit Rule Version reaches both Quarantine
+            # records and the Manifest entries written by this Store.
+            rule_version=config.storage.quarantine.rule_version,
         )
     finally:
         hwm.close()

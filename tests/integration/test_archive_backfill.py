@@ -39,7 +39,9 @@ from mdgw.quarantine import (
     SOURCE_STAGE_ARCHIVE_FILE,
     QuarantineStore,
 )
+from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
 from mdgw.state.high_water_mark import HighWaterMarkStore
+from mdgw.store.manifest import active_manifest_entries
 from mdgw.store.parquet_dataset import ParquetBarStore
 
 UTC = timezone.utc
@@ -203,7 +205,9 @@ def _rows(store: ParquetBarStore, interval: str) -> list[dict]:
     ).to_pylist()
 
 
-def _write_cli_fixture(tmp_path: Path) -> tuple[Path, Path]:
+def _write_cli_fixture(
+    tmp_path: Path, *, rule_version: str | None = None
+) -> tuple[Path, Path]:
     """Write a minimal config + Instrument Reference Data for CLI tests."""
     data_root = tmp_path / "data"
     instruments_dir = tmp_path / "instruments"
@@ -228,21 +232,25 @@ def _write_cli_fixture(tmp_path: Path) -> tuple[Path, Path]:
         + "\n",
         encoding="utf-8",
     )
-    config_path = tmp_path / "gateway.toml"
-    config_path.write_text(
-        "\n".join(
+    config_lines = [
+        "[storage]",
+        f'root = "{data_root.as_posix()}"',
+        "[retention]",
+        "enabled = false",
+        "bars_days = 0",
+        "[instruments]",
+        f'path = "{instruments_dir.as_posix()}"',
+    ]
+    if rule_version is not None:
+        config_lines.extend(
             [
-                "[storage]",
-                f'root = "{data_root.as_posix()}"',
-                "[retention]",
-                "enabled = false",
-                "bars_days = 0",
-                "[instruments]",
-                f'path = "{instruments_dir.as_posix()}"',
+                "[storage.quarantine]",
+                f'rule_version = "{rule_version}"',
             ]
         )
-        + "\n",
-        encoding="utf-8",
+    config_path = tmp_path / "gateway.toml"
+    config_path.write_text(
+        "\n".join(config_lines) + "\n", encoding="utf-8"
     )
     return config_path, data_root
 
@@ -1132,3 +1140,74 @@ def test_cli_archive_backfill_quarantines_a_corrupt_file(
     (record,) = quarantine.read_records().to_pylist()
     assert record["source_stage"] == SOURCE_STAGE_ARCHIVE_FILE
     assert record["reason_code"] == REASON_ARCHIVE_CHECKSUM_MISMATCH
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (None, NORMALIZATION_RULE_VERSION),
+        ("custom-2", "custom-2"),
+    ],
+)
+def test_cli_archive_backfill_uses_the_configured_rule_version(
+    tmp_path: Path, capsys, configured: str | None, expected: str
+) -> None:
+    """Archive Manifest and Quarantine lineage must honor the config value.
+
+    The CLI Store and the archive importer must share the same audit rule
+    identity. A non-default ``[storage.quarantine].rule_version`` has to reach
+    both the Bars Manifest entry and the Quarantine record; the default case
+    proves the previous behaviour is unchanged.
+    """
+    config_path, data_root = _write_cli_fixture(
+        tmp_path, rule_version=configured
+    )
+    archive_dir = tmp_path / "archive"
+    good_day = date(2024, 1, 1)
+    _write_archive(
+        archive_dir,
+        ArchivePeriod("daily", good_day, good_day),
+        times=[
+            datetime(2024, 1, 1, 12, minute, tzinfo=UTC)
+            for minute in range(2)
+        ],
+    )
+    bad_day = date(2024, 1, 2)
+    _write_archive(
+        archive_dir,
+        ArchivePeriod("daily", bad_day, bad_day),
+        times=[datetime(2024, 1, 2, 12, 0, tzinfo=UTC)],
+        corrupt_checksum=True,
+    )
+
+    result = main(
+        [
+            "backfill",
+            "--archive",
+            "--config",
+            str(config_path),
+            "--instrument",
+            INSTRUMENT,
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-02",
+            "--archive-dir",
+            str(archive_dir),
+        ]
+    )
+
+    # The corrupt file is quarantined and reported as a failure.
+    assert result == 1
+    assert "failures=1" in capsys.readouterr().out
+
+    store = ParquetBarStore(data_root)
+    entries = active_manifest_entries(store.dataset_root)
+    assert entries
+    assert {tuple(entry["rule_versions"]) for entry in entries} == {
+        (expected,)
+    }
+
+    quarantine = QuarantineStore(data_root / "quarantine")
+    (record,) = quarantine.read_records().to_pylist()
+    assert record["rule_version"] == expected
