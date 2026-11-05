@@ -162,9 +162,17 @@ class _RecordingRead:
         self.calls.append("count")
         return self._inner.count(*args, **kwargs)
 
+    def count_arrow(self, *args, **kwargs):
+        self.calls.append("count_arrow")
+        return self._inner.count_arrow(*args, **kwargs)
+
     def read_bars(self, *args, **kwargs):
         self.calls.append("read_bars")
         return self._inner.read_bars(*args, **kwargs)
+
+    def read_arrow_bars(self, *args, **kwargs):
+        self.calls.append("read_arrow_bars")
+        return self._inner.read_arrow_bars(*args, **kwargs)
 
     def iter_batches(self, *args, **kwargs):
         self.calls.append("iter_batches")
@@ -193,13 +201,12 @@ class _RecordingStore(ParquetBarStore):
         return read
 
 
-def test_history_streams_and_export_choose_the_duckdb_scan(
-    tmp_path: Path,
-) -> None:
-    """Ticket 08 moves CSV and export onto the same DuckDB seam as Arrow.
+def test_each_format_chooses_the_documented_store_scan(tmp_path: Path) -> None:
+    """Freeze the per-call-site migration boundary (tickets 05, 06 and 08).
 
-    JSON keeps the existing Store read/count so its ceiling, pagination and
-    Time Cursor semantics are untouched by this ticket.
+    Arrow, CSV and export stream through the DuckDB Relation reader;
+    non-paginated JSON counts and reads through DuckDB; paginated JSON counts
+    through DuckDB but keeps the ordered PyArrow page reader.
     """
     store = _RecordingStore(tmp_path)
     _write(store, [_bar(0)])
@@ -209,6 +216,17 @@ def test_history_streams_and_export_choose_the_duckdb_scan(
 
         _get(_url(server.base_url, BARS, interval="1m"))
         json_call = list(store.reads[-1].calls)
+
+        _get(
+            _url(
+                server.base_url,
+                BARS,
+                interval="1m",
+                instrument=INSTRUMENT,
+                limit=5,
+            )
+        )
+        paginated_json_call = list(store.reads[-1].calls)
 
         _get(_url(server.base_url, BARS, interval="1m", format="csv"))
         csv_call = list(store.reads[-1].calls)
@@ -220,12 +238,11 @@ def test_history_streams_and_export_choose_the_duckdb_scan(
         arrow_export_call = list(store.reads[-1].calls)
 
     assert arrow_call == ["iter_arrow_batches"]
+    assert json_call == ["count_arrow", "read_arrow_bars"]
+    assert paginated_json_call == ["count_arrow", "iter_batches"]
     assert csv_call == ["iter_arrow_batches"]
     assert export_call == ["iter_arrow_batches"]
     assert arrow_export_call == ["iter_arrow_batches"]
-    assert "iter_batches" not in arrow_call + csv_call + export_call
-    assert "count" in json_call
-    assert "iter_arrow_batches" not in json_call
 
 
 # -- content and schema parity ---------------------------------------------

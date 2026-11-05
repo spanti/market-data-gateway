@@ -82,9 +82,22 @@ class _RecordingRead:
             hook()
         return value
 
+    def count_arrow(self, *args, **kwargs):
+        value = self._inner.count_arrow(*args, **kwargs)
+        self._record("count_arrow")
+        hook = self._owner.after_count
+        if hook is not None:
+            self._owner.after_count = None
+            hook()
+        return value
+
     def read_bars(self, *args, **kwargs):
         self._record("read_bars")
         return self._inner.read_bars(*args, **kwargs)
+
+    def read_arrow_bars(self, *args, **kwargs):
+        self._record("read_arrow_bars")
+        return self._inner.read_arrow_bars(*args, **kwargs)
 
     def iter_batches(self, *args, **kwargs):
         self._record("iter_batches")
@@ -212,7 +225,7 @@ def test_json_request_uses_one_snapshot_and_one_lease(tmp_path: Path) -> None:
     assert status == 200
     assert [event for event, _ in store.events] == [
         "open",
-        "count",
+        "count_arrow",
         "iter_batches",
         "close",
     ]
@@ -230,6 +243,36 @@ def test_json_request_uses_one_snapshot_and_one_lease(tmp_path: Path) -> None:
     assert active_session_locks(store.dataset_root) == []
 
 
+def test_non_paginated_json_counts_and_reads_on_one_snapshot(
+    tmp_path: Path,
+) -> None:
+    store = _store_with_rows(tmp_path)
+    app = create_app(store)
+
+    def append_a_row() -> None:
+        # Runs inside the request, after the DuckDB count and before the read.
+        store.write_bars([_bar(1)], asset_class="crypto")
+
+    store.after_count = append_a_row
+
+    status, body = _request(app, f"{BARS}?interval=1m")
+
+    assert status == 200
+    assert [event for event, _ in store.events] == [
+        "open",
+        "count_arrow",
+        "read_arrow_bars",
+        "close",
+    ]
+    assert len({generation for _, generation in store.events}) == 1
+    payload = json.loads(body)
+    assert set(payload) == {"bars"}
+    # The row appended after the count must not leak into the same response.
+    assert len(payload["bars"]) == 1
+    assert store.count_bars(interval="1m") == 2
+    assert active_session_locks(store.dataset_root) == []
+
+
 def test_json_count_and_read_cannot_see_a_write_between_them(
     tmp_path: Path,
 ) -> None:
@@ -237,7 +280,7 @@ def test_json_count_and_read_cannot_see_a_write_between_them(
     app = create_app(store)
 
     def append_a_row() -> None:
-        # Runs inside the request, after `count()` and before the read.
+        # Runs inside the request, after the count and before the read.
         store.write_bars([_bar(1)], asset_class="crypto")
 
     store.after_count = append_a_row

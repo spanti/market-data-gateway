@@ -273,14 +273,19 @@ def test_json_bars_envelope_decimals_and_nanosecond_timestamps(
     assert set(payload) == {"bars"}
     messages = payload["bars"]
     assert len(messages) == 2
-    for index, message in enumerate(messages):
-        _assert_message_envelope(message, minute=index)
+    # Non-paginated JSON has no ordering contract: validate each message from
+    # its own open_ts instead of relying on physical scan order.
+    for message in messages:
+        minute_index = int(message["payload"]["open_ts"][14:16])
+        _assert_message_envelope(message, minute=minute_index)
 
     # Decimal values stay exact decimal strings, never JSON numbers/floats.
-    assert messages[0]["payload"]["open"] == precise
-    assert messages[0]["payload"]["high"] == "65010.0"
-    assert messages[0]["payload"]["volume"] == "12.34"
-    assert messages[1]["payload"]["open"] == "65000.1"
+    by_open = {message["payload"]["open"]: message for message in messages}
+    assert by_open[precise]["payload"]["high"] == "65010.0"
+    assert by_open[precise]["payload"]["volume"] == "12.34"
+    assert by_open["65000.1"]["payload"]["open_ts"].endswith(
+        "T00:01:00.000000000Z"
+    )
 
 
 # -- Arrow ------------------------------------------------------------------
@@ -312,11 +317,18 @@ def test_arrow_stream_is_table_semantically_equal_to_json(
     table = pa.ipc.open_stream(pa.BufferReader(body)).read_all()
     assert table.schema == BAR_SCHEMA
     assert table.num_rows == 2
-    assert table.column("open").to_pylist() == [
-        Decimal(precise),
-        Decimal("65000.1"),
-    ]
-    assert table_to_messages(table) == json.loads(json_body)["bars"]
+    assert sorted(table.column("open").to_pylist()) == sorted(
+        [Decimal(precise), Decimal("65000.1")]
+    )
+    # Non-paginated responses have no ordering contract; compare exact message
+    # content and multiplicity, not physical scan order.
+    assert sorted(
+        json.dumps(message, sort_keys=True)
+        for message in table_to_messages(table)
+    ) == sorted(
+        json.dumps(message, sort_keys=True)
+        for message in json.loads(json_body)["bars"]
+    )
 
 
 # -- CSV --------------------------------------------------------------------
@@ -555,8 +567,9 @@ def test_websocket_subscribe_event_ping_and_unsubscribe(tmp_path: Path) -> None:
     assert event["op"] == "event"
     assert event["topic"] == TOPIC
     _assert_message_envelope(event["data"])
-    # The WS Message Envelope is exactly the REST JSON form.
-    assert event["data"] == json.loads(rest_body)["bars"][0]
+    # The WS Message Envelope is exactly the REST JSON form. REST has no
+    # ordering contract, so the event must occur exactly once in the response.
+    assert json.loads(rest_body)["bars"].count(event["data"]) == 1
 
 
 def test_websocket_slow_consumer_gets_lag_notice_without_disconnect(

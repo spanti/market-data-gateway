@@ -259,13 +259,18 @@ def test_json_bars_envelope_decimals_and_nanosecond_timestamps(
     assert set(payload) == {"bars"}
     messages = payload["bars"]
     assert len(messages) == 2
-    for index, message in enumerate(messages):
-        _assert_message_envelope(message, minute=index)
+    # Non-paginated JSON has no ordering contract: validate each message from
+    # its own open_ts instead of relying on physical scan order.
+    for message in messages:
+        minute_index = int(message["payload"]["open_ts"][14:16])
+        _assert_message_envelope(message, minute=minute_index)
 
-    assert messages[0]["payload"]["open"] == precise
-    assert messages[0]["payload"]["high"] == "65010.0"
-    assert messages[0]["payload"]["volume"] == "12.34"
-    assert messages[1]["payload"]["open"] == "65000.1"
+    by_open = {message["payload"]["open"]: message for message in messages}
+    assert by_open[precise]["payload"]["high"] == "65010.0"
+    assert by_open[precise]["payload"]["volume"] == "12.34"
+    assert by_open["65000.1"]["payload"]["open_ts"].endswith(
+        "T00:01:00.000000000Z"
+    )
 
 
 def test_json_limit_caps_rows_and_empty_result_is_an_empty_array(
