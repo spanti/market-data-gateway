@@ -174,6 +174,10 @@ class _RecordingRead:
         self.calls.append("read_arrow_bars")
         return self._inner.read_arrow_bars(*args, **kwargs)
 
+    def read_earliest_arrow_bars(self, *args, **kwargs):
+        self.calls.append("read_earliest_arrow_bars")
+        return self._inner.read_earliest_arrow_bars(*args, **kwargs)
+
     def iter_batches(self, *args, **kwargs):
         self.calls.append("iter_batches")
         yield from self._inner.iter_batches(*args, **kwargs)
@@ -202,11 +206,12 @@ class _RecordingStore(ParquetBarStore):
 
 
 def test_each_format_chooses_the_documented_store_scan(tmp_path: Path) -> None:
-    """Freeze the per-call-site migration boundary (tickets 05, 06 and 08).
+    """Freeze the per-call-site migration boundary (tickets 05, 06, 07, 08).
 
     Arrow, CSV and export stream through the DuckDB Relation reader;
     non-paginated JSON counts and reads through DuckDB; paginated JSON counts
-    through DuckDB but keeps the ordered PyArrow page reader.
+    and reads through DuckDB, with the page read using the globally ordered
+    `read_earliest_arrow_bars`.
     """
     store = _RecordingStore(tmp_path)
     _write(store, [_bar(0)])
@@ -239,10 +244,18 @@ def test_each_format_chooses_the_documented_store_scan(tmp_path: Path) -> None:
 
     assert arrow_call == ["iter_arrow_batches"]
     assert json_call == ["count_arrow", "read_arrow_bars"]
-    assert paginated_json_call == ["count_arrow", "iter_batches"]
+    assert paginated_json_call == ["count_arrow", "read_earliest_arrow_bars"]
     assert csv_call == ["iter_arrow_batches"]
     assert export_call == ["iter_arrow_batches"]
     assert arrow_export_call == ["iter_arrow_batches"]
+    assert all(
+        "iter_arrow_batches" not in call
+        for call in (json_call, paginated_json_call)
+    )
+    assert all(
+        "read_earliest_arrow_bars" not in call
+        for call in (arrow_call, json_call, csv_call, export_call, arrow_export_call)
+    )
 
 
 # -- content and schema parity ---------------------------------------------

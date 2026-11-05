@@ -767,6 +767,58 @@ class StoreRead:
             return empty_logical_table()
         return pa.Table.from_batches(batches, schema=BAR_SCHEMA)
 
+    def read_earliest_arrow_bars(self, *, keep: int) -> pa.Table:
+        """Materialize the globally earliest ``keep`` raw Bar rows.
+
+        This is the single-Instrument paginated JSON page read. One DuckDB
+        query orders the whole request Snapshot selection by `open_ts`
+        ascending and stops after ``keep`` rows, so there is no Python
+        per-batch concat/sort loop. Equal `open_ts` rows keep the previously
+        observable stable order (Manifest file order, then physical row
+        order); raw Revisions are never deduplicated.
+
+        The request always filters one Bar Interval (the REST `interval`
+        parameter). A read without an Interval filter would need per-row
+        partition restoration, so it is rejected rather than guessing.
+        """
+        if keep < 1:
+            msg = "keep must be a positive row count"
+            raise ValueError(msg)
+        self._ensure_open()
+        query = self._resolve_query(_UNSET, _UNSET, _UNSET, _UNSET)
+        self._scans += 1
+        groups = self._arrow_scan_groups(query)
+        if not groups:
+            return empty_logical_table()
+        if len(groups) != 1:
+            msg = "earliest Bar reads require a single Bar Interval"
+            raise RuntimeError(msg)
+        interval, files = groups[0]
+        scanner = DuckDBArrowScanner(self._store.duckdb_connections)
+        with self._close_lock:
+            if self._closed:
+                msg = "StoreRead is closed"
+                raise RuntimeError(msg)
+            self._active_scanner = scanner
+        try:
+            batches = list(
+                scanner.earliest_batches(
+                    files,
+                    interval,
+                    query,
+                    batch_size=self._store.duckdb.arrow_batch_size,
+                    keep=keep,
+                )
+            )
+        finally:
+            scanner.close()
+            with self._close_lock:
+                if self._active_scanner is scanner:
+                    self._active_scanner = None
+        if not batches:
+            return empty_logical_table()
+        return pa.Table.from_batches(batches, schema=BAR_SCHEMA)
+
     def close(self) -> None:
         """Release the lease and any DuckDB scan. Safe from any thread."""
         with self._close_lock:
