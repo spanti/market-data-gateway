@@ -12,8 +12,9 @@ import threading
 import time
 from collections import defaultdict
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Self
 from uuid import uuid4
 
 import pyarrow as pa
@@ -40,14 +41,16 @@ from mdgw.store.maintenance import (
 from mdgw.store.manifest import (
     DATASET_DESCRIPTOR_NAME,
     DATASET_NAME,
+    PARTITION_FIELDS,
     active_manifest_entries,
     instrument_id_for_partition,
+    manifest_generation,
     read_dataset_descriptor,
     read_manifest,
     write_dataset_descriptor,
     write_manifest,
 )
-from mdgw.store.session_locks import DEFAULT_LOCK_TIMEOUT_S
+from mdgw.store.session_locks import DEFAULT_LOCK_TIMEOUT_S, DatasetReadLease
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Sequence
@@ -60,6 +63,12 @@ DEFAULT_BATCH_SIZE = 65_536
 # One Manifest refresh is enough for the Compaction/GC race: the switching
 # process has already written the new Manifest before it unlinks the old files.
 MANIFEST_REFRESH_ATTEMPTS = 2
+# A candidate selection, lease acquisition and generation re-read may race
+# with a writer. Retry a bounded number of times; never mix generations.
+READ_LEASE_ATTEMPTS = 3
+# StoreRead filters are optional; this sentinel distinguishes "not passed"
+# from an explicit `None` (= no filter on that dimension).
+_UNSET = object()
 # `interval` is a Hive partition column, not a physical column in Data Files.
 PHYSICAL_READ_COLUMNS: tuple[str, ...] = tuple(
     name for name in BAR_SCHEMA.names if name != "interval"
@@ -78,6 +87,7 @@ class ParquetBarStore:
         format_version: str = "2.6",
         schema_version: int = DATASET_SCHEMA_VERSION,
         session_lock_timeout_s: int = DEFAULT_LOCK_TIMEOUT_S,
+        read_lease_heartbeat_s: float | None = None,
     ) -> None:
         self.root = Path(root)
         self.dataset_root = self.root / DATASET_NAME
@@ -86,6 +96,16 @@ class ParquetBarStore:
         self.format_version = format_version
         self.schema_version = schema_version
         self.session_lock_timeout_s = session_lock_timeout_s
+        # A lease must be refreshed well before maintenance treats it as
+        # expired. Keep the default in seconds, not tied to the exact timeout.
+        if read_lease_heartbeat_s is None:
+            read_lease_heartbeat_s = min(
+                5.0, max(0.05, float(session_lock_timeout_s) / 3.0)
+            )
+        if read_lease_heartbeat_s <= 0:
+            msg = "read_lease_heartbeat_s must be positive"
+            raise ValueError(msg)
+        self.read_lease_heartbeat_s = float(read_lease_heartbeat_s)
         self._lock = threading.Lock()
 
     # -- writes ------------------------------------------------------------
@@ -203,6 +223,73 @@ class ParquetBarStore:
 
     # -- reads -------------------------------------------------------------
 
+    def open_read(  # ruff: ignore[too-many-arguments] - keyword-only query scope
+        self,
+        *,
+        instrument_id: str | None = None,
+        interval: str | None = None,
+        start_ns: int | None = None,
+        end_ns: int | None = None,
+        queries: Sequence[BarReadQuery] | None = None,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        lease_id: str | None = None,
+        subscriptions: Sequence[dict[str, str]] | None = None,
+        lease_heartbeat_s: float | None = None,
+    ) -> StoreRead:
+        """Open one fixed Manifest Snapshot protected by a Dataset Read Lease.
+
+        Candidate entries are selected by Instrument, Interval, partition and
+        file time range before any Data File is opened. The lease covers only
+        the selected partitions and months. Afterwards the Manifest generation
+        is re-read: if a writer switched it, the lease is released and the
+        selection is retried, so one read never mixes Manifest generations.
+
+        `queries` lets a Replay Session acquire one lease for the union of its
+        subscriptions while issuing per-subscription scans on the same
+        Snapshot.
+        """
+        if queries is None:
+            query_specs: tuple[BarReadQuery, ...] = (
+                BarReadQuery(
+                    instrument_id=instrument_id,
+                    interval=interval,
+                    start_ns=start_ns,
+                    end_ns=end_ns,
+                ),
+            )
+        else:
+            if any(
+                value is not None
+                for value in (instrument_id, interval, start_ns, end_ns)
+            ):
+                msg = "pass either query filters or structured queries, not both"
+                raise ValueError(msg)
+            query_specs = tuple(queries)
+        self.validate_schema_version()
+        heartbeat_s = (
+            self.read_lease_heartbeat_s
+            if lease_heartbeat_s is None
+            else float(lease_heartbeat_s)
+        )
+        snapshot, lease = self._acquire_snapshot(
+            query_specs,
+            lease_id=lease_id,
+            subscriptions=subscriptions,
+            heartbeat_s=heartbeat_s,
+        )
+        default_query = query_specs[0] if len(query_specs) == 1 else None
+        return StoreRead(
+            self,
+            snapshot,
+            lease,
+            default_query=default_query,
+            acquisition_queries=query_specs,
+            lease_id=lease_id,
+            subscriptions=subscriptions,
+            heartbeat_s=heartbeat_s,
+            batch_size=batch_size,
+        )
+
     def iter_batches(  # ruff: ignore[too-many-arguments] - keyword-only query filters
         self,
         *,
@@ -213,58 +300,21 @@ class ParquetBarStore:
         limit: int | None = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
     ):
-        """Yield Bar RecordBatches from active Data Files only.
+        """Yield Bar RecordBatches from one fixed Manifest Snapshot.
 
         `start_ns` is inclusive and `end_ns` is exclusive, both applied to
-        `open_ts`. `limit` caps the total number of rows yielded.
-
-        Compaction/GC switch the Manifest before deleting the old Data Files.
-        A reader can therefore have selected paths from the previous Manifest
-        when the files disappear. Every file is opened before the first batch
-        is yielded; if an open reports a missing file, the Manifest is re-read
-        once and the query is retried against the new snapshot. Files already
-        opened keep working even if Compaction unlinks them (POSIX) or the
-        unlink is refused while the handle is open (Windows).
+        `open_ts`. `limit` caps the total number of rows yielded. This legacy
+        one-shot form delegates to `open_read`; callers that need several
+        observations (count, existence probe, read) should hold one StoreRead.
         """
-        self.validate_schema_version()
-        opened = self._open_active_files(
+        with self.open_read(
             instrument_id=instrument_id,
             interval=interval,
             start_ns=start_ns,
             end_ns=end_ns,
-        )
-        if not opened:
-            return
-
-        remaining = limit
-        try:
-            for parquet_file, partition_interval in opened:
-                for physical_batch in parquet_file.iter_batches(
-                    columns=list(PHYSICAL_READ_COLUMNS),
-                    batch_size=batch_size,
-                ):
-                    batch = _with_partition_interval(
-                        physical_batch, partition_interval
-                    )
-                    batch = _filter_batch(
-                        batch,
-                        instrument_id=instrument_id,
-                        interval=interval,
-                        start_ns=start_ns,
-                        end_ns=end_ns,
-                    )
-                    if batch.num_rows == 0:
-                        continue
-                    if remaining is not None:
-                        if remaining <= 0:
-                            return
-                        if batch.num_rows > remaining:
-                            batch = batch.slice(0, remaining)
-                        remaining -= batch.num_rows
-                    yield batch
-        finally:
-            for parquet_file, _ in opened:
-                parquet_file.close()
+            batch_size=batch_size,
+        ) as read:
+            yield from read.iter_batches(limit=limit)
 
     def count_bars(
         self,
@@ -275,15 +325,13 @@ class ParquetBarStore:
         end_ns: int | None = None,
     ) -> int:
         """Count matching Bars, used to enforce the JSON row ceiling."""
-        return sum(
-            batch.num_rows
-            for batch in self.iter_batches(
-                instrument_id=instrument_id,
-                interval=interval,
-                start_ns=start_ns,
-                end_ns=end_ns,
-            )
-        )
+        with self.open_read(
+            instrument_id=instrument_id,
+            interval=interval,
+            start_ns=start_ns,
+            end_ns=end_ns,
+        ) as read:
+            return read.count()
 
     def read_bars(
         self,
@@ -294,68 +342,68 @@ class ParquetBarStore:
         end_ns: int | None = None,
         limit: int | None = None,
     ) -> pa.Table:
-        batches = list(
-            self.iter_batches(
-                instrument_id=instrument_id,
-                interval=interval,
-                start_ns=start_ns,
-                end_ns=end_ns,
-                limit=limit,
-            )
-        )
-        if not batches:
-            return empty_logical_table()
-        return pa.Table.from_batches(batches, schema=BAR_SCHEMA)
+        with self.open_read(
+            instrument_id=instrument_id,
+            interval=interval,
+            start_ns=start_ns,
+            end_ns=end_ns,
+        ) as read:
+            return read.read_bars(limit=limit)
 
     def _active_entries(self) -> list[dict]:
         """Active Manifest entries, including ones whose file may be gone.
 
         A missing file is not silently dropped here: the caller opens every
         selected file before yielding and refreshes the Manifest once if a
-        concurrent Compaction/GC already removed it.
+        concurrent Compaction/GC already removed it. Kept as an overridable
+        seam for the maintenance-race tests.
         """
         return active_manifest_entries(
             self.dataset_root, existing_only=False
         )
 
-    def _open_active_files(
+    def _acquire_snapshot(
         self,
+        query_specs: Sequence[BarReadQuery],
         *,
-        instrument_id: str | None,
-        interval: str | None,
-        start_ns: int | None,
-        end_ns: int | None,
-    ) -> list[tuple[pq.ParquetFile, str]]:
-        """Open every selected Data File, refreshing the Manifest once on a race."""
-        for attempt in range(MANIFEST_REFRESH_ATTEMPTS):
+        lease_id: str | None,
+        subscriptions: Sequence[dict[str, str]] | None,
+        heartbeat_s: float,
+    ) -> tuple[ManifestSnapshot, DatasetReadLease | None]:
+        """Select candidates, take a lease and re-verify the Manifest generation."""
+        for attempt in range(READ_LEASE_ATTEMPTS):
+            generation = manifest_generation(self.dataset_root)
             entries = self._active_entries()
-            selected = _select_entries(
-                entries,
-                instrument_id=instrument_id,
-                interval=interval,
-                start_ns=start_ns,
-                end_ns=end_ns,
-            )
-            opened: list[tuple[pq.ParquetFile, str]] = []
-            try:
-                for entry in selected:
-                    path = self.dataset_root / str(entry["path"])
-                    opened.append(
-                        (
-                            pq.ParquetFile(path),
-                            str(entry["partition"].get("interval", "")),
-                        )
-                    )
-            except FileNotFoundError:
-                _close_parquet_files(opened)
-                if attempt + 1 >= MANIFEST_REFRESH_ATTEMPTS:
-                    raise
-                continue
-            except BaseException:
-                _close_parquet_files(opened)
-                raise
-            return opened
-        return []
+            selected = _select_for_queries(entries, query_specs)
+            partitions, months = _lease_scope(selected)
+            lease: DatasetReadLease | None = None
+            if selected or subscriptions:
+                lease = DatasetReadLease.acquire(
+                    self.dataset_root,
+                    lease_id or f"read-{uuid4().hex}",
+                    partitions=partitions,
+                    months=months,
+                    subscriptions=subscriptions,
+                    heartbeat_s=heartbeat_s,
+                )
+            if lease is not None:
+                self._after_lease_acquired(lease)
+            if manifest_generation(self.dataset_root) == generation:
+                snapshot = ManifestSnapshot(
+                    generation=generation,
+                    entries=tuple(selected),
+                    schema_version=self.schema_version,
+                )
+                return snapshot, lease
+            if lease is not None:
+                lease.close()
+            if attempt + 1 >= READ_LEASE_ATTEMPTS:
+                break
+        msg = "Manifest changed repeatedly while acquiring a read lease"
+        raise ManifestSnapshotRaceError(msg)
+
+    def _after_lease_acquired(self, lease: DatasetReadLease) -> None:
+        """Race-test seam: runs after the lease exists, before the re-read."""
 
     # -- observability -----------------------------------------------------
 
@@ -425,6 +473,313 @@ class ParquetBarStore:
             now=now,
             timeout_s=self.session_lock_timeout_s,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class BarReadQuery:
+    """Structured filter for one scan window.
+
+    `start_ns` is inclusive and `end_ns` is exclusive, both on `open_ts`.
+    """
+
+    instrument_id: str | None = None
+    interval: str | None = None
+    start_ns: int | None = None
+    end_ns: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestSnapshot:
+    """One Manifest read: stable generation plus its selected active entries."""
+
+    generation: str
+    entries: tuple[dict[str, Any], ...]
+    schema_version: int | None = None
+
+
+class ManifestSnapshotRaceError(RuntimeError):
+    """The Manifest kept changing while a read snapshot was being acquired."""
+
+
+class StoreRead:
+    """One Manifest Snapshot and one Dataset Read Lease.
+
+    `count()`, `iter_batches()` and `read_bars()` all scan the same Snapshot,
+    so an HTTP request cannot mix generations between its row-ceiling check,
+    its existence probe and its actual read. The lease is held until `close()`
+    (or the context manager exits) on success, exception, cancellation and
+    repeated close.
+    """
+
+    def __init__(  # ruff: ignore[too-many-arguments] - explicit read state
+        self,
+        store: ParquetBarStore,
+        snapshot: ManifestSnapshot,
+        lease: DatasetReadLease | None,
+        *,
+        default_query: BarReadQuery | None,
+        acquisition_queries: Sequence[BarReadQuery],
+        lease_id: str | None,
+        subscriptions: Sequence[dict[str, str]] | None,
+        heartbeat_s: float,
+        batch_size: int,
+    ) -> None:
+        self._store = store
+        self.snapshot = snapshot
+        self.lease = lease
+        self.batch_size = batch_size
+        self._default_query = default_query
+        self._acquisition_queries = tuple(acquisition_queries)
+        self._lease_id = lease_id
+        self._subscriptions = tuple(subscriptions or ())
+        self._heartbeat_s = heartbeat_s
+        self._closed = False
+        self._close_lock = threading.Lock()
+        self._scans = 0
+        self._yielded = False
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def iter_batches(  # ruff: ignore[too-many-arguments] - keyword-only query filters
+        self,
+        *,
+        instrument_id: Any = _UNSET,
+        interval: Any = _UNSET,
+        start_ns: Any = _UNSET,
+        end_ns: Any = _UNSET,
+        limit: int | None = None,
+        batch_size: int | None = None,
+    ):
+        """Yield Bar RecordBatches from this read's fixed Snapshot."""
+        self._ensure_open()
+        query = self._resolve_query(instrument_id, interval, start_ns, end_ns)
+        self._scans += 1
+        effective_batch_size = batch_size or self.batch_size
+        opened = self._open_files(query)
+
+        remaining = limit
+        try:
+            for parquet_file, partition_interval in opened:
+                for physical_batch in parquet_file.iter_batches(
+                    columns=list(PHYSICAL_READ_COLUMNS),
+                    batch_size=effective_batch_size,
+                ):
+                    batch = _with_partition_interval(
+                        physical_batch, partition_interval
+                    )
+                    batch = _filter_batch(
+                        batch,
+                        instrument_id=query.instrument_id,
+                        interval=query.interval,
+                        start_ns=query.start_ns,
+                        end_ns=query.end_ns,
+                    )
+                    if batch.num_rows == 0:
+                        continue
+                    if remaining is not None:
+                        if remaining <= 0:
+                            return
+                        if batch.num_rows > remaining:
+                            batch = batch.slice(0, remaining)
+                        remaining -= batch.num_rows
+                    self._yielded = True
+                    yield batch
+        finally:
+            _close_parquet_files(opened)
+
+    def count(
+        self,
+        *,
+        instrument_id: Any = _UNSET,
+        interval: Any = _UNSET,
+        start_ns: Any = _UNSET,
+        end_ns: Any = _UNSET,
+    ) -> int:
+        """Count matching Bars on this read's fixed Snapshot."""
+        return sum(
+            batch.num_rows
+            for batch in self.iter_batches(
+                instrument_id=instrument_id,
+                interval=interval,
+                start_ns=start_ns,
+                end_ns=end_ns,
+            )
+        )
+
+    def read_bars(
+        self,
+        *,
+        instrument_id: Any = _UNSET,
+        interval: Any = _UNSET,
+        start_ns: Any = _UNSET,
+        end_ns: Any = _UNSET,
+        limit: int | None = None,
+    ) -> pa.Table:
+        batches = list(
+            self.iter_batches(
+                instrument_id=instrument_id,
+                interval=interval,
+                start_ns=start_ns,
+                end_ns=end_ns,
+                limit=limit,
+            )
+        )
+        if not batches:
+            return empty_logical_table()
+        return pa.Table.from_batches(batches, schema=BAR_SCHEMA)
+
+    def close(self) -> None:
+        """Release the lease. Safe to call repeatedly and from any thread."""
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            lease = self.lease
+            self.lease = None
+        if lease is not None:
+            lease.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+    # -- internals ---------------------------------------------------------
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            msg = "StoreRead is closed"
+            raise RuntimeError(msg)
+
+    def _resolve_query(
+        self,
+        instrument_id: Any,
+        interval: Any,
+        start_ns: Any,
+        end_ns: Any,
+    ) -> BarReadQuery:
+        if all(
+            value is _UNSET
+            for value in (instrument_id, interval, start_ns, end_ns)
+        ):
+            return self._default_query or BarReadQuery()
+        return BarReadQuery(
+            instrument_id=None if instrument_id is _UNSET else instrument_id,
+            interval=None if interval is _UNSET else interval,
+            start_ns=None if start_ns is _UNSET else start_ns,
+            end_ns=None if end_ns is _UNSET else end_ns,
+        )
+
+    def _open_files(
+        self, query: BarReadQuery
+    ) -> list[tuple[pq.ParquetFile, str]]:
+        """Open every selected file; refresh once if one disappeared."""
+        for attempt in range(MANIFEST_REFRESH_ATTEMPTS):
+            entries = _select_entries(
+                self.snapshot.entries,
+                instrument_id=query.instrument_id,
+                interval=query.interval,
+                start_ns=query.start_ns,
+                end_ns=query.end_ns,
+            )
+            try:
+                return _open_parquet_files(self._store.dataset_root, entries)
+            except FileNotFoundError:
+                # A concurrent writer ignored the lease (or deleted the file
+                # externally). Only a read that has not produced a row and has
+                # not completed an earlier scan may switch snapshots.
+                if (
+                    self._scans > 1
+                    or self._yielded
+                    or attempt + 1 >= MANIFEST_REFRESH_ATTEMPTS
+                ):
+                    raise
+                self._reacquire()
+        return []
+
+    def _reacquire(self) -> None:
+        lease = self.lease
+        self.lease = None
+        if lease is not None:
+            lease.close()
+        snapshot, new_lease = self._store._acquire_snapshot(
+            self._acquisition_queries,
+            lease_id=self._lease_id,
+            subscriptions=self._subscriptions,
+            heartbeat_s=self._heartbeat_s,
+        )
+        self.snapshot = snapshot
+        self.lease = new_lease
+
+
+def _select_for_queries(
+    entries: Sequence[dict], query_specs: Sequence[BarReadQuery]
+) -> list[dict]:
+    """Union of the Manifest entries selected by every scan window."""
+    selected: list[dict] = []
+    seen: set[str] = set()
+    for query in query_specs:
+        for entry in _select_entries(
+            entries,
+            instrument_id=query.instrument_id,
+            interval=query.interval,
+            start_ns=query.start_ns,
+            end_ns=query.end_ns,
+        ):
+            path = str(entry["path"])
+            if path in seen:
+                continue
+            seen.add(path)
+            selected.append(entry)
+    return selected
+
+
+def _lease_scope(
+    entries: Sequence[dict],
+) -> tuple[tuple[dict[str, str], ...], tuple[str, ...]]:
+    """Exact partitions and months protected by a read lease."""
+    partitions: list[dict[str, str]] = []
+    seen_partitions: set[tuple[str, ...]] = set()
+    months: set[str] = set()
+    for entry in entries:
+        partition = entry.get("partition") or {}
+        key = tuple(str(partition.get(field, "")) for field in PARTITION_FIELDS)
+        if key not in seen_partitions:
+            seen_partitions.add(key)
+            partitions.append(
+                {
+                    field: str(partition[field])
+                    for field in PARTITION_FIELDS
+                    if field in partition
+                }
+            )
+        year = str(partition.get("year", ""))
+        month = str(partition.get("month", ""))
+        if year and month:
+            months.add(f"{year}-{month}")
+    return tuple(partitions), tuple(sorted(months))
+
+
+def _open_parquet_files(
+    dataset_root: Path, entries: Sequence[dict]
+) -> list[tuple[pq.ParquetFile, str]]:
+    opened: list[tuple[pq.ParquetFile, str]] = []
+    try:
+        for entry in entries:
+            path = Path(dataset_root) / str(entry["path"])
+            opened.append(
+                (
+                    pq.ParquetFile(path),
+                    str(entry["partition"].get("interval", "")),
+                )
+            )
+    except BaseException:
+        _close_parquet_files(opened)
+        raise
+    return opened
 
 
 def _select_entries(

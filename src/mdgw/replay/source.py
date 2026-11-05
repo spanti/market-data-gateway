@@ -22,7 +22,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, avoids an import cycle
     from collections.abc import Sequence
 
     from mdgw.replay.session import BarSubscription
-    from mdgw.store.parquet_dataset import ParquetBarStore
+    from mdgw.store.parquet_dataset import ParquetBarStore, StoreRead
 
 
 def interval_ns(interval: str) -> int:
@@ -72,8 +72,15 @@ class ReplayBarSource:
         *,
         start_ts_ns: int,
         end_ts_ns: int,
+        read: StoreRead | None = None,
     ) -> list[Bar]:
-        """Return the deduplicated, ordered Bars within the `close_ts` range."""
+        """Return the deduplicated, ordered Bars within the `close_ts` range.
+
+        A Replay Session passes its long-lived `StoreRead`, so the whole
+        Session (including a later seek) reads from one fixed Snapshot. Direct
+        callers that do not hold one get the legacy one-shot per-subscription
+        read.
+        """
         kept: dict[tuple[str, str, int], Bar] = {}
 
         for subscription in subscriptions:
@@ -81,12 +88,22 @@ class ReplayBarSource:
             # `close_ts >= start_ts` is equivalent to
             # `open_ts >= start_ts - interval`; the store can push that down.
             physical_start_ns = start_ts_ns - interval_ns(interval)
-            for batch in self._store.iter_batches(
-                instrument_id=subscription.instrument_id,
-                interval=interval,
-                start_ns=physical_start_ns,
-                end_ns=end_ts_ns,
-            ):
+            batches = (
+                read.iter_batches(
+                    instrument_id=subscription.instrument_id,
+                    interval=interval,
+                    start_ns=physical_start_ns,
+                    end_ns=end_ts_ns,
+                )
+                if read is not None
+                else self._store.iter_batches(
+                    instrument_id=subscription.instrument_id,
+                    interval=interval,
+                    start_ns=physical_start_ns,
+                    end_ns=end_ts_ns,
+                )
+            )
+            for batch in batches:
                 for row in batch.to_pylist():
                     close_ns = datetime_to_ns(row["close_ts"])
                     if close_ns < start_ts_ns or close_ns >= end_ts_ns:
