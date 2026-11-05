@@ -24,7 +24,6 @@ import typer
 from mdgw.config import GatewayConfig, load_config
 from mdgw.core.time import utc_now
 from mdgw.logging import configure_json_logging
-from mdgw.normalize.version import SCALAR_NORMALIZATION_RULE_VERSION
 from mdgw.quarantine import QuarantineStore
 from mdgw.store.maintenance import parse_duration
 from mdgw.store.parquet_dataset import ParquetBarStore
@@ -871,9 +870,6 @@ def _run_archive_backfill(  # ruff: ignore[too-many-arguments, too-many-statemen
             granularity=granularity,
             retention_bars_days=retention_bars_days,
             quarantine=quarantine,
-            # Archive import uses the scalar reference Normalization rules for
-            # Bars; its Quarantine audit records carry that same identity.
-            rule_version=SCALAR_NORMALIZATION_RULE_VERSION,
         )
     finally:
         hwm.close()

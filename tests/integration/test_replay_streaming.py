@@ -134,10 +134,6 @@ class _FirstPublishGateRead:
         )
         yield self._second
 
-    def read_replay_bars(self, queries):
-        msg = "asap must not materialize the replay"
-        raise AssertionError(msg)
-
     def close(self) -> None:
         self.close_calls += 1
 
@@ -156,10 +152,6 @@ class _TrackingRead:
         for batch in self._batches:
             self.yielded += 1
             yield batch
-
-    def read_replay_bars(self, queries):
-        msg = "asap must not materialize the replay"
-        raise AssertionError(msg)
 
     def close(self) -> None:
         self.close_calls += 1
@@ -184,10 +176,6 @@ class _InterruptibleRead:
         finally:
             self.finished.set()
 
-    def read_replay_bars(self, queries):
-        msg = "asap must not materialize the replay"
-        raise AssertionError(msg)
-
     def close(self) -> None:
         self.close_calls += 1
         self.interrupted.set()
@@ -204,10 +192,6 @@ class _FailingAfterOneBatchRead:
         yield self._batch
         msg = "Cannot open file 'later.parquet': No such file"
         raise OSError(msg)
-
-    def read_replay_bars(self, queries):
-        msg = "asap must not materialize the replay"
-        raise AssertionError(msg)
 
     def close(self) -> None:
         self.close_calls += 1
@@ -710,11 +694,6 @@ def test_step_streams_the_query_instead_of_materializing() -> None:
         def __init__(self) -> None:
             self.bars = [_bar(0), _bar(1)]
             self.stream_calls = 0
-            self.materialized_calls = 0
-
-        def read_replay_bars(self, queries):
-            self.materialized_calls += 1
-            return bars_to_logical_table(self.bars)
 
         def iter_replay_batches(
             self, queries, *, batch_size=None, cancellation=None
@@ -752,7 +731,6 @@ def test_step_streams_the_query_instead_of_materializing() -> None:
     assert len(published) == 2
     assert events[-1]["reason"] == "exhausted"
     assert read.stream_calls == 1
-    assert read.materialized_calls == 0
 
 
 def test_asap_without_files_still_sends_exhausted(tmp_path: Path) -> None:

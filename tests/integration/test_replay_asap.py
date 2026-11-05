@@ -243,11 +243,6 @@ class _GatedRead:
             queries, batch_size=batch_size, cancellation=cancellation
         )
 
-    def read_replay_bars(self, queries):
-        # Migration differential/benchmark seam; no Replay Mode uses it.
-        self._wait()
-        return self._inner.read_replay_bars(queries)
-
     def close(self) -> None:
         self._inner.close()
 
@@ -268,10 +263,6 @@ class _BlockingReadStore:
 
     def open_read(self, **kwargs):
         return _GatedRead(self._inner.open_read(**kwargs), self._gate)
-
-    def iter_batches(self, **kwargs):
-        assert self._gate.wait(5), "test never released the read gate"
-        yield from self._inner.iter_batches(**kwargs)
 
 
 def _end_of_session(messages: list[tuple[str, bytes]]) -> dict[str, Any]:

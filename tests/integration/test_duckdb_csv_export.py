@@ -2,9 +2,8 @@
 # ruff: file-ignore[suspicious-url-open-usage]
 """CSV history and Parquet/Arrow export on the DuckDB Manifest Snapshot.
 
-Ticket 08 moves both surfaces onto `StoreRead.iter_arrow_batches()` (the same
-seam as the REST Arrow response). The reference implementation is the
-pre-migration PyArrow Store read, kept for JSON and differential tests.
+Both surfaces use `StoreRead.iter_arrow_batches()`, the same seam as the REST
+Arrow response. The reference is the Store's one DuckDB read.
 
 Non-paginated output has no ordering contract, so every row comparison is a
 multiset: exact field text plus duplicate counts, ignoring physical scan
@@ -170,14 +169,14 @@ def _wire_row(row: dict[str, Any]) -> tuple[str, ...]:
     return tuple(values)
 
 
-def _old_rows(
+def _store_rows(
     store: ParquetBarStore,
     *,
     instrument_id: str | None = INSTRUMENT,
     interval: str = "1m",
     limit: int | None = None,
 ) -> Counter:
-    """Multiset of rows from the pre-migration PyArrow Store read."""
+    """Multiset of rows from the Store read."""
     table = store.read_bars(
         instrument_id=instrument_id, interval=interval, limit=limit
     )
@@ -484,7 +483,7 @@ class _PausedStream:
 # ===========================================================================
 
 
-def test_csv_matches_the_pyarrow_store_for_empty_and_multifile_results(
+def test_csv_matches_the_store_for_empty_and_multifile_results(
     tmp_path: Path,
 ) -> None:
     empty = ParquetBarStore(tmp_path / "empty")
@@ -497,7 +496,7 @@ def test_csv_matches_the_pyarrow_store_for_empty_and_multifile_results(
     header, rows = _csv_rows(body)
     assert header == BAR_SCHEMA.names
     assert rows == []
-    assert Counter(rows) == _old_rows(empty, instrument_id=None)
+    assert Counter(rows) == _store_rows(empty, instrument_id=None)
 
     multi = _multi_file_revision_store(tmp_path / "multi")
     with _serve(create_app(multi)) as server:
@@ -512,7 +511,7 @@ def test_csv_matches_the_pyarrow_store_for_empty_and_multifile_results(
         )
     assert status == 200
     _, rows = _csv_rows(body)
-    expected = _old_rows(multi)
+    expected = _store_rows(multi)
     assert len(rows) == 6
     assert Counter(rows) == expected
     revision_index = BAR_SCHEMA.names.index("revision")
@@ -526,7 +525,7 @@ def test_csv_matches_the_pyarrow_store_for_empty_and_multifile_results(
     ]
 
 
-def test_csv_matches_the_pyarrow_store_for_a_large_multibatch_result(
+def test_csv_matches_the_store_for_a_large_multibatch_result(
     tmp_path: Path,
 ) -> None:
     store = ParquetBarStore(
@@ -564,7 +563,7 @@ def test_csv_matches_the_pyarrow_store_for_a_large_multibatch_result(
     assert status == 200
     _, rows = _csv_rows(body)
     assert len(rows) == 5000
-    assert Counter(rows) == _old_rows(store)
+    assert Counter(rows) == _store_rows(store)
     # Raw Revisions are never deduplicated.
     revision_index = BAR_SCHEMA.names.index("revision")
     assert Counter(int(row[revision_index]) for row in rows) == Counter(
@@ -609,7 +608,7 @@ def test_csv_keeps_exact_decimals_nanoseconds_nulls_and_field_order(
     assert header == BAR_SCHEMA.names
     assert len(rows) == 2
     assert all(len(row) == len(BAR_SCHEMA.names) for row in rows)
-    assert Counter(rows) == _old_rows(store)
+    assert Counter(rows) == _store_rows(store)
 
     open_index = BAR_SCHEMA.names.index("open")
     seq_index = BAR_SCHEMA.names.index("seq")
@@ -653,11 +652,11 @@ def test_csv_yields_one_chunk_per_bounded_duckdb_batch(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("format_name", ["parquet", "arrow"])
-def test_export_matches_the_pyarrow_store_for_revisions_and_duplicates(
+def test_export_matches_the_store_for_revisions_and_duplicates(
     tmp_path: Path, format_name: str
 ) -> None:
     store = _multi_file_revision_store(tmp_path)
-    expected = _old_rows(store)
+    expected = _store_rows(store)
     with _serve(create_app(store)) as server:
         status, headers, body = _get(
             _url(
@@ -1075,7 +1074,7 @@ def test_export_uses_one_snapshot_and_one_duckdb_scan_per_request(
     assert active_session_locks(store.dataset_root) == []
 
 
-def test_csv_and_export_never_fall_back_to_the_pyarrow_scan(
+def test_csv_and_export_use_the_single_duckdb_scan(
     tmp_path: Path,
 ) -> None:
     store = _RecordingStore(tmp_path)

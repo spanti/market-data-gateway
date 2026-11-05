@@ -49,7 +49,10 @@ def test_iter_batches_streams_multiple_batches_without_losing_rows(tmp_path: Pat
 
     assert len(batches) > 1
     assert combined.num_rows == 5
-    assert combined.equals(store.read_bars(interval="1m"))
+    # Non-paginated reads have no ordering contract; compare the same rows.
+    assert combined.sort_by("open_ts").equals(
+        store.read_bars(interval="1m").sort_by("open_ts")
+    )
 
 
 def test_iter_batches_drops_bars_outside_open_ts_range(tmp_path: Path) -> None:

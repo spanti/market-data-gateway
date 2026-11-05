@@ -282,43 +282,6 @@ class DuckDBArrowScanner:
         finally:
             self.close()
 
-    def replay_batches(
-        self,
-        branches: Sequence[ReplayScanBranch],
-        *,
-        batch_size: int,
-    ) -> list[pa.RecordBatch]:
-        """Run the Replay query and materialize every batch.
-
-        M5A deliberately keeps the full materialization: the query itself does
-        the close-time filter, the Revision choice, duplicate-subscription
-        resolution and the five-key total order. A mid-read failure propagates
-        and discards the partial list; it is never returned as a short result.
-        The Reader and connection are closed on success, exception and
-        cancellation; only a clean scan returns the connection to the cache.
-        """
-        try:  # ruff: ignore[too-many-statements-in-try-clause] - explicit resource scope
-            self._connect()
-            sql, params = _build_replay_sql(branches)
-            reader = self._open_sql_reader(sql, params, batch_size=batch_size)
-            try:
-                batches: list[pa.RecordBatch] = []
-                while True:
-                    batch = self._next_batch(reader)
-                    if batch is _END_OF_STREAM:
-                        break
-                    batches.append(batch)
-            finally:
-                self._close_reader()
-        except BaseException:
-            self._failed = True
-            raise
-        else:
-            self._exhausted = True
-            return batches
-        finally:
-            self.close()
-
     def iter_replay_batches(
         self,
         branches: Sequence[ReplayScanBranch],
@@ -327,7 +290,7 @@ class DuckDBArrowScanner:
     ) -> Iterator[pa.RecordBatch]:
         """Yield the five-key ordered Replay batches as DuckDB produces them.
 
-        This is the streaming M5B seam: the query still does the close-time
+        This is the only Replay read seam: the query does the close-time
         filter, Revision choice, duplicate-subscription resolution and total
         order, but each Arrow RecordBatch is handed to the caller immediately
         instead of being accumulated. The Reader and connection are closed on

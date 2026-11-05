@@ -1,10 +1,9 @@
-"""DuckDB Relation Arrow Reader behind the ticket-04 StoreRead seam.
+"""DuckDB Relation Arrow Reader behind the StoreRead seam.
 
-These tests compare the new DuckDB scan with the pre-migration PyArrow scan at
-the Store level: exact per-row content, duplicate counts and the Data Contract
-schema. Non-paginated output is not ordered, so comparisons are order
-insensitive; the schema comparison is exact, including field order and
-nullability.
+These tests cover the one production scan at the Store level: exact per-row
+content, duplicate counts and the Data Contract schema. Non-paginated output
+is not ordered, so content assertions are order insensitive; the schema
+comparison is exact, including field order and nullability.
 """
 
 from __future__ import annotations
@@ -86,13 +85,6 @@ def _read_duckdb(read) -> pa.Table:
     return pa.Table.from_batches(batches, schema=BAR_SCHEMA)
 
 
-def _row_multiset(table: pa.Table) -> Counter:
-    return Counter(
-        tuple(row[name] for name in BAR_SCHEMA.names)
-        for row in table.to_pylist()
-    )
-
-
 def test_duckdb_arrow_read_returns_one_bar_with_the_contract_schema(
     tmp_path: Path,
 ) -> None:
@@ -170,7 +162,7 @@ def test_duckdb_arrow_read_preserves_contract_types_and_nanoseconds(
     assert any(row["trade_count"] is None for row in values.values())
 
 
-def test_duckdb_arrow_read_matches_pyarrow_for_multi_file_duplicates(
+def test_duckdb_arrow_read_keeps_multi_file_duplicate_rows(
     tmp_path: Path,
 ) -> None:
     store = ParquetBarStore(tmp_path)
@@ -180,12 +172,12 @@ def test_duckdb_arrow_read_matches_pyarrow_for_multi_file_duplicates(
     _write(store, [_bar(1), _bar(2, revision=1)])
 
     with store.open_read(interval="1m") as read:
-        expected = read.read_bars()
-    with store.open_read(interval="1m") as read:
         actual = _read_duckdb(read)
 
-    assert _row_multiset(actual) == _row_multiset(expected)
-    assert actual.num_rows == expected.num_rows == 5
+    assert actual.num_rows == 5
+    assert Counter(
+        (row["open_ts"].minute, row["revision"]) for row in actual.to_pylist()
+    ) == Counter({(0, 0): 3, (1, 0): 1, (2, 1): 1})
 
 
 def test_duckdb_arrow_read_prunes_inactive_and_unlisted_files(
@@ -241,12 +233,9 @@ def test_duckdb_arrow_read_returns_every_raw_revision(tmp_path: Path) -> None:
         _write(store, [_bar(0, revision=revision)])
 
     with store.open_read(interval="1m") as read:
-        expected = read.read_bars()
-    with store.open_read(interval="1m") as read:
         actual = _read_duckdb(read)
 
     assert actual.num_rows == 3
-    assert _row_multiset(actual) == _row_multiset(expected)
     assert sorted(row["revision"] for row in actual.to_pylist()) == [0, 1, 2]
 
 

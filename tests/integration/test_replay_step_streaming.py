@@ -2,8 +2,7 @@
 
 Seams under test:
 - `ReplaySession` in `step` mode consumes the same bounded prefetched batch
-  stream as asap and realtime. It never materializes the result and never
-  calls the materializing `read_replay_bars` seam.
+  stream as asap and realtime. It never materializes the result.
 - One credit publishes exactly one Bar. A temporary credit shortage parks the
   worker and never ends the Session; `exhausted` requires the current query to
   be exhausted after every prefetched Bar was published.
@@ -111,7 +110,6 @@ class _ScriptedRead:
         self._generations = list(generations)
         self._lock = threading.Lock()
         self._index = 0
-        self.materialize_calls = 0
         self.stream_calls = 0
         self.close_calls = 0
         self.predecessor_finished: list[bool] = []
@@ -151,11 +149,6 @@ class _ScriptedRead:
                 raise generation.raise_after
         finally:
             generation.finished.set()
-
-    def read_replay_bars(self, queries):
-        self.materialize_calls += 1
-        msg = "step must not materialize the replay"
-        raise AssertionError(msg)
 
     def close(self) -> None:
         self.close_calls += 1
@@ -287,7 +280,6 @@ def test_step_streams_the_query_instead_of_materializing() -> None:
     assert [bar.open_ts for bar in bars] == [
         BASE + timedelta(minutes=index) for index in range(3)
     ]
-    assert read.materialize_calls == 0
     assert read.stream_calls == 1
     assert read.close_calls >= 1
     assert events == [
@@ -327,7 +319,6 @@ def test_every_replay_mode_streams_the_query(mode: str) -> None:
 
     bars, events = recorder.snapshot()
     assert len(bars) == 2
-    assert read.materialize_calls == 0
     assert read.stream_calls == 1
     assert read.close_calls >= 1
     assert events[-1]["reason"] == "exhausted"

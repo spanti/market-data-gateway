@@ -266,9 +266,9 @@ class ReplaySession:
         self.session_id = session_id
         self.spec = spec
         self._store = store
-        # `source` is a migration/differential-test seam. The production path
+        # `source` is a test seam for scripted reads. The production path
         # (ReplayService) always builds the DuckDB-backed source.
-        self._source = source if source is not None else ReplayBarSource(store)
+        self._source = source if source is not None else ReplayBarSource()
         self._publish_bar = publish_bar
         self._publish_event = publish_event
         self._heartbeat_s = heartbeat_s

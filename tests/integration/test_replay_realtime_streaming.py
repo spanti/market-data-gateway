@@ -109,7 +109,6 @@ class _ScriptedRead:
         self._generations = list(generations)
         self._lock = threading.Lock()
         self._index = 0
-        self.materialize_calls = 0
         self.close_calls = 0
         self.predecessor_finished: list[bool] = []
 
@@ -149,11 +148,6 @@ class _ScriptedRead:
                 raise generation.raise_after
         finally:
             generation.finished.set()
-
-    def read_replay_bars(self, queries):
-        self.materialize_calls += 1
-        msg = "realtime must not materialize the replay"
-        raise AssertionError(msg)
 
     def close(self) -> None:
         self.close_calls += 1
@@ -259,7 +253,6 @@ def test_realtime_streams_batches_instead_of_materializing() -> None:
     assert [bar.open_ts for bar in bars] == [
         BASE + timedelta(minutes=index) for index in range(3)
     ]
-    assert read.materialize_calls == 0
     assert read.close_calls >= 1
     assert events == [
         {

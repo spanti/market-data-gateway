@@ -1,10 +1,9 @@
 """REST Arrow history through the DuckDB Relation Arrow Reader.
 
-The public `/api/v1/bars?format=arrow` response is compared with the
-pre-migration PyArrow Store read: exact per-row content, duplicate counts and
-the exact Data Contract schema. Non-paginated output has no ordering contract,
-so row comparisons are order insensitive. Ticket 08 extended this seam to CSV
-and export; JSON keeps the existing Store read/count.
+The public `/api/v1/bars?format=arrow` response is compared with the Store
+read: exact per-row content, duplicate counts and the exact Data Contract
+schema. Non-paginated output has no ordering contract, so row comparisons are
+order insensitive. CSV, export and JSON use the same DuckDB read seam.
 """
 
 # ruff: file-ignore[implicit-namespace-package]
@@ -114,7 +113,7 @@ def _rows(table: pa.Table) -> Counter:
     )
 
 
-def _old_store_rows(
+def _store_rows(
     store: ParquetBarStore,
     *,
     instrument_id: str = INSTRUMENT,
@@ -297,7 +296,7 @@ def test_arrow_rest_bounded_empty_result_keeps_the_contract_schema(
     assert table.num_rows == 0
 
 
-def test_arrow_rest_matches_the_pyarrow_store_for_multi_file_revisions(
+def test_arrow_rest_matches_the_store_for_multi_file_revisions(
     tmp_path: Path,
 ) -> None:
     store = ParquetBarStore(tmp_path)
@@ -306,7 +305,7 @@ def test_arrow_rest_matches_the_pyarrow_store_for_multi_file_revisions(
     _write(store, [_bar(0, revision=0), _bar(0, revision=0)])
     _write(store, [_bar(0, revision=1), _bar(1, revision=0)])
     _write(store, [_bar(0, revision=2), _bar(2, revision=3)])
-    expected = _old_store_rows(store)
+    expected = _store_rows(store)
 
     with _serve(create_app(store)) as server:
         status, _, body = _get(
@@ -355,11 +354,10 @@ def test_arrow_rest_honours_half_open_open_ts_bounds(tmp_path: Path) -> None:
 
     assert status == 200
     table = _arrow_table(body)
-    assert [value.minute for value in table.column("open_ts").to_pylist()] == [
-        1,
-        2,
-        3,
-    ]
+    # Non-paginated Arrow has no ordering contract.
+    assert sorted(
+        value.minute for value in table.column("open_ts").to_pylist()
+    ) == [1, 2, 3]
 
 
 def test_arrow_rest_prunes_cross_partition_data(tmp_path: Path) -> None:
@@ -367,7 +365,7 @@ def test_arrow_rest_prunes_cross_partition_data(tmp_path: Path) -> None:
     _write(store, [_bar(0, interval="1m")])
     _write(store, [_bar(0, interval="5m")])
     _write(store, [_bar(0, instrument_id=OTHER_INSTRUMENT)])
-    expected = _old_store_rows(store, instrument_id=INSTRUMENT, interval="1m")
+    expected = _store_rows(store, instrument_id=INSTRUMENT, interval="1m")
 
     with _serve(create_app(store)) as server:
         status, _, body = _get(
@@ -421,7 +419,7 @@ def test_arrow_rest_preserves_decimals_and_pre_epoch_instants(
         ],
         asset_class="crypto",
     )
-    expected = _old_store_rows(store)
+    expected = _store_rows(store)
 
     with _serve(create_app(store)) as server:
         status, _, body = _get(

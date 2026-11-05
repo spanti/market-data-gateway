@@ -1,15 +1,15 @@
 """Polars batch Normalization at the Collector ingest boundary.
 
-Raw Bars are validated and normalized once per ``CollectorCore.ingest()``
-batch, never one DataFrame per message. Values enter Polars through typed
-Arrow columns (``decimal128(38,18)`` and ``timestamp[ns, tz=UTC]``), because
-both Arrow-typed and untyped decimal paths silently rescale over-scale input.
-This module therefore rejects float-shaped values and over-scale decimals
-before they can reach a Polars Decimal Series, and lets Polars compute the
-Instrument, Interval and closed-Bar rules for the whole batch.
+Raw Bars are validated and normalized once per batch, never one DataFrame per
+message. Decimals are validated exactly in Python before any Arrow conversion
+(both Arrow-typed and untyped decimal paths silently rescale over-scale input,
+and floats are rejected outright); they never enter a Polars Decimal Series.
+The typed Arrow columns passed to Polars carry only the fields the batch rules
+read, and Polars computes the Instrument, Interval and closed-Bar rules for
+the whole batch.
 
-The scalar ``mdgw.normalize.bar.normalize_bar`` remains the reference for
-Backfill and for differential tests.
+This is the single production Normalization rule source: live Collector
+batches, Backfill and archive import all call ``normalize_batch``.
 """
 
 from __future__ import annotations
@@ -23,9 +23,8 @@ import polars as pl
 import pyarrow as pa
 
 from mdgw.core.bar import DATA_TYPE, SCHEMA_VERSION, Bar
-from mdgw.core.schema import INTERVALS, PRICE, QUANTITY
+from mdgw.core.schema import INTERVALS
 from mdgw.core.time import datetime_to_ns, ns_to_datetime, ns_to_iso, to_utc
-from mdgw.normalize.bar import MAX_SCALE
 from mdgw.quarantine import (
     REASON_DECIMAL_SCALE_EXCEEDED,
     REASON_FLOAT_VALUE,
@@ -41,6 +40,8 @@ if TYPE_CHECKING:
 
     from mdgw.core.bar import RawBar
 
+# Data Contract price/quantity scale: decimal128(38, 18).
+MAX_SCALE = 18
 MAX_INTEGER_DIGITS = 38 - MAX_SCALE
 DECIMAL_FIELDS: tuple[str, ...] = ("open", "high", "low", "close", "volume")
 _INSTRUMENT_PATTERN = r"(?s)^[^:]+:.+$"
@@ -317,27 +318,26 @@ def _classify_row(raw: RawBar) -> tuple[dict[str, Any], _RowIssues]:
 
 
 def _typed_table(rows: Sequence[dict[str, Any]]) -> pa.Table:
-    """Build one typed Arrow table; no untyped Decimal Series is created."""
-    column_types = {
-        "instrument_id": pa.string(),
-        "interval": pa.string(),
-        "open_ts": pa.timestamp("ns", tz="UTC"),
-        "open": PRICE,
-        "high": PRICE,
-        "low": PRICE,
-        "close": PRICE,
-        "volume": QUANTITY,
-        "trade_count": pa.int64(),
-        "revision": pa.int64(),
-    }
-    columns = {
-        name: pa.array([row[name] for row in rows], type=column_type)
-        for name, column_type in column_types.items()
-    }
-    columns["row_index"] = pa.array(
-        range(len(rows)), type=pa.int64()
+    """Build the typed columns the Polars rules actually read.
+
+    Decimals are validated row-by-row before this point and are not used by
+    any Polars expression, so they never enter a Decimal Series. Keeping this
+    table narrow is what makes batch Normalization cheaper than the deleted
+    scalar path for large Backfill/archive batches.
+    """
+    return pa.table(
+        {
+            "instrument_id": pa.array(
+                [row["instrument_id"] for row in rows], type=pa.string()
+            ),
+            "interval": pa.array(
+                [row["interval"] for row in rows], type=pa.string()
+            ),
+            "open_ns": pa.array(
+                [row["open_ts"] for row in rows], type=pa.int64()
+            ),
+        }
     )
-    return pa.table(columns)
 
 
 def _rejection(
@@ -366,7 +366,7 @@ def _unclosed_details(open_ns: int, close_ns: int, ingest_ns: int) -> dict[str, 
     }
 
 
-def normalize_batch(
+def normalize_batch(  # ruff: ignore[too-many-locals] - one explicit pass
     raws: Sequence[RawBar],
     *,
     feed: str,
@@ -402,7 +402,7 @@ def normalize_batch(
             .is_in(list(INTERVALS))
             .fill_null(False)
             .alias("_interval_ok"),
-            pl.col("open_ts").cast(pl.Int64).alias("_open_ns"),
+            pl.col("open_ns").alias("_open_ns"),
             pl.col("interval")
             .replace_strict(_INTERVAL_NS, default=None, return_dtype=pl.Int64)
             .alias("_interval_ns"),
@@ -413,19 +413,19 @@ def normalize_batch(
         .with_columns(
             (pl.col("_close_ns") <= ingest_ns)
             .fill_null(False)
-            .alias("_closed"),
-            pl.lit(SCHEMA_VERSION, dtype=pl.UInt16).alias("schema_version"),
-            pl.lit(DATA_TYPE).alias("data_type"),
-            pl.lit(feed).alias("feed"),
-            pl.lit(None, dtype=pl.Int64).alias("seq"),
-            pl.lit("external").alias("aggregation_source"),
+            .alias("_closed")
         )
     )
+    instrument_ok = frame.get_column("_instrument_ok").to_list()
+    interval_ok = frame.get_column("_interval_ok").to_list()
+    open_ns_values = frame.get_column("_open_ns").to_list()
+    close_ns_values = frame.get_column("_close_ns").to_list()
+    closed_values = frame.get_column("_closed").to_list()
 
     normalized: list[NormalizedRow] = []
     rejections: list[BatchRejection] = []
     for row_index, (values, issues) in enumerate(
-        zip(frame.to_dicts(), issues_by_row, strict=True)
+        zip(column_rows, issues_by_row, strict=True)
     ):
         raw = raws[row_index]
         reason_code: str | None = None
@@ -433,21 +433,21 @@ def normalize_batch(
 
         if issues.instrument is not None:
             reason_code, details = issues.instrument
-        elif values["instrument_id"] is not None and not values["_instrument_ok"]:
+        elif values["instrument_id"] is not None and not instrument_ok[row_index]:
             reason_code = REASON_INVALID_INSTRUMENT
             details = {"instrument_id": values["instrument_id"][:128]}
         elif issues.interval is not None:
             reason_code, details = issues.interval
-        elif values["interval"] is not None and not values["_interval_ok"]:
+        elif values["interval"] is not None and not interval_ok[row_index]:
             reason_code = REASON_INVALID_INTERVAL
             details = {"interval": values["interval"][:128]}
         elif issues.timestamp is not None:
             reason_code, details = issues.timestamp
-        elif not values["_closed"]:
+        elif not closed_values[row_index]:
             reason_code = REASON_UNCLOSED_BAR
             details = _unclosed_details(
-                int(values["_open_ns"]),
-                int(values["_close_ns"]),
+                int(open_ns_values[row_index]),
+                int(close_ns_values[row_index]),
                 ingest_ns,
             )
         elif issues.decimal is not None:
@@ -461,20 +461,20 @@ def normalize_batch(
             )
             continue
 
-        open_ts = ns_to_datetime(int(values["_open_ns"]))
-        close_ts = ns_to_datetime(int(values["_close_ns"]))
+        open_ts = ns_to_datetime(int(open_ns_values[row_index]))
+        close_ts = ns_to_datetime(int(close_ns_values[row_index]))
         bar = Bar(
-            schema_version=int(values["schema_version"]),
-            data_type=str(values["data_type"]),
+            schema_version=SCHEMA_VERSION,
+            data_type=DATA_TYPE,
             instrument_id=str(values["instrument_id"]),
             interval=str(values["interval"]),
             open_ts=open_ts,
             close_ts=close_ts,
             event_ts=close_ts,
             ingest_ts=ingest_utc,
-            feed=str(values["feed"]),
+            feed=feed,
             seq=None,
-            aggregation_source=str(values["aggregation_source"]),
+            aggregation_source="external",
             open=values["open"],
             high=values["high"],
             low=values["low"],
