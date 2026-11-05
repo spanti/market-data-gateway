@@ -20,6 +20,7 @@ import pyarrow as pa
 from mdgw.core.bar import Bar
 from mdgw.store.manifest import active_manifest_entries
 from mdgw.store.parquet_dataset import ParquetBarStore
+from mdgw.store.session_locks import active_session_locks
 
 UTC = timezone.utc
 INSTRUMENT = "binance:BTC/USDT"
@@ -153,3 +154,88 @@ def test_gc_manifest_switch_does_not_break_a_paused_reader(
     # GC removed the whole month; the refreshed Manifest is a consistent empty
     # snapshot rather than a missing-file error.
     assert _summarize(value) == 0
+
+
+class _PausingLeaseStore(ParquetBarStore):
+    """Pause after the lease exists, before the Manifest generation re-read."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.lease_held = threading.Event()
+        self.resume = threading.Event()
+
+    def _after_lease_acquired(self, _lease):
+        self.lease_held.set()
+        if not self.resume.wait(10):
+            raise RuntimeError("test did not resume the snapshot acquisition")
+
+
+def test_compaction_during_lease_acquisition_skips_the_leased_partition(
+    tmp_path: Path,
+) -> None:
+    writer = ParquetBarStore(tmp_path)
+    for minute in range(3):
+        writer.write_bars([_bar(minute)], asset_class="crypto")
+
+    paused = _PausingLeaseStore(tmp_path)
+    result: dict[str, object] = {}
+
+    def read() -> None:
+        try:
+            result["value"] = paused.read_bars(interval="1m")
+        except BaseException as exc:  # noqa: BLE001 - asserted by the test
+            result["error"] = exc
+
+    thread = threading.Thread(target=read, name="mdgw-lease-acquisition")
+    thread.start()
+    assert paused.lease_held.wait(5)
+
+    # Maintenance runs while the read holds a lease for the old generation.
+    report = writer.compact(
+        older_than=timedelta(seconds=0),
+        now_ns=time.time_ns() + 1_000_000_000,
+    )
+
+    paused.resume.set()
+    thread.join(10)
+    assert not thread.is_alive()
+    if "error" in result:
+        raise result["error"]
+    value = result["value"]
+    assert isinstance(value, pa.Table)
+    # A consistent old snapshot: all three rows are still readable.
+    assert value.num_rows == 3
+    assert report.skipped_locked
+    assert report.new_files == ()
+    assert active_session_locks(paused.dataset_root) == []
+
+
+def test_compaction_during_an_open_read_skips_the_leased_partition(
+    tmp_path: Path,
+) -> None:
+    store = ParquetBarStore(tmp_path)
+    for minute in range(4):
+        store.write_bars([_bar(minute)], asset_class="crypto")
+
+    read = store.open_read(interval="1m")
+    try:
+        iterator = read.iter_batches(batch_size=1)
+        first = next(iterator)
+        assert first.num_rows == 1
+
+        # The lease covers the whole Reader lifetime, so mid-read maintenance
+        # must skip the partition instead of unlinking its files.
+        report = store.compact(
+            older_than=timedelta(seconds=0),
+            now_ns=time.time_ns() + 1_000_000_000,
+        )
+        total_rows = first.num_rows + sum(
+            batch.num_rows for batch in iterator
+        )
+        assert total_rows == 4
+        assert report.skipped_locked
+        assert report.new_files == ()
+        assert len(active_manifest_entries(store.dataset_root)) == 4
+    finally:
+        read.close()
+    assert active_session_locks(store.dataset_root) == []

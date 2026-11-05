@@ -77,6 +77,14 @@ class GCReport:
     failures: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class _MergeRecord:
+    label: str
+    partition: dict[str, Any]
+    entries: tuple[dict[str, Any], ...]
+    new_entry: dict[str, Any]
+
+
 @dataclass(slots=True)
 class _CompactionOutcome:
     merged_partitions: list[str] = field(default_factory=list)
@@ -85,7 +93,8 @@ class _CompactionOutcome:
     skipped_locked: list[str] = field(default_factory=list)
     skipped_single: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
-    pending_inactive: set[str] = field(default_factory=set)
+    pending_inactive: dict[str, dict[str, Any]] = field(default_factory=dict)
+    merges: list[_MergeRecord] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -136,14 +145,36 @@ def duration_to_ns(value: timedelta | str | int) -> int:
     )
 
 
+def _month_label(partition: dict[str, Any]) -> str:
+    return f"{partition.get('year', '')}-{partition.get('month', '')}"
+
+
 def partition_is_locked(
     partition: dict[str, Any], locks: list[SessionLock]
 ) -> bool:
-    """A lock with no subscriptions protects the whole Dataset; otherwise match."""
+    """Whether a lock protects this partition.
+
+    A legacy lock with no scope records protects the whole Dataset. A Replay
+    Session lock carries subscriptions and matches Instrument + Interval; a
+    short-lived Dataset Read Lease carries the exact partitions and months it
+    selected.
+    """
     instrument_id = instrument_id_for_partition(partition)
     interval = str(partition.get("interval", ""))
+    key = partition_key(partition)
+    month = _month_label(partition)
     for lock in locks:
-        if not lock.subscriptions:
+        if not lock.subscriptions and not lock.partitions and not lock.months:
+            return True
+        if lock.partitions:
+            if any(
+                partition_key(candidate) == key
+                for candidate in lock.partitions
+            ):
+                return True
+        elif lock.months and month in lock.months:
+            # Month-only scope is coarser than an exact partition list; GC's
+            # month grouping still protects the whole month it belongs to.
             return True
         for subscription in lock.subscriptions:
             locked_instrument = subscription.get("instrument_id")
@@ -179,17 +210,33 @@ def compact_store(
     now_ns = time.time_ns() if now_ns is None else int(now_ns)
     older_than_ns = duration_to_ns(older_than)
     cutoff_ns = now_ns - older_than_ns
-    locks = active_session_locks(dataset_root, timeout_s=timeout_s, now_ns=now_ns)
 
     with store._lock:  # shared writer/compaction lock
+        locks = active_session_locks(
+            dataset_root, timeout_s=timeout_s, now_ns=now_ns
+        )
         manifest = read_manifest(dataset_root)
         entries = _load_entries(manifest, dataset_root)
         outcome = _compact_entries(store, entries, cutoff_ns, locks)
         if not outcome.new_files:
             return _compaction_report(older_than_ns, outcome)
 
+        # Second guard: a lease may have appeared while compacted files were
+        # being written. Never switch the Manifest for a partition that is
+        # now protected.
+        _recheck_compaction_before_switch(
+            dataset_root, entries, outcome, timeout_s=timeout_s, now_ns=now_ns
+        )
+        if not outcome.new_files:
+            return _compaction_report(older_than_ns, outcome)
+
         manifest["files"] = entries
         _write_manifest_or_rollback(dataset_root, manifest, outcome.new_files)
+        # Third guard, immediately before the unlink: a lease acquired after
+        # the previous check still cannot lose its files silently.
+        _recheck_compaction_before_unlink(
+            dataset_root, outcome, timeout_s=timeout_s, now_ns=now_ns
+        )
         _remove_superseded_files(dataset_root, outcome)
         return _compaction_report(older_than_ns, outcome)
 
@@ -224,9 +271,11 @@ def gc_store(
     now = to_utc(now) if now is not None else utc_now()
     now_ns = datetime_to_ns(now)
     cutoff_ns = now_ns - bars_days * NANOS_PER_DAY
-    locks = active_session_locks(dataset_root, timeout_s=timeout_s, now_ns=now_ns)
 
     with store._lock:  # shared writer/GC lock
+        locks = active_session_locks(
+            dataset_root, timeout_s=timeout_s, now_ns=now_ns
+        )
         manifest = read_manifest(dataset_root)
         entries = _load_entries(manifest, dataset_root)
         outcome = _collect_expired_partitions(
@@ -235,9 +284,27 @@ def gc_store(
         if dry_run or not outcome.to_remove:
             return _gc_report(dry_run, bars_days, outcome)
 
+        # Second guard before the Manifest switch, then a third one right
+        # before the unlink; a read lease acquired mid-maintenance keeps its
+        # whole month.
+        _recheck_gc_before_removal(
+            dataset_root, outcome, timeout_s=timeout_s, now_ns=now_ns
+        )
+        if not outcome.to_remove:
+            return _gc_report(dry_run, bars_days, outcome)
+
         _deactivate_entries(entries, {entry["path"] for entry in outcome.to_remove})
         manifest["files"] = entries
         write_manifest(dataset_root, manifest)
+        skipped_paths = _recheck_gc_before_removal(
+            dataset_root, outcome, timeout_s=timeout_s, now_ns=now_ns
+        )
+        if skipped_paths:
+            # A lease appeared after the Manifest switch. Put its entries back
+            # so the data stays reachable and a later GC retries the month.
+            _reactivate_entries(entries, skipped_paths)
+            manifest["files"] = entries
+            write_manifest(dataset_root, manifest)
         _unlink_removed_files(dataset_root, outcome)
         _prune_empty_directories(dataset_root)
         return _gc_report(dry_run, bars_days, outcome)
@@ -319,9 +386,18 @@ def _compact_group(
         if entry["path"] in eligible_paths:
             entry["active"] = False
     context.entries.append(new_entry)
-    context.outcome.pending_inactive.update(eligible_paths)
+    for entry in eligible:
+        context.outcome.pending_inactive[entry["path"]] = dict(partition)
     context.outcome.merged_partitions.append(label)
     context.outcome.new_files.append(new_entry["path"])
+    context.outcome.merges.append(
+        _MergeRecord(
+            label=label,
+            partition=dict(partition),
+            entries=tuple(eligible),
+            new_entry=new_entry,
+        )
+    )
 
 
 def _write_manifest_or_rollback(
@@ -333,6 +409,64 @@ def _write_manifest_or_rollback(
         for relative_path in new_files:
             (dataset_root / relative_path).unlink(missing_ok=True)
         raise
+
+
+def _append_locked(outcome: _CompactionOutcome | _GCOutcome, label: str) -> None:
+    if label not in outcome.skipped_locked:
+        outcome.skipped_locked.append(label)
+
+
+def _recheck_compaction_before_switch(
+    dataset_root: Path,
+    entries: list[dict[str, Any]],
+    outcome: _CompactionOutcome,
+    *,
+    timeout_s: int,
+    now_ns: int,
+) -> None:
+    """Roll back a merge whose partition gained a lease after the first scan."""
+    if not outcome.merges:
+        return
+    locks = active_session_locks(
+        dataset_root, timeout_s=timeout_s, now_ns=now_ns
+    )
+    for merge in list(outcome.merges):
+        if not partition_is_locked(merge.partition, locks):
+            continue
+        for entry in merge.entries:
+            entry["active"] = True
+            outcome.pending_inactive.pop(entry["path"], None)
+        entries[:] = [
+            entry for entry in entries if entry is not merge.new_entry
+        ]
+        with suppress(OSError):
+            (dataset_root / merge.new_entry["path"]).unlink()
+        if merge.new_entry["path"] in outcome.new_files:
+            outcome.new_files.remove(merge.new_entry["path"])
+        if merge.label in outcome.merged_partitions:
+            outcome.merged_partitions.remove(merge.label)
+        outcome.merges.remove(merge)
+        _append_locked(outcome, merge.label)
+
+
+def _recheck_compaction_before_unlink(
+    dataset_root: Path,
+    outcome: _CompactionOutcome,
+    *,
+    timeout_s: int,
+    now_ns: int,
+) -> None:
+    """Keep files whose partition is now leased instead of unlinking them."""
+    if not outcome.pending_inactive:
+        return
+    locks = active_session_locks(
+        dataset_root, timeout_s=timeout_s, now_ns=now_ns
+    )
+    for relative_path, partition in list(outcome.pending_inactive.items()):
+        if not partition_is_locked(partition, locks):
+            continue
+        del outcome.pending_inactive[relative_path]
+        _append_locked(outcome, partition_label(partition))
 
 
 def _remove_superseded_files(
@@ -422,6 +556,61 @@ def _deactivate_entries(
     for entry in entries:
         if entry["path"] in removed_paths:
             entry["active"] = False
+
+
+def _reactivate_entries(
+    entries: list[dict[str, Any]], kept_paths: set[str]
+) -> None:
+    for entry in entries:
+        if entry["path"] in kept_paths:
+            entry["active"] = True
+
+
+def _recheck_gc_before_removal(
+    dataset_root: Path,
+    outcome: _GCOutcome,
+    *,
+    timeout_s: int,
+    now_ns: int,
+) -> set[str]:
+    """Skip whole months that gained a read lease during GC.
+
+    Returns the Data File paths that were dropped from the removal set, so the
+    caller can put their Manifest entries back after a late Manifest switch.
+    """
+    if not outcome.to_remove:
+        return set()
+    before_paths = {entry["path"] for entry in outcome.to_remove}
+    locks = active_session_locks(
+        dataset_root, timeout_s=timeout_s, now_ns=now_ns
+    )
+    by_month: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for entry in outcome.to_remove:
+        by_month[_month_label(entry["partition"])].append(entry)
+
+    kept: list[dict[str, Any]] = []
+    skipped: set[str] = set()
+    for label in outcome.removed_partitions:
+        group = by_month.pop(label, [])
+        if any(partition_is_locked(entry["partition"], locks) for entry in group):
+            skipped.add(label)
+        else:
+            kept.extend(group)
+    for label, group in by_month.items():
+        if any(partition_is_locked(entry["partition"], locks) for entry in group):
+            skipped.add(label)
+        else:
+            kept.extend(group)
+
+    outcome.to_remove = kept
+    outcome.removed_partitions = [
+        label
+        for label in outcome.removed_partitions
+        if label not in skipped
+    ]
+    for label in sorted(skipped):
+        _append_locked(outcome, label)
+    return before_paths - {entry["path"] for entry in kept}
 
 
 def _unlink_removed_files(dataset_root: Path, outcome: _GCOutcome) -> None:

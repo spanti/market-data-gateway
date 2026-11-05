@@ -13,6 +13,7 @@ import io
 import logging
 import shutil
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -20,6 +21,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 from fastapi import APIRouter, Query
+from starlette.background import BackgroundTask
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from mdgw.api.formats import (
@@ -47,7 +49,7 @@ from mdgw.core.time import iso_to_ns, ns_to_iso
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
 
-    from mdgw.store.parquet_dataset import ParquetBarStore
+    from mdgw.store.parquet_dataset import ParquetBarStore, StoreRead
 
 logger = logging.getLogger(__name__)
 
@@ -263,9 +265,10 @@ def _parse_limit(raw_limit: str | None) -> int | None:
 
 # -- storage access ---------------------------------------------------------
 #
-# Every read helper takes the validated `BarQuery` instead of re-exploding the
-# same `(instrument_id, interval, start_ns, end_ns, limit)` clump at each call
-# site. The store API stays primitive; only this module knows the mapping.
+# One HTTP request owns one `StoreRead`: its row-ceiling count, its existence
+# probe and its actual read all scan the same Manifest Snapshot under the same
+# Dataset Read Lease. The helpers below only translate the validated
+# `BarQuery` into the Store's primitive filters.
 
 
 def _query_filters(query: BarQuery) -> dict[str, Any]:
@@ -277,34 +280,11 @@ def _query_filters(query: BarQuery) -> dict[str, Any]:
     }
 
 
-def _count_store_bars(store: ParquetBarStore, query: BarQuery) -> int:
-    return store.count_bars(**_query_filters(query))
+def _open_store_read(store: ParquetBarStore, query: BarQuery) -> StoreRead:
+    return store.open_read(**_query_filters(query))
 
 
-def _read_store_bars(
-    store: ParquetBarStore,
-    query: BarQuery,
-    *,
-    limit: int | None,
-) -> pa.Table:
-    return store.read_bars(**_query_filters(query), limit=limit)
-
-
-def _iter_store_batches(
-    store: ParquetBarStore,
-    query: BarQuery,
-    *,
-    limit: int | None,
-) -> Iterator[pa.RecordBatch]:
-    return store.iter_batches(**_query_filters(query), limit=limit)
-
-
-def _read_earliest_bars(
-    store: ParquetBarStore,
-    query: BarQuery,
-    *,
-    keep: int,
-) -> pa.Table:
+def _read_earliest_bars(read: StoreRead, *, keep: int) -> pa.Table:
     """Return the globally earliest ``keep`` Bars in ascending `open_ts` order.
 
     Storage order is not a time order (Manifest entries are append-ordered and
@@ -314,7 +294,7 @@ def _read_earliest_bars(
     (no Python datetime/decimal round-trip).
     """
     selected: pa.Table | None = None
-    for batch in _iter_store_batches(store, query, limit=None):
+    for batch in read.iter_batches(limit=None):
         table = pa.Table.from_batches([batch], schema=BAR_SCHEMA)
         if selected is not None:
             table = pa.concat_tables([selected, table])
@@ -328,51 +308,55 @@ def _read_earliest_bars(
 
 
 async def _respond_json(store: ParquetBarStore, query: BarQuery) -> Response:
-    total = await asyncio.to_thread(_count_store_bars, store, query)
-    # `limit` caps the response, so only the rows that would actually be
-    # rendered count against the JSON ceiling.
-    effective_total = total if query.limit is None else min(total, query.limit)
-    if effective_total > JSON_ROW_LIMIT:
-        message = (
-            f"JSON output is limited to {JSON_ROW_LIMIT} Bars; "
-            "use format=arrow or format=csv for larger ranges"
-        )
-        raise _RangeTooLargeError(
-            message,
-            details={"row_count": total, "limit": JSON_ROW_LIMIT},
-        )
+    payload = await asyncio.to_thread(_build_json_payload, store, query)
+    return JSONResponse(payload)
 
-    # Pagination metadata is a single-Instrument feature: it needs both
-    # `instrument` and `limit` (limit=0 counts) to be unambiguous.
-    paginated = query.instrument is not None and query.limit is not None
-    if not paginated:
-        table = await asyncio.to_thread(
-            _read_store_bars, store, query, limit=query.limit
+
+def _build_json_payload(store: ParquetBarStore, query: BarQuery) -> dict:
+    """Count and read on one Snapshot, so the ceiling cannot disagree with rows."""
+    with _open_store_read(store, query) as read:
+        total = read.count()
+        # `limit` caps the response, so only the rows that would actually be
+        # rendered count against the JSON ceiling.
+        effective_total = (
+            total if query.limit is None else min(total, query.limit)
         )
-        return JSONResponse({"bars": table_to_messages(table)})
+        if effective_total > JSON_ROW_LIMIT:
+            message = (
+                f"JSON output is limited to {JSON_ROW_LIMIT} Bars; "
+                "use format=arrow or format=csv for larger ranges"
+            )
+            raise _RangeTooLargeError(
+                message,
+                details={"row_count": total, "limit": JSON_ROW_LIMIT},
+            )
 
-    assert query.limit is not None  # narrowed by `paginated`
-    limit = query.limit
-    # The paginated JSON surface has an explicit ordering contract: open_ts
-    # ascending. Storage order is not ordered (the Manifest is append-ordered
-    # and files may overlap), so reading `limit + 1` rows first would pick the
-    # wrong page. Stream every matching row and retain only the smallest
-    # `limit + 1` by `open_ts`, then render them in ascending order.
-    table = await asyncio.to_thread(
-        _read_earliest_bars, store, query, keep=limit + 1
-    )
+        # Pagination metadata is a single-Instrument feature: it needs both
+        # `instrument` and `limit` (limit=0 counts) to be unambiguous.
+        paginated = query.instrument is not None and query.limit is not None
+        if not paginated:
+            table = read.read_bars(limit=query.limit)
+            return {"bars": table_to_messages(table)}
 
-    has_more = table.num_rows > limit
-    next_start: str | None = None
-    if has_more:
-        next_ns = table.column("open_ts").cast(pa.int64())[limit].as_py()
-        next_start = ns_to_iso(next_ns)
-    return JSONResponse(
-        {
+        assert query.limit is not None  # narrowed by `paginated`
+        limit = query.limit
+        # The paginated JSON surface has an explicit ordering contract:
+        # open_ts ascending. Storage order is not ordered (the Manifest is
+        # append-ordered and files may overlap), so reading `limit + 1` rows
+        # first would pick the wrong page. Stream every matching row and
+        # retain only the smallest `limit + 1` by `open_ts`, then render them
+        # in ascending order.
+        table = _read_earliest_bars(read, keep=limit + 1)
+
+        has_more = table.num_rows > limit
+        next_start: str | None = None
+        if has_more:
+            next_ns = table.column("open_ts").cast(pa.int64())[limit].as_py()
+            next_start = ns_to_iso(next_ns)
+        return {
             "bars": table_to_messages(table.slice(0, limit)),
             "page": {"has_more": has_more, "next_start": next_start},
         }
-    )
 
 
 # -- Arrow stream -----------------------------------------------------------
@@ -382,20 +366,29 @@ async def _stream_arrow(
     store: ParquetBarStore,
     query: BarQuery,
 ) -> Response:
-    await asyncio.to_thread(store.validate_schema_version)
-    return StreamingResponse(
-        _arrow_body(store, query),
-        headers={
-            "Content-Type": ARROW_STREAM_MEDIA_TYPE,
-            "Content-Disposition": content_disposition(
-                "inline", f"{query.interval}-bars.arrow"
-            ),
-        },
-    )
+    # Acquire before the response starts so a schema mismatch or a Manifest
+    # race still yields the stable JSON error envelope.
+    read = await asyncio.to_thread(_open_store_read, store, query)
+    try:
+        return StreamingResponse(
+            _arrow_body(read, query),
+            headers={
+                "Content-Type": ARROW_STREAM_MEDIA_TYPE,
+                "Content-Disposition": content_disposition(
+                    "inline", f"{query.interval}-bars.arrow"
+                ),
+            },
+            # Safety net when the client disconnects before the body iterator
+            # is ever started; the normal path closes in `_arrow_body`.
+            background=BackgroundTask(read.close),
+        )
+    except BaseException:
+        read.close()
+        raise
 
 
 async def _arrow_body(
-    store: ParquetBarStore,
+    read: StoreRead,
     query: BarQuery,
 ) -> AsyncIterator[bytes]:
     sink = _ChunkSink()
@@ -403,7 +396,7 @@ async def _arrow_body(
     wrote_any = False
     closed = False
     try:
-        async for batch in _iter_batches(store, query):
+        async for batch in _iter_batches(read, query):
             writer.write_batch(batch)
             wrote_any = True
             chunk = sink.drain()
@@ -421,6 +414,7 @@ async def _arrow_body(
         if not closed:
             writer.close()
             sink.drain()
+        read.close()
 
 
 # -- CSV stream -------------------------------------------------------------
@@ -430,40 +424,54 @@ async def _stream_csv(
     store: ParquetBarStore,
     query: BarQuery,
 ) -> Response:
-    await asyncio.to_thread(store.validate_schema_version)
-    return StreamingResponse(
-        _csv_body(store, query),
-        headers={
-            "Content-Type": CSV_MEDIA_TYPE,
-            "Content-Disposition": content_disposition(
-                "inline", f"{query.interval}-bars.csv"
-            ),
-        },
-    )
+    read = await asyncio.to_thread(_open_store_read, store, query)
+    try:
+        return StreamingResponse(
+            _csv_body(read, query),
+            headers={
+                "Content-Type": CSV_MEDIA_TYPE,
+                "Content-Disposition": content_disposition(
+                    "inline", f"{query.interval}-bars.csv"
+                ),
+            },
+            background=BackgroundTask(read.close),
+        )
+    except BaseException:
+        read.close()
+        raise
 
 
 async def _csv_body(
-    store: ParquetBarStore,
+    read: StoreRead,
     query: BarQuery,
 ) -> AsyncIterator[bytes]:
-    yield (",".join(BAR_SCHEMA.names) + "\n").encode("utf-8")
-    async for batch in _iter_batches(store, query):
-        text = _batch_to_csv(batch)
-        if text:
-            yield text.encode("utf-8")
+    try:
+        yield (",".join(BAR_SCHEMA.names) + "\n").encode("utf-8")
+        async for batch in _iter_batches(read, query):
+            text = _batch_to_csv(batch)
+            if text:
+                yield text.encode("utf-8")
+    finally:
+        read.close()
 
 
 async def _iter_batches(
-    store: ParquetBarStore,
+    read: StoreRead,
     query: BarQuery,
 ) -> AsyncIterator[pa.RecordBatch]:
     """Iterate Bar batches on worker threads so the event loop stays free."""
-    iterator = _iter_store_batches(store, query, limit=query.limit)
-    while True:
-        batch = await asyncio.to_thread(next, iterator, _END_OF_BATCHES)
-        if batch is _END_OF_BATCHES:
-            return
-        yield batch
+    iterator = read.iter_batches(limit=query.limit)
+    try:
+        while True:
+            batch = await asyncio.to_thread(next, iterator, _END_OF_BATCHES)
+            if batch is _END_OF_BATCHES:
+                return
+            yield batch
+    finally:
+        # On client disconnect `next` may still be running on its worker
+        # thread; the lease is released by the caller either way.
+        with suppress(ValueError):  # pragma: no cover - generator executing
+            iterator.close()
 
 
 def _batch_to_csv(batch: pa.RecordBatch) -> str:
@@ -538,8 +546,9 @@ def _write_export_file(store: ParquetBarStore, query: BarQuery) -> Path:
     path = tempdir / f"{query.interval}-bars.{spec.suffix}"
 
     try:
-        batches = _iter_store_batches(store, query, limit=query.limit)
-        spec.writer(batches, path, store)
+        with _open_store_read(store, query) as read:
+            batches = read.iter_batches(limit=query.limit)
+            spec.writer(batches, path, store)
     except Exception:
         shutil.rmtree(tempdir, ignore_errors=True)
         raise

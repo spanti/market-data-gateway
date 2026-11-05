@@ -1,11 +1,13 @@
 """Replay Session value objects, Replay Protocol parsing and the push loops.
 
-One `ReplaySession` owns one daemon worker thread plus a heartbeat thread. The
-worker reads all matching Bars, then publishes them one ZMQ message per Bar
+One `ReplaySession` owns one daemon worker thread. The worker acquires one
+Manifest Snapshot and one Dataset Read Lease for the whole Session, reads all
+matching Bars, then publishes them one ZMQ message per Bar
 (`[topic][Arrow IPC stream]`) and finishes with an End of Session control
-message. The heartbeat thread keeps `_sessions/<id>.lock` fresh so
+message. The lease's heartbeat keeps `_sessions/<id>.lock` fresh so
 Compaction / GC cannot delete the Dataset mid-session — including while the
-session is paused.
+session is paused — and its subscription records preserve the existing
+partition-protection behaviour.
 
 Three Replay Modes share the same deterministic ordering and End of Session:
 
@@ -36,16 +38,12 @@ from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import datetime_to_ns, iso_to_ns, ns_to_iso
 from mdgw.replay.clock import ReplayClock, validate_speed
-from mdgw.replay.source import ReplayBarSource
-from mdgw.store.session_locks import (
-    create_session_lock,
-    refresh_session_lock,
-    release_session_lock,
-)
+from mdgw.replay.source import ReplayBarSource, interval_ns
+from mdgw.store.parquet_dataset import BarReadQuery
 
 if TYPE_CHECKING:
     from mdgw.core.bar import Bar
-    from mdgw.store.parquet_dataset import ParquetBarStore
+    from mdgw.store.parquet_dataset import ParquetBarStore, StoreRead
 
 logger = logging.getLogger(__name__)
 
@@ -216,7 +214,7 @@ class ReplaySession:
     (notably `step`) responsive even when a publish blocks.
     """
 
-    def __init__(
+    def __init__(  # ruff: ignore[too-many-arguments] - explicit publish seam
         self,
         session_id: str,
         spec: ReplaySessionSpec,
@@ -238,9 +236,7 @@ class ReplaySession:
         self._state_lock = threading.Lock()
         self._cancel = threading.Event()
         self._finished = threading.Event()
-        self._heartbeat_stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._heartbeat_thread: threading.Thread | None = None
         self._reason = "exhausted"
 
         # Cursor / clock / Step Credit state, guarded by `_cond`.
@@ -425,17 +421,6 @@ class ReplaySession:
         except Exception:  # pragma: no cover - defensive
             logger.exception("Replay Session %s failed", self.session_id)
         finally:
-            self._heartbeat_stop.set()
-            if self._heartbeat_thread is not None:
-                self._heartbeat_thread.join(
-                    timeout=max(1.0, self._heartbeat_s * 2)
-                )
-            try:
-                release_session_lock(self._store.dataset_root, self.session_id)
-            except Exception:  # pragma: no cover - defensive cleanup
-                logger.exception(
-                    "Failed to release Replay Session lock %s", self.session_id
-                )
             self._set_state(
                 SessionState.STOPPED
                 if self._reason == "stopped"
@@ -445,72 +430,91 @@ class ReplaySession:
 
     def _run_worker(self) -> None:
         self._set_state(SessionState.RUNNING)
-        create_session_lock(
-            self._store.dataset_root,
-            self.session_id,
+        read = None
+        try:
+            try:
+                read = self._open_session_read()
+                bars = (
+                    []
+                    if read is None or self._cancel.is_set()
+                    else self._source.read(
+                        self.spec.subscriptions,
+                        start_ts_ns=self.spec.start_ts_ns,
+                        end_ts_ns=self.spec.end_ts_ns,
+                        read=read,
+                    )
+                )
+            except Exception:  # pragma: no cover - defensive, surfaced via log
+                logger.exception(
+                    "Replay Session %s failed while reading its Bars",
+                    self.session_id,
+                )
+                bars = []
+
+            with self._cond:
+                self._bars = bars
+                self._close_ts_ns = [
+                    datetime_to_ns(bar.close_ts) for bar in bars
+                ]
+                self._cursor = 0
+                # Start the clock *after* the read; reading time must not
+                # consume replay time. A session paused during the read stays
+                # paused at `start_ts`.
+                self._clock.start(self.spec.start_ts_ns)
+                self._clock_started = True
+                if self._paused and not self._clock.paused:
+                    self._clock.pause()
+                if self._pending_seek_ns is not None:
+                    pending = self._pending_seek_ns
+                    self._pending_seek_ns = None
+                    # Credits granted *after* the seek are intentionally
+                    # preserved; the seek already reset the credits it saw.
+                    self._cursor = bisect_left(self._close_ts_ns, pending)
+                    self._clock.seek(pending)
+
+            if self._cancel.is_set():
+                self._reason = "stopped"
+            elif self.spec.replay_mode == "step":
+                self._reason = self._run_step(bars)
+            elif self.spec.replay_mode == "realtime":
+                self._reason = self._run_realtime(bars)
+            else:
+                self._reason = self._run_asap(bars)
+
+            if self._cancel.is_set():
+                self._reason = "stopped"
+
+            self._publish_end_of_session(self._reason)
+        finally:
+            # Normal completion, exception, cancellation and a failed read all
+            # release the whole-Session lease here.
+            if read is not None:
+                read.close()
+
+    def _open_session_read(self) -> StoreRead | None:
+        """Acquire the Session's one fixed Snapshot and one Lease."""
+        if self._cancel.is_set():
+            return None
+        queries = tuple(
+            BarReadQuery(
+                instrument_id=subscription.instrument_id,
+                interval=subscription.interval,
+                # `close_ts >= start_ts` is equivalent to
+                # `open_ts >= start_ts - interval`.
+                start_ns=self.spec.start_ts_ns - interval_ns(subscription.interval),
+                end_ns=self.spec.end_ts_ns,
+            )
+            for subscription in self.spec.subscriptions
+        )
+        return self._store.open_read(
+            queries=queries,
+            lease_id=self.session_id,
             subscriptions=[
                 subscription.as_lock_record()
                 for subscription in self.spec.subscriptions
             ],
+            lease_heartbeat_s=self._heartbeat_s,
         )
-        self._heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop,
-            name=f"mdgw-replay-heartbeat-{self.session_id}",
-            daemon=True,
-        )
-        self._heartbeat_thread.start()
-
-        try:
-            bars = (
-                []
-                if self._cancel.is_set()
-                else self._source.read(
-                    self.spec.subscriptions,
-                    start_ts_ns=self.spec.start_ts_ns,
-                    end_ts_ns=self.spec.end_ts_ns,
-                )
-            )
-        except Exception:  # pragma: no cover - defensive, surfaced via log
-            logger.exception(
-                "Replay Session %s failed while reading its Bars",
-                self.session_id,
-            )
-            bars = []
-
-        with self._cond:
-            self._bars = bars
-            self._close_ts_ns = [
-                datetime_to_ns(bar.close_ts) for bar in bars
-            ]
-            self._cursor = 0
-            # Start the clock *after* the read; reading time must not
-            # consume replay time. A session paused during the read stays
-            # paused at `start_ts`.
-            self._clock.start(self.spec.start_ts_ns)
-            self._clock_started = True
-            if self._paused and not self._clock.paused:
-                self._clock.pause()
-            if self._pending_seek_ns is not None:
-                pending = self._pending_seek_ns
-                self._pending_seek_ns = None
-                # Credits granted *after* the seek are intentionally
-                # preserved; the seek already reset the credits it saw.
-                self._cursor = bisect_left(self._close_ts_ns, pending)
-                self._clock.seek(pending)
-
-        if self._cancel.is_set():
-            self._reason = "stopped"
-        elif self.spec.replay_mode == "step":
-            self._reason = self._run_step(bars)
-        elif self.spec.replay_mode == "realtime":
-            self._reason = self._run_realtime(bars)
-        else:
-            self._reason = self._run_asap(bars)
-
-        if self._cancel.is_set():
-            self._reason = "stopped"
-
-        self._publish_end_of_session(self._reason)
 
     # -- push loops --------------------------------------------------------
 
@@ -579,19 +583,6 @@ class ReplaySession:
         self._publish_bar(bar)
         with self._cond:
             self._bars_sent += 1
-
-    def _heartbeat_loop(self) -> None:
-        while not self._heartbeat_stop.wait(self._heartbeat_s):
-            try:
-                refresh_session_lock(self._store.dataset_root, self.session_id)
-            except FileNotFoundError:  # pragma: no cover - lock already released
-                return
-            except OSError:  # pragma: no cover - transient file-system issue
-                logger.warning(
-                    "Failed to refresh Replay Session lock %s",
-                    self.session_id,
-                    exc_info=True,
-                )
 
     # -- wire format -------------------------------------------------------
 

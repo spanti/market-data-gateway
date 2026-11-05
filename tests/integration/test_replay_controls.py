@@ -255,6 +255,10 @@ class _BlockingReadStore:
     def dataset_root(self) -> Path:
         return self._inner.dataset_root
 
+    def open_read(self, **kwargs: Any):
+        assert self._gate.wait(5), "test never released the read gate"
+        return self._inner.open_read(**kwargs)
+
     def iter_batches(self, **kwargs: Any):
         assert self._gate.wait(5), "test never released the read gate"
         yield from self._inner.iter_batches(**kwargs)
