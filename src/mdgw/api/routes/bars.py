@@ -396,7 +396,9 @@ async def _arrow_body(
     wrote_any = False
     closed = False
     try:
-        async for batch in _iter_batches(read, query):
+        # Only this call site chooses the DuckDB Relation Arrow Reader. JSON,
+        # CSV and export keep the existing PyArrow scan.
+        async for batch in _iter_arrow_batches(read, query):
             writer.write_batch(batch)
             wrote_any = True
             chunk = sink.drain()
@@ -459,8 +461,31 @@ async def _iter_batches(
     read: StoreRead,
     query: BarQuery,
 ) -> AsyncIterator[pa.RecordBatch]:
-    """Iterate Bar batches on worker threads so the event loop stays free."""
+    """Iterate the existing PyArrow Bar batches on worker threads."""
     iterator = read.iter_batches(limit=query.limit)
+    async for batch in _pump_batches(iterator):
+        yield batch
+
+
+async def _iter_arrow_batches(
+    read: StoreRead,
+    query: BarQuery,
+) -> AsyncIterator[pa.RecordBatch]:
+    """Iterate DuckDB Relation Arrow Reader batches on worker threads."""
+    iterator = read.iter_arrow_batches(limit=query.limit)
+    async for batch in _pump_batches(iterator):
+        yield batch
+
+
+async def _pump_batches(
+    iterator: Iterator[pa.RecordBatch],
+) -> AsyncIterator[pa.RecordBatch]:
+    """Move one blocking batch pull at a time off the event loop.
+
+    On client disconnect `next` may still be running on its worker thread; the
+    StoreRead close path interrupts the DuckDB scan and the lease is released
+    by the caller either way.
+    """
     try:
         while True:
             batch = await asyncio.to_thread(next, iterator, _END_OF_BATCHES)
@@ -468,8 +493,6 @@ async def _iter_batches(
                 return
             yield batch
     finally:
-        # On client disconnect `next` may still be running on its worker
-        # thread; the lease is released by the caller either way.
         with suppress(ValueError):  # pragma: no cover - generator executing
             iterator.close()
 

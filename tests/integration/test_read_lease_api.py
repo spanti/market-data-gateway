@@ -90,6 +90,10 @@ class _RecordingRead:
         self._record("iter_batches")
         yield from self._inner.iter_batches(*args, **kwargs)
 
+    def iter_arrow_batches(self, *args, **kwargs):
+        self._record("iter_arrow_batches")
+        yield from self._inner.iter_arrow_batches(*args, **kwargs)
+
     def close(self) -> None:
         self._record("close")
         self._inner.close()

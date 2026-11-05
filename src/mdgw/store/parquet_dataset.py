@@ -32,6 +32,12 @@ from mdgw.core.schema import (
     schema_json,
 )
 from mdgw.core.time import datetime_to_ns, ns_to_iso
+from mdgw.store.duckdb_reader import (
+    DuckDBArrowScanner,
+    DuckDBConnectionCache,
+    DuckDBOptions,
+    ensure_supported_duckdb,
+)
 from mdgw.store.maintenance import (
     CompactionReport,
     GCReport,
@@ -88,7 +94,14 @@ class ParquetBarStore:
         schema_version: int = DATASET_SCHEMA_VERSION,
         session_lock_timeout_s: int = DEFAULT_LOCK_TIMEOUT_S,
         read_lease_heartbeat_s: float | None = None,
+        duckdb: DuckDBOptions | None = None,
     ) -> None:
+        # The DuckDB 2.x Relation Arrow Reader is a formal runtime dependency,
+        # not an optional engine: fail at Store/app startup, never at request
+        # time and never with a 1.x fallback.
+        ensure_supported_duckdb()
+        self.duckdb = duckdb if duckdb is not None else DuckDBOptions()
+        self.duckdb_connections = DuckDBConnectionCache(self.duckdb)
         self.root = Path(root)
         self.dataset_root = self.root / DATASET_NAME
         self.compression = compression
@@ -231,7 +244,7 @@ class ParquetBarStore:
         start_ns: int | None = None,
         end_ns: int | None = None,
         queries: Sequence[BarReadQuery] | None = None,
-        batch_size: int = DEFAULT_BATCH_SIZE,
+        batch_size: int | None = None,
         lease_id: str | None = None,
         subscriptions: Sequence[dict[str, str]] | None = None,
         lease_heartbeat_s: float | None = None,
@@ -287,7 +300,11 @@ class ParquetBarStore:
             lease_id=lease_id,
             subscriptions=subscriptions,
             heartbeat_s=heartbeat_s,
-            batch_size=batch_size,
+            batch_size=(
+                batch_size
+                if batch_size is not None
+                else DEFAULT_BATCH_SIZE
+            ),
         )
 
     def iter_batches(  # ruff: ignore[too-many-arguments] - keyword-only query filters
@@ -298,7 +315,7 @@ class ParquetBarStore:
         start_ns: int | None = None,
         end_ns: int | None = None,
         limit: int | None = None,
-        batch_size: int = DEFAULT_BATCH_SIZE,
+        batch_size: int | None = None,
     ):
         """Yield Bar RecordBatches from one fixed Manifest Snapshot.
 
@@ -537,6 +554,7 @@ class StoreRead:
         self._close_lock = threading.Lock()
         self._scans = 0
         self._yielded = False
+        self._active_scanner: DuckDBArrowScanner | None = None
 
     @property
     def closed(self) -> bool:
@@ -589,6 +607,57 @@ class StoreRead:
         finally:
             _close_parquet_files(opened)
 
+    def iter_arrow_batches(  # ruff: ignore[too-many-arguments] - keyword-only query filters
+        self,
+        *,
+        instrument_id: Any = _UNSET,
+        interval: Any = _UNSET,
+        start_ns: Any = _UNSET,
+        end_ns: Any = _UNSET,
+        limit: int | None = None,
+        batch_size: int | None = None,
+    ):
+        """Yield contract Bar RecordBatches from DuckDB's Relation Arrow Reader.
+
+        This is the ticket-05 migration seam: only call sites that explicitly
+        choose it (the REST Arrow response) use DuckDB. It reads exactly the
+        active Data Files of this read's fixed Manifest Snapshot, streams
+        bounded batches and holds the Read Lease until the generator finishes,
+        fails or is closed.
+        """
+        self._ensure_open()
+        query = self._resolve_query(instrument_id, interval, start_ns, end_ns)
+        self._scans += 1
+        effective_batch_size = (
+            batch_size
+            if batch_size is not None
+            else self._store.duckdb.arrow_batch_size
+        )
+        groups = self._arrow_scan_groups(query)
+        if not groups or limit == 0:
+            return
+
+        scanner = DuckDBArrowScanner(self._store.duckdb_connections)
+        with self._close_lock:
+            if self._closed:
+                msg = "StoreRead is closed"
+                raise RuntimeError(msg)
+            self._active_scanner = scanner
+        try:
+            for batch in scanner.batches(
+                groups,
+                query,
+                batch_size=effective_batch_size,
+                limit=limit,
+            ):
+                self._yielded = True
+                yield batch
+        finally:
+            scanner.close()
+            with self._close_lock:
+                if self._active_scanner is scanner:
+                    self._active_scanner = None
+
     def count(
         self,
         *,
@@ -631,13 +700,17 @@ class StoreRead:
         return pa.Table.from_batches(batches, schema=BAR_SCHEMA)
 
     def close(self) -> None:
-        """Release the lease. Safe to call repeatedly and from any thread."""
+        """Release the lease and any DuckDB scan. Safe from any thread."""
         with self._close_lock:
             if self._closed:
                 return
             self._closed = True
             lease = self.lease
             self.lease = None
+            scanner = self._active_scanner
+            self._active_scanner = None
+        if scanner is not None:
+            scanner.close()
         if lease is not None:
             lease.close()
 
@@ -700,6 +773,39 @@ class StoreRead:
                 self._reacquire()
         return []
 
+    def _arrow_scan_groups(
+        self, query: BarReadQuery
+    ) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        """Explicit Data Files per partition interval, after a miss retry.
+
+        Selecting entries and checking that their files exist happens before a
+        DuckDB connection is opened, exactly like the PyArrow path. A missing
+        file before any row was produced may switch to a newer Snapshot once;
+        after that it is a read failure, never a silently short result.
+        """
+        dataset_root = self._store.dataset_root
+        for attempt in range(MANIFEST_REFRESH_ATTEMPTS):
+            entries = _select_entries(
+                self.snapshot.entries,
+                instrument_id=query.instrument_id,
+                interval=query.interval,
+                start_ns=query.start_ns,
+                end_ns=query.end_ns,
+            )
+            paths = [dataset_root / str(entry["path"]) for entry in entries]
+            missing = [path for path in paths if not path.is_file()]
+            if not missing:
+                return _group_scan_files(entries, dataset_root)
+            if (
+                self._scans > 1
+                or self._yielded
+                or attempt + 1 >= MANIFEST_REFRESH_ATTEMPTS
+            ):
+                msg = f"Data File is missing from the selected Snapshot: {missing[0]}"
+                raise FileNotFoundError(msg)
+            self._reacquire()
+        return ()
+
     def _reacquire(self) -> None:
         lease = self.lease
         self.lease = None
@@ -713,6 +819,27 @@ class StoreRead:
         )
         self.snapshot = snapshot
         self.lease = new_lease
+
+
+def _group_scan_files(
+    entries: Sequence[dict], dataset_root: Path
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Group the selected Data Files by their Hive partition Interval.
+
+    The physical Parquet file omits `interval`; every file in one partition
+    carries the same value, so the Store restores it per batch without making
+    DuckDB infer partitions from the Dataset root layout.
+    """
+    groups: dict[str, list[str]] = {}
+    for entry in entries:
+        partition = entry.get("partition") or {}
+        interval = str(partition.get("interval", ""))
+        groups.setdefault(interval, []).append(
+            str(dataset_root / str(entry["path"]))
+        )
+    return tuple(
+        (interval, tuple(files)) for interval, files in groups.items()
+    )
 
 
 def _select_for_queries(
