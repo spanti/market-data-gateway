@@ -78,9 +78,10 @@ row_group_size = 1000000
 flush_max_bytes = 67108864
 flush_max_age_s = 3600
 
-# DuckDB 2.x Relation Arrow Reader resources for
-# `/api/v1/bars?format=arrow`. This is not an engine switch: JSON, CSV and
-# export keep the PyArrow scan. `temp_directory` unset uses DuckDB's default.
+# DuckDB 2.x Relation Arrow Reader resources for every Bars read path
+# (REST JSON/Arrow/CSV/export, Backfill and Replay). This is not an engine
+# switch: DuckDB 2.x is required and there is no fallback. `temp_directory`
+# unset uses DuckDB's default.
 [storage.duckdb]
 memory_limit = "1GB"
 threads = 4

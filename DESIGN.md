@@ -48,13 +48,14 @@
 ### 2.3 数据流
 
 ```
-Feed Handler(1m klines) ──▶ Normalize ──▶ Bar Aggregation ──▶ Parquet (data files)
-                                                  │
-                                                  ├──▶ ZMQ PUB (market.bar.*) ──▶ api ──▶ WS / ZMQ 消费者
-                                                  └──▶ HWM (SQLite)
+Feed Handler(1m klines) ──▶ Normalize (Polars batch) ──▶ Bar Aggregation ──▶ Parquet Data Files + Manifest
+                                      │                         │
+                                      │ rejected rows           ├──▶ ZMQ PUB (market.bar.*) ──▶ api ──▶ WS / ZMQ 消费者
+                                      ▼                         └──▶ HWM (SQLite)
+                             Quarantine Dataset
 
-Parquet ──▶ replay (Replay Clock) ──▶ ZMQ PUB (replay.<session>.*)
-Parquet ──▶ api REST history ──▶ JSON / Arrow IPC / CSV
+Manifest Snapshot + Read Lease ──▶ Store (DuckDB explicit file list) ──▶ replay (Replay Clock) ──▶ ZMQ PUB (replay.<session>.*)
+                                                                     └──▶ api REST history ──▶ JSON / Arrow IPC / CSV
 ```
 
 ## 3. 公开接口
@@ -147,14 +148,17 @@ data/
   instruments/snapshot-<config_hash>.parquet
 ```
 
-- **所有层级统一为 Hive 风格 `key=value`**，使 `pyarrow.dataset` 能按分区裁剪；`bars` 是 Dataset 根。
+- **所有层级统一为 Hive 风格 `key=value`**；Manifest 条目记录同一组分区字段，读取前据此裁剪到 Instrument、Interval 与文件时间范围，物理 Data File 保持自包含。`bars` 是 Dataset 根。
 - `file_symbol` = URL 百分号编码后的 `symbol`，例如 `BTC%2FUSDT`；`instrument_id` 始终保存在行内。
 - 每个 Dataset 根目录放 `_dataset.json`（`schema_version`、Arrow schema 的 JSON 表示、分区规范、文件命名规范）与 `_manifest.json`（当前活跃的 Data File 清单）。
 - Data File：`data-<start_ns>-<end_ns>-<uuid>.parquet`，**一经写入内容不变**；compaction 通过写入新文件并把旧文件标记为 inactive 来实现（见 §5.5）。
 - 写入参数：`version="2.6"`（只有 2.6 原生支持 ns 时间戳；1.0/2.4 会截断为 µs）、`use_deprecated_int96_timestamps=False`、`compression="zstd"`、`row_group_size=1_000_000`、单文件目标 **64–256MB**（Bar 体量小，通常由 compaction 达成）。
-- 读取一律走 `pyarrow.dataset`，按 `instrument_id`/时间范围下推过滤。
-- 读取方若 `schema_version` 不匹配则**直接报错**（`schema_version_mismatch`），不猜测、不降级。
+- **读取路径只有一个门面**：`ParquetBarStore`。每次 HTTP 请求或 Replay Session 开始时解析一个固定的 Manifest Snapshot，为所选分区/月份获取 Dataset Read Lease，再把该 Snapshot 的显式 Data File 列表交给 DuckDB 2.x Relation Arrow Reader。禁止对 Dataset 根目录 glob，禁止 DuckDB 原生权威表、第二份 Catalog 或生产引擎开关。
+- 同一 HTTP 请求的 count、存在性探测和实际读取共享一个 Snapshot 与 Lease；不同分页请求各自使用新 Snapshot。Replay Session 固定一个 Snapshot 与 Lease 直到结束，包括暂停与 seek。
+- DuckDB 只返回 Arrow RecordBatch；Store 在 Arrow 边界恢复 `BAR_SCHEMA` 的字段顺序、nullability、Decimal、UTC 纳秒与 Hive `interval`。除确有读取变换需求外不进入 Polars。PyArrow 仍用于 Data File 写入、Arrow IPC/ZMQ、export、Compaction 与测试。
+- Lease 覆盖 Reader 的完整生命周期；Compaction/GC 遇到有效 Lease 时跳过并报告，过期心跳在超时后失效。读取方若 `schema_version` 不匹配则**直接报错**（`schema_version_mismatch`），不猜测、不降级。
 - 分区按 `open_ts` 的 UTC 年月。
+- 读取失败是明确失败，不能转换成空结果或短结果；非分页 REST 输出不承诺全序（见 §4.1 与 ADR-0013/0015）。
 
 ### 3.3 Streaming Interface：Topic 与 Message Envelope
 
@@ -186,10 +190,13 @@ stop(session_id)
   - `asap`：不做任何等待，尽可能快地推送（Replay Clock 不节流）。
   - `realtime`：按 `speed`（默认 1.0）以 Replay Clock 节流。
   - `step`：客户端每次 `step(n)` 授予 n 个 Step Credit，服务端最多推 n 条。
-- **排序**：所有订阅按 `close_ts`（即 envelope 的 `event_ts`）归并；同一时刻以 `instrument_id`、再以 `seq` 定序。
-- 数据耗尽推送一次 End of Session（控制消息或专用 topic `replay.<session_id>.control`）。
-- `seek` 只允许在 `pause` 状态下执行。
-- 同一进程支持多个会话（默认上限 4），会话之间互不影响。
+- **过滤与去重**：`start_ts` 闭区间、`end_ts` 开区间，均作用于 `close_ts`；物理 `open_ts` 扫描下界向前放宽一个 Bar Interval。同一 `(instrument_id, interval, open_ts)` 只保留最大 `revision`，同 Revision 再取最新 `ingest_ts`；重复订阅在查询前折叠。
+- **排序**：所有订阅按 `close_ts`（即 envelope 的 `event_ts`）、`instrument_id`、`seq`（NULL 最后）、`interval`、`open_ts` 五键全序归并。
+- **有界读取**：三种 Replay Mode 都消费 DuckDB 的有界 Arrow 批次和容量为 `[replay].prefetch_batches` 的有界预取，不在发布首条消息前物化整个范围。`asap` 只是不做 Clock 节流。
+- **固定快照与 seek**：Session 的 Manifest Snapshot 与 Dataset Read Lease 覆盖整个生命周期，包括暂停和 seek。`seek` 只允许在 `pause` 状态下执行，递增查询代际并在同一 Snapshot 上重开查询；旧代际的批次、错误和结束信号被丢弃。seek 前的 Step Credits 丢弃，seek 后的 Credits 保留；Clock 在新代际首个批次就绪时才重新锚定，读取 I/O 不消耗虚拟时间。
+- **取消与资源**：`stop`、seek 关闭旧查询前会 interrupt DuckDB 读取并释放 Reader/连接；Session 结束时 `StoreRead.close()` 释放 Lease。读取期间的 `pause`、`resume`、`set_speed`、`stop`、`step` 继续有效。
+- **End of Session**：数据耗尽推送一次 `reason="exhausted"`，主动停止推送 `reason="stopped"`；读取失败推送 `reason="error"` 与 `error: {code, message}`，保留实际 `bars_sent`。失败码为 `schema_version_mismatch` 或 `internal_error`，消息已 sanitized；SDK 抛出 `ReplayFailedError`。失败不会被伪装成空回放或正常耗尽。详见 [ADR-0015](docs/adr/0015-bounded-replay-with-explicit-failure-termination.md)。
+- 同一进程支持多个会话（默认 `[replay].max_sessions = 4`），会话之间互不影响。
 
 ## 4. HTTP 与 WebSocket API
 
@@ -209,7 +216,8 @@ GET /metrics
 ```
 
 - `interval` 必填。
-- 分页只用时间游标（Time Cursor），不支持 offset 或不透明 cursor。分页元数据只对同时带 `instrument` 与 `limit` 的 JSON 查询生效：响应为 `{"bars": [...], "page": {"has_more": ..., "next_start": ...}}`；`next_start` 是第一条未返回 Bar 的 `open_ts`（ISO-8601 纳秒字符串），下一次作为闭区间 `start` 使用。`limit=0` 返回空 `bars` 但仍报告 `has_more` / `next_start`；分页 JSON 按 `open_ts` 升序，非分页 JSON、Arrow、CSV 与 export 保持存储顺序。多 Instrument 与 `/api/v1/instruments` 不提供分页（[ADR-0012](docs/adr/0012-single-instrument-pagination.md)）。
+- 分页只用时间游标（Time Cursor），不支持 offset 或不透明 cursor。分页元数据只对同时带 `instrument` 与 `limit` 的 JSON 查询生效：响应为 `{"bars": [...], "page": {"has_more": ..., "next_start": ...}}`；`next_start` 是第一条未返回 Bar 的 `open_ts`（ISO-8601 纳秒字符串），下一次作为闭区间 `start` 使用。`limit=0` 返回空 `bars` 但仍报告 `has_more` / `next_start`；分页 JSON 按 `open_ts` 升序，非分页 JSON、Arrow、CSV 与 export **不承诺全序，也不承诺物理存储顺序**。多 Instrument 与 `/api/v1/instruments` 不提供分页（[ADR-0012](docs/adr/0012-single-instrument-pagination.md)）。
+- REST 历史查询（JSON、Arrow、CSV、export 与分页 JSON）返回全部已存储 raw Revisions，不按 revision 去重；JSON 的 100,000 行上限按 raw Revision 行数计算。Replay 才按最大 Revision / 最新 `ingest_ts` 选择并应用五键排序。Revision-heavy 数据下的 Time Cursor 重复/不可达问题是独立契约缺口（[`docs/revision-heavy-time-cursor.md`](docs/revision-heavy-time-cursor.md)），本次存储迁移不修复。
 - `format=arrow`：流式 Arrow IPC（decimal128 原样）；`format=csv`：流式 CSV（decimal 输出十进制原文，禁止经过 float）；`format=json`：仅允许小范围，超过 100,000 行返回 `range_too_large`，decimal 以字符串输出。
 - `format=arrow|csv` 无行数上限，边读边发，不把结果全量放进内存。
 - `export` 把同一读取器的结果落成一个 Parquet/Arrow 文件返回（一次性大文件下载）。
@@ -280,13 +288,14 @@ GET /metrics
 - 默认关闭；配置开启后按 Data Type 保留（默认 `bars_days=0`，即永久）。
 - 只删除**整月分区**，跳过当前月；绝不重写 Data File。
 - `mdgw gc --dry-run`（默认）与 `mdgw gc --apply`。
-- 回放会话在 `_sessions/` 写心跳锁；GC 跳过有活跃锁的 Dataset。
+- 每次选中 Data Files 的读取与每个 Replay Session 在 `_sessions/` 写心跳锁（Dataset Read Lease）；GC 跳过心跳在超时窗口内的分区/月份并在报告中列出。进程崩溃后心跳停止，过期锁自动失效。
 - GC 不影响 Instrument Reference Data 与 HWM。
 
 ### 5.5 写入批次与 Compaction
 
 - 写盘按 `flush_max_bytes=64MB` **或** `flush_max_age_s=3600`（先到者）落一个 Data File。Bar 体量小，1 小时 flush 是为了控制历史接口的新鲜度；实时消费者走 WS/ZMQ。
-- `mdgw compact --older-than 24h` 把同分区内的小 Data File 合并为 64–256MB 的新文件，更新 `_manifest.json` 将旧文件标记 inactive，再删除旧文件。Compaction 只做"新文件 + 清单切换"，不修改任何已存在的文件。
+- `mdgw compact --older-than 24h` 把同分区内的小 Data File 合并为 64–256MB 的新文件，更新 `_manifest.json` 将旧文件标记 inactive，再删除旧文件。Compaction 只做"新文件 + 清单切换"，不修改任何已存在的文件；受有效 Dataset Read Lease 保护的分区跳过并报告。
+- Compaction 不重新 Normalization；新 Manifest 条目的 `rule_versions` 是来源条目集合的并集，Bar 字段值与 Revisions 原样保留。
 - 监控指标：每个 Dataset 的 Data File 数量、中位文件大小、`last_flushed_ts`。中位文件大小持续 <10MB 是必须触发 compaction 的信号。
 
 ### 5.6 ccxt Feed Handler（v1）
@@ -306,6 +315,15 @@ GET /metrics
 
 > 注意：ZeroMQ 的 HWM 指 socket 发送/接收队列上限；§5.2 的 High-Water Mark 指数据水位。两者同名纯属巧合，代码中前者写 `zmq_hwm`，后者写 `data_hwm`。
 
+### 5.8 Normalization、Validation 与 Quarantine
+
+- Collector 每次 `ingest()` 排空 Feed Handler 后得到一个 RawBar 批次；`normalize_batch`（Polars）为整批计算 Instrument、Interval 与 closed-Bar 规则，不为每条消息构造单行 DataFrame。Decimal 在进入 Arrow/Polars 前用 Python `Decimal` 精确校验并拒绝 float 与超 scale 值；时间、`uint32` 与 nullable 字段按 `BAR_SCHEMA` 检查。
+- 该批量规则是唯一规则来源：Live ingest、Backfill 与 archive import 共用它。Feed Handler 继续负责 Venue 协议与闭合状态，archive 继续负责 checksum/ZIP/CSV 与来源时间单位。
+- 实时批次任一 Normalization 或 Instrument Validation 失败时整批拒绝：Aggregation、HWM 与 freshness 不推进，可修复参考数据后重试。Archive 保持整文件原子性；CCXT 单行解析失败只有先成功写入 Quarantine 才能跳过并继续。
+- Quarantine 是独立、版本化的 Dataset（默认 `<storage.root>/quarantine`，禁止放进 Bars Dataset）；Bars Store、REST、export、Compaction 与 Replay 永不读取它。Reason Code、Source Stage、Rule Version、来源定位与结构化详情见 [ADR-0014](docs/adr/0014-polars-batch-normalization-with-quarantine.md) 与 `docs/data-contract.md`。
+- Quarantine 写入 fail-closed：写入失败时对应输入不得确认、跳过或发布，Collector 暴露写入失败与按 stage/reason 的记录指标。默认保留 30 天，`0` 永久；`mdgw quarantine-gc` 默认 dry-run，只清理过期完整 UTC 月份并跳过当前月，`--apply` 才删除。没有后台自动 GC。
+- 新 Data File 的 Manifest 条目记录 `rule_versions`；它是审计元数据，Data Contract Version 仍是读取兼容性的唯一权威。
+
 ## 6. 配置
 
 `config/gateway.toml`（运行配置）示例：
@@ -317,10 +335,22 @@ http_port = 8080
 ws_path = "/ws"
 
 [bus]
-transport = "tcp"        # tcp | ipc（ipc 仅 Linux 默认启用）
-bind_host = "127.0.0.1"
-base_port = 5555
+transport = "tcp"              # 仅单进程 GatewayRuntime 使用；Service Role 总是走显式 tcp://
 zmq_hwm = 10000
+stream_bind_host = "127.0.0.1"
+stream_pub_port = 0            # 0 = 随机端口
+collector_pub_bind = "tcp://127.0.0.1:5555"
+collector_pub_connect = "tcp://127.0.0.1:5555"
+api_pub_bind = "tcp://127.0.0.1:5556"
+api_pub_connect = "tcp://127.0.0.1:5556"
+
+[service]
+health_host = "127.0.0.1"
+collector_health_port = 8081
+replay_health_port = 8082
+log_level = "INFO"
+collector_required = false
+wait_for_api_ready = false
 
 [storage]
 root = "./data"
@@ -331,9 +361,28 @@ compression = "zstd"
 format_version = "2.6"         # 只有 2.6 原生支持 ns 时间戳
 schema_version = 1
 
+[storage.duckdb]
+memory_limit = "1GB"
+threads = 4
+# temp_directory 未设置时使用 DuckDB 自己的默认临时目录
+max_temp_directory_size = "10GB"
+arrow_batch_size = 65536
+
+[storage.quarantine]
+# root 未设置时为 <storage.root>/quarantine，且不得位于 Bars Dataset 内
+schema_version = 1             # 独立于 Bar Data Contract
+rule_version = "polars-1"      # 审计元数据，不是 Schema 权威
+retention_days = 30            # 0 = 永久保留
+
 [retention]
 enabled = false
 bars_days = 0            # 0 = 永久
+
+[collector]
+backfill_hours = 24
+stale_after_s = 120
+state_db_name = "state.db"
+write_queue_size = 10000
 
 [rate_limit]
 enabled = false          # 默认关闭；开启后按 (源 IP, 路由模板) 限流
@@ -359,7 +408,14 @@ base_interval = "1m"
 intervals = ["1m", "5m", "15m", "1h", "1d"]
 
 [replay]
+control_bind_host = "127.0.0.1"
+control_port = 0               # 0 = 随机端口
+publish_bind_host = "127.0.0.1"
+publish_port = 0
 max_sessions = 4
+heartbeat_s = 1.0
+batch_size = 4096              # DuckDB Arrow 批次
+prefetch_batches = 2           # 有界预取深度
 ```
 
 `config/instruments/*.yaml` 示例：
@@ -394,11 +450,12 @@ src/
     ingest/        # FeedHandler Protocol、注册表、ccxt Feed Handler
     normalize/
     aggregate/     # 1m 接收与 Bar Aggregation
-    store/         # Parquet 读写、_dataset.json/_manifest.json、HWM、GC、compaction
+    store/         # Parquet 写入、Manifest Snapshot/Read Lease、DuckDB 读取、GC、compaction
+    quarantine.py  # 独立、版本化的 Quarantine Dataset 与 Retention/GC
     streaming.py   # Streaming Interface：Bar topic 语法、Arrow IPC、PUB/SUB、READY、status/control
-    replay/
+    replay/        # 有界 Replay 查询、Clock、Step Credit、失败终止
     api/           # REST、WebSocket、metrics
-    cli/           # run --service / up / gc / export / compact / backfill --archive
+    cli/           # run --service / up / gc / quarantine-gc / export / compact / backfill --archive
   mdgw_client/     # 薄客户端 SDK（不依赖 mdgw 内部实现）
 tests/
   contract/        # schema 黄金文件、编解码往返、目录布局
@@ -413,7 +470,8 @@ DESIGN.md
 ## 8. 依赖与环境
 
 - 唯一环境：conda `nautilus`（Python 3.13.18），提交 `environment.yml` + `pyproject.toml`，补装 `pytest`。
-- 运行时依赖：`pyarrow`、`pyzmq`、`ccxt`、`fastapi`、`uvicorn`（纯包，不使用 `[standard]` extra）、`websockets`、`msgspec`/`orjson`、`PyYAML`。HTTP/WebSocket 面不再直接依赖 `aiohttp`；它可能仍作为 `ccxt` 的传递依赖出现在环境中。
+- 运行时依赖：`pyarrow`、`duckdb>=2.0,<3`、`polars==2.1.0`、`pyzmq`、`ccxt`、`fastapi`、`uvicorn`（纯包，不使用 `[standard]` extra）、`websockets`、`msgspec`/`orjson`、`PyYAML`。DuckDB 2.x 是正式读取基线，启动时验证；**禁止 1.x**（无法保证 Parquet UTC 纳秒精度），也没有 `use_duckdb` 或旧引擎后备开关。HTTP/WebSocket 面不再直接依赖 `aiohttp`；它可能仍作为 `ccxt` 的传递依赖出现在环境中。
+- 三个技术栈的职责边界：DuckDB 负责 Bars 读取（Manifest Snapshot 下的显式文件列表与 Arrow 批次）；Polars 只负责批量 Normalization（Collector、Backfill、archive），不在读取路径上；PyArrow 负责 Data File 写入、Arrow Schema/IPC/ZMQ、export、Compaction 与测试。
 - **禁止**网关包 import `nautilus_trader`（CI 用 AST 扫描或 import-linter 强制）。
 - `mdgw_client` 只依赖 `pyarrow`、`pyzmq` 与 schema 定义。
 - decimal128 的 pandas 表示：`to_pandas()` 返回 `object` dtype 的 `decimal.Decimal`（pandas 无原生 decimal dtype）；SDK 文档必须写明，避免使用者误用 `astype(float)`。需要高性能数值计算的使用者应留在 Arrow 层或显式量化。
@@ -467,7 +525,10 @@ DESIGN.md
 - **pandas 3 的时间分辨率**：`to_pandas()` 可能把 `timestamp[ns]` 转成 `datetime64[us]`；客户端 SDK 不强制 `coerce_temporal_nanoseconds=True`（该选项在 pandas 3 上会越界或静默损坏 1677 年前的数据），值本身仍精确。
 - **Windows 的 ZMQ ipc**：PyPI 的 Windows wheel 默认禁用 `ipc://`；默认改用 `tcp://127.0.0.1`，`ipc://` 仅 Linux 启用。
 - **PUB/SUB 慢加入**：依赖启动顺序与就绪握手；未来若拆机部署，需引入重连与快照补偿。
-- **Bar Revision 的下游幂等**：接入方必须按最大 revision 去重，文档需显著提示。
+- **Bar Revision 的下游幂等**：接入方必须按最大 revision 去重，文档需显著提示；REST 返回全部 raw Revisions，Replay 才做最大 Revision 选择。
+- **DuckDB 资源与临时磁盘**：分页与 Replay 的全局排序可能落临时磁盘；`[storage.duckdb]` 的 `memory_limit`、`threads`、`temp_directory`、`max_temp_directory_size` 必须按部署显式配置，资源错误必须是明确失败而不是截断。临时文件不是数据副本。
+- **Read Lease 与维护竞态**：Compaction/GC 必须尊重心跳在超时窗口内的 Lease 并在报告中列出跳过；进程崩溃后依赖心跳过期回收，不能靠操作系统删除语义。
+- **Quarantine 容量与可用性**：默认 30 天保留需要运维执行 `mdgw quarantine-gc`；写入 fail-closed 意味着审计存储故障会停止对应输入的消费，这是有意的完整性优先取舍。
 - **Retention 与补采的边界**：REST 回溯上限必须 ≤ Retention，配置加载时校验。
 - **历史接口的新鲜度**：写缓冲意味着最近 1 小时可能查不到；`/status.last_flushed_ts` 必须被客户端尊重。
 - **uvicorn 在后台线程中的启动**：端口 0 必须从自有 socket 解析实际绑定端口；启动失败（例如端口占用或 lifespan startup 异常）要先清理线程、事件循环与 socket，再重抛原始异常，避免孤儿线程。`AsgiServer` 的端口 0 与失败回滚测试覆盖这一风险。
@@ -486,6 +547,10 @@ DESIGN.md
 - 客户端定时拉取（pull）式回放。
 - 用 symbol 原始字符串直接做路径与主键。
 - 按秒 flush 写盘（会造成小文件灾难）。
+- 直接 `pyarrow.dataset` 扫描或对 Dataset 根目录 glob 作为生产读取路径：绕过 Manifest 权威，可能读到 Compaction 已失效的文件，也无法提供统一的 Snapshot/Read Lease 与 Arrow 流式 Reader（[ADR-0013](docs/adr/0013-manifest-aware-duckdb-reads.md)）。
+- DuckDB 原生权威表、物化视图或第二份 Catalog：与不可变 Data File + Manifest 形成第二个真相源。
+- 生产 `use_duckdb` 或旧读取引擎后备开关：会让不同部署产生两套可观察语义，回退应通过回退软件版本完成。
+- Replay 在发布首条消息前全量物化，或把读取失败当作空回放/正常 exhausted（[ADR-0015](docs/adr/0015-bounded-replay-with-explicit-failure-termination.md)）。
 
 ## 13. 联网审查记录（2026-10-30）
 
@@ -498,7 +563,7 @@ DESIGN.md
 5. **pandas 3 时间分辨率**：`timestamp[ns]` 经 `to_pandas()` 可能变为 `datetime64[us]`；`coerce_temporal_nanoseconds=True` 在 pandas 3 上可能导致越界或静默损坏，SDK 不启用它。（来源：pandas 3.0 release notes、PyArrow pandas 文档、SPARK-60499）
 6. **Windows ZMQ ipc**：PyPI Windows wheel 默认禁用 `ipc://`，确认默认使用 `tcp://127.0.0.1`。（来源：pyzmq changelog / issue #1959）
 7. **Arrow IPC 用法**：确认 `pa.ipc.new_stream` / `RecordBatchStreamWriter` 的流式写法；每条 ZMQ 消息封装为完整 IPC stream，并按 100ms/500 条批量发布以摊薄 schema 开销。（来源：Apache Arrow Python IPC 文档）
-8. **分区布局**：为让 `pyarrow.dataset` 正确裁剪，所有层级改为 Hive `key=value` 形式。（来源：PyArrow dataset 分区约定）
+8. **分区布局**：所有层级改为 Hive `key=value` 形式；当时用于 `pyarrow.dataset` 裁剪，现在同一组分区字段由 Manifest Snapshot 在读取前使用。（来源：PyArrow dataset 分区约定）
 9. **价格类型**：确认采用 `decimal128(38, 18)`，JSON 中 decimal 以字符串传输，CSV 输出十进制原文；pandas 侧为 `Decimal` 对象。（决策来源：用户确认，2026-10-30）
 10. **数据粒度**：确认 v1 只做 Bar，不采集逐笔与盘口；1m 用交易所原生 K 线，高周期由 1m 聚合。接受无法做逐 Tick 回放与精确滑点建模的代价。（决策来源：用户确认，2026-10-30；依据：Nautilus 数据粒度文档、Binance K 线一致性讨论、NxCore tick vs minute 对比）
 11. **术语标准化**：废弃 `Channel`、`Roll-up`、`Watermark`、`Pacing`、`Virtual Clock`、`Part File`、`Source`、`Contract` 等自造或冲突词，改用 Data Type、Bar Aggregation、High-Water Mark、Replay Mode、Replay Clock、Data File、Feed Handler、Data Contract。（依据：NautilusTrader、Apache Flink、Apache Iceberg、市场数据行业用法；映射见 GLOSSARY.md）

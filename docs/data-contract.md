@@ -8,7 +8,9 @@ should code against. The gateway also serves `/openapi.json` and `/docs`, but
 those are generated, non-normative documentation: where they disagree with
 this file, this file wins.
 
-v1 carries **Bar** data only. Every payload has `schema_version = 1`.
+v1 carries **Bar** data only. Every Bar payload has `schema_version = 1`.
+The Quarantine audit Dataset is separate: it has its own schema version and is
+never part of the Bar contract or the Bar Dataset.
 
 ## 1. Representation rules
 
@@ -150,8 +152,11 @@ of `0` counts), the response adds a `page` object:
   `null`.
 
 **Ordering contract.** Paginated JSON Bars are ordered by `open_ts`
-ascending. The non-paginated JSON response, Arrow, CSV and export keep the
-storage order and make no total-order promise.
+ascending. The non-paginated JSON response, Arrow, CSV and export do **not**
+promise a total order, and they do not promise physical storage order either:
+the contract is the returned row set (including every raw Revision and
+duplicate row), not its order. Consumers that need a defined `open_ts` order
+must sort themselves or use paginated JSON.
 
 Because one `next_start` value cannot represent per-Instrument progress,
 pagination is not offered for multi-Instrument queries: queries missing
@@ -181,7 +186,8 @@ either `instrument` or `limit` keep exactly the `{"bars": [...]}` shape.
 ## 5. Parquet Dataset layout
 
 The Dataset root is `<data_root>/bars`. Every level is Hive-style
-`key=value` so `pyarrow.dataset` can prune partitions without reading files:
+`key=value`, and the Manifest records the same partition fields so readers can
+prune by Instrument, Interval and time before opening any Data File:
 
 ```
 <data_root>/
@@ -236,8 +242,9 @@ the `partition` map and `rule_versions`.
 Versions that produced the entry's rows. It is **audit metadata only**, not a
 Schema authority:
 
-- New Data Files always record the Rule Versions that actually ran (the live
-  Polars batch rules or the scalar Backfill/archive rules).
+- New Data Files always record the Rule Versions that actually ran. Live
+  ingest, Backfill and archive import all use the same Polars batch rules, so
+  their entries carry the same `polars-1` lineage by default.
 - Entries written before this metadata existed, or with an explicit empty
   list, mean legacy/unknown. Readers must treat a missing or empty
   `rule_versions` as an empty set; no historical version is ever invented and
@@ -258,22 +265,101 @@ The Quarantine Dataset records the same audit identity per rejection in its
 `quarantine_schema_version`. Those two versions and the Bar Data Contract
 Version are separate values with separate meanings.
 
-Raw `pyarrow.dataset` scans of the directory bypass the Manifest and can see
-files that Compaction has already marked inactive. Use the REST API or
-`ParquetBarStore` when Manifest authority matters.
+### Manifest Snapshot and Dataset Read Lease
+
+A reader never scans the Dataset root. At the start of each HTTP request or
+Replay Session the gateway reads `_manifest.json`, takes only
+`active = true` entries, prunes by Instrument, Interval and the entry's
+`start_ns`/`end_ns`, and hands DuckDB the resulting explicit Data File list.
+The Manifest content hash identifies the Snapshot generation; if the Manifest
+changes while the selected files are being leased, the reader releases,
+retries, and never mixes generations. One HTTP request shares one Snapshot for
+its row count, existence probe and read; paginated requests each take a new
+Snapshot. A Replay Session keeps one Snapshot for its whole lifetime,
+including pause and seek; a seek opens a new query against that same Snapshot
+and never admits files published after session creation.
+
+The Snapshot's selected partitions and UTC months are protected by a Dataset
+Read Lease under `bars/_sessions/<id>.lock`. The lease carries a heartbeat and
+is held until the Arrow Reader is finished, cancelled or failed and the read
+is closed. Compaction and GC skip a partition or month protected by a lease
+whose heartbeat is within the 60-second expiry window and report it; a crashed
+process simply stops refreshing, so its lease expires. A lease protects reads
+only; it is not a writer lock and does not become authoritative for which Data
+Files are active.
+
+Raw scans of the directory that bypass the Manifest can see files Compaction
+has already marked inactive. Use the REST API or `ParquetBarStore` when
+Manifest authority matters.
 
 ### Compaction and Retention
 
 - `mdgw compact --older-than <duration>` merges eligible Data Files within a
   partition into one new Data File, then atomically rewrites the Manifest so
   the old entries are inactive, then deletes the old files. At least two
-  eligible files are required. A partition protected by an active Replay
-  Session lock is skipped.
+  eligible files are required. A partition protected by an active Dataset
+  Read Lease or Replay Session lock is skipped and reported.
 - `mdgw gc --dry-run|--apply` deletes **whole month partitions** older than
   `[retention].bars_days` when `[retention].enabled = true`. `bars_days = 0`
-  keeps data forever, and the current UTC month is never deleted.
+  keeps data forever, and the current UTC month is never deleted. A month
+  protected by an active Dataset Read Lease or Replay Session lock is skipped
+  and reported.
 - Both operations are Manifest-first: the Manifest is switched before any old
   Data File is removed.
+
+### Quarantine Dataset
+
+Quarantine is an independent, versioned Dataset, not part of the Bar Dataset.
+It is never registered, scanned, exported or read by the Bars Store, REST or
+Replay. Its default root is `<data_root>/quarantine`; configuration rejects a
+Quarantine root inside the Bars Dataset. It is partitioned as
+`year=YYYY/month=MM` and writes
+`quarantine-<start_ns>-<end_ns>-<uuid>.parquet` files plus the two metadata
+files `_quarantine_dataset.json` and `_quarantine_manifest.json`. The latter is
+authoritative for its active files, exactly as `_manifest.json` is for Bars.
+Its `quarantine_schema_version` is independent of the Bar Data Contract
+Version and of the Normalization Rule Version.
+
+| Field | Arrow type | Nullable | Semantics |
+|---|---|---|---|
+| `quarantine_schema_version` | `uint16` | no | Quarantine envelope version; currently `1` |
+| `recorded_ts` | `timestamp[ns, tz=UTC]` | no | when the rejection was recorded |
+| `source_stage` | `string` | no | stable ingestion stage that rejected the input |
+| `reason_code` | `string` | no | stable, low-cardinality rejection reason |
+| `rule_version` | `string` | no | Normalization Rule Version that evaluated the input |
+| `feed` | `string` | yes | Feed Handler name when known |
+| `instrument_id` | `string` | yes | InstrumentId when known |
+| `interval` | `string` | yes | Bar Interval when known |
+| `open_ts` | `timestamp[ns, tz=UTC]` | yes | Bar period start when known |
+| `source_location` | `string` | no | stable location of the rejected input |
+| `details` | `string` | no | sanitized structured diagnostics as JSON text |
+| `raw_record` | `string` | yes | sanitized rejected input as JSON text, when available |
+
+`source_stage` is one of `live_normalize`, `live_instrument_validate`,
+`ccxt_live_row`, `ccxt_history_row`, `archive_file`. `reason_code` is one of
+`unclosed_bar`, `float_value`, `invalid_interval`,
+`decimal_scale_exceeded`, `invalid_instrument`, `unknown_instrument`,
+`malformed_row`, `archive_checksum_mismatch`, `archive_format_error`,
+`archive_time_unit_unsupported`, `archive_field_error`. Exception text and
+rejected values appear only inside the sanitized `details`/`raw_record`
+fields; they are never used as program branches or metric labels.
+
+Quarantine writes are fail-closed. The store writes the Data Files first and
+appends the Manifest second; if either step fails it removes the files just
+written and raises `QuarantineWriteError`, so the corresponding input must not
+be acknowledged, skipped, published or persisted. For live batches a
+normalization or Instrument Validation rejection fails the whole batch if the
+audit write does not succeed; an archive file is not written when its
+Quarantine record cannot be stored; a CCXT single-row parse failure may be
+skipped only after its record is durably quarantined.
+
+Retention defaults to 30 days (`[storage.quarantine].retention_days`); `0`
+keeps records forever. GC is always an explicit operator command: `mdgw
+quarantine-gc` defaults to dry-run, removes only complete UTC months whose end
+is at or before the cutoff, and never removes the current UTC month.
+`--apply` switches the Quarantine Manifest before unlinking Data Files, and
+`--retention-days` overrides the configured window for one run. There is no
+automatic background GC.
 
 ## 6. Streaming Interface
 
@@ -362,7 +448,12 @@ A subscription is `{ "data_type": "bar", "instrument_id": ..., "interval": ... }
 `step` the session is paused except while spending credits. `seek` moves the
 cursor to the first Bar with `close_ts >= ts`, and discards credits granted
 before the seek. Credits granted after the seek survive even if the Parquet
-read has not completed yet.
+read has not completed yet. All three modes stream bounded Arrow batches with
+a bounded prefetch; the Session never materializes the whole range before the
+first message. Each Session reads one fixed Manifest Snapshot under one
+Dataset Read Lease for its entire lifetime, including pause and seek. A seek
+opens a new query generation against that same Snapshot and cancels the old
+query's Reader/connection without releasing the lease.
 
 ### Ordering and End of Session
 
@@ -407,15 +498,19 @@ the session with `reason: "error"` and a stable error object:
 
 `reason` is `exhausted`, `stopped` or `error`. The `error` object is present
 only for `reason="error"`; its `code` is the stable `schema_version_mismatch`
-(for an unsupported Dataset Schema Version) or `internal_error` (every other
-read failure). The message is sanitized: it never contains SQL, Data File
-paths, stack traces or raw DuckDB/Polars exception text; the real cause is
-logged server-side. Bars published before the failure are not rolled back or
-re-sent, so `bars_sent` is the exact number of Bars the client received. After
-a failure the session is terminal and its query Reader, connection and Dataset
-Read Lease are released. The client SDK raises `ReplayFailedError` (carrying
-the server `code`, `message` and `bars_sent`) for `reason="error"`; normal
-`exhausted`/`stopped` End of Session still ends iteration as before.
+(for an unsupported Dataset Schema Version, with message
+`Dataset schema version is not supported`) or `internal_error` (every other
+read failure, with message `replay read failed`). The message is sanitized: it
+never contains SQL, Data File paths, stack traces or raw DuckDB/Polars
+exception text; the real cause is logged server-side. Bars published before
+the failure are not rolled back or re-sent, so `bars_sent` is the exact number
+of Bars the client received. After a failure the session is terminal and its
+query Reader, connection and Dataset Read Lease are released. The client SDK
+raises `ReplayFailedError` (carrying the server `code`, `message` and
+`bars_sent`) for `reason="error"`; a malformed error object is reported as the
+client's `protocol_error`. Normal `exhausted`/`stopped` End of Session still
+ends iteration as before. REST's error envelope is unaffected by this Replay
+protocol change.
 
 ## 8. Stable error codes
 
@@ -460,20 +555,35 @@ emit them.
 ## 9. Revisions and deduplication
 
 A Bar identity is `(instrument_id, interval, open_ts)`. A source correction
-appends a new row with the same identity and a higher `revision`. Readers must
-therefore:
+appends a new row with the same identity and a higher `revision`. REST history
+surfaces (non-paginated JSON, paginated JSON, Arrow, CSV and export) return
+**every stored raw Revision**; they never deduplicate by revision, and the
+100,000-row JSON ceiling counts those raw rows. Replay is different: it keeps
+the highest revision per identity, breaks equal-revision ties by the latest
+`ingest_ts`, and applies its five-key order. A client that wants one Bar per
+identity from REST must apply the rule itself.
+
+Consumers that need a unique Bar series must therefore:
 
 1. keep only the row with the maximum `revision` per identity;
 2. never assume one row per identity in the raw Dataset.
 
 The gateway applies this rule on every persistence path: live ingest and
 Backfill merge against the existing identity (including Bars still buffered for
-writing), and readers such as `ReplayBarSource` keep the highest revision and
-use `ingest_ts` to break equal-revision ties. Downstream consumers must do the
-same before treating Bars as a unique series.
+writing), and Replay keeps the highest revision and uses `ingest_ts` to break
+equal-revision ties. Downstream consumers must do the same before treating
+Bars as a unique series.
 
 Aggregated parent Bars follow the rule too: a changed child can move the
 parent to `parent_revision + 1`.
+
+Raw Revisions also interact with the single-value Time Cursor: when a page
+boundary falls inside an `open_ts` revision group, a client following
+`next_start` can see duplicates and unreachable rows. This is a pre-existing
+contract gap, not an engine migration behavior, and it is tracked separately in
+[`docs/revision-heavy-time-cursor.md`](revision-heavy-time-cursor.md). The
+gateway neither deduplicates REST output nor introduces a composite/opaque
+cursor to hide it.
 
 ## 10. History freshness
 
@@ -526,3 +636,11 @@ For real-time data, consume the Streaming Interface instead of polling history.
 - [`DESIGN.md`](../DESIGN.md): design rationale and non-goals.
 - [`GLOSSARY.md`](../GLOSSARY.md): terminology.
 - [`docs/adr/`](adr/): accepted architecture decisions.
+- [`ADR-0013`](adr/0013-manifest-aware-duckdb-reads.md): Manifest Snapshot,
+  Dataset Read Lease and the DuckDB explicit-file-list read path.
+- [`ADR-0014`](adr/0014-polars-batch-normalization-with-quarantine.md):
+  Polars batch Normalization and the independent Quarantine Dataset.
+- [`ADR-0015`](adr/0015-bounded-replay-with-explicit-failure-termination.md):
+  bounded Replay, seek generations and `reason="error"`.
+- [`docs/revision-heavy-time-cursor.md`](revision-heavy-time-cursor.md):
+  the independent Revision-heavy Time Cursor contract gap.
