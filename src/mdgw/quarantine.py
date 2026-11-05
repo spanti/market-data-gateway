@@ -28,6 +28,7 @@ import time
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -40,9 +41,11 @@ from mdgw.core.time import datetime_to_ns, ns_to_iso, to_utc, utc_now
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+NANOS_PER_DAY = 86_400 * 1_000_000_000
+QUARANTINE_DEFAULT_RETENTION_DAYS = 30
 
 QUARANTINE_SCHEMA_VERSION = 1
 QUARANTINE_DATASET_NAME = "quarantine"
@@ -125,6 +128,28 @@ class QuarantineWriteError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class QuarantineGCReport:
+    """Observable result of one Quarantine Retention GC pass.
+
+    A dry run reports what would be removed without touching the Manifest or
+    the Data Files. Only complete UTC months whose end is at or before the
+    cutoff are eligible; the current UTC month is always protected.
+    """
+
+    dry_run: bool
+    retention_days: int
+    removed_partitions: tuple[str, ...] = ()
+    removed_files: tuple[str, ...] = ()
+    removed_bytes: int = 0
+    skipped_current_month: tuple[str, ...] = ()
+    failures: tuple[str, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return not self.failures
+
+
+@dataclass(frozen=True, slots=True)
 class QuarantineRecord:
     """One rejection, before it is serialized into the Quarantine Dataset.
 
@@ -200,7 +225,7 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 class QuarantineStore:
     """Append-only writer/reader for the Quarantine Dataset."""
 
-    def __init__(
+    def __init__(  # ruff: ignore[too-many-arguments] - explicit Store settings
         self,
         root: Path,
         *,
@@ -208,19 +233,29 @@ class QuarantineStore:
         compression: str = "zstd",
         row_group_size: int = 1_000_000,
         format_version: str = "2.6",
+        retention_days: int = QUARANTINE_DEFAULT_RETENTION_DAYS,
     ) -> None:
         self.root = Path(root)
         self.schema_version = int(schema_version)
         self.compression = compression
         self.row_group_size = row_group_size
         self.format_version = format_version
+        if int(retention_days) < 0:
+            msg = "quarantine retention_days must be zero (keep forever) or positive"
+            raise ValueError(msg)
+        self.retention_days = int(retention_days)
         self.descriptor_path = self.root / QUARANTINE_DESCRIPTOR_NAME
         self.manifest_path = self.root / QUARANTINE_MANIFEST_NAME
+        # `_lock` guards counters; `_io_lock` serializes Manifest updates so a
+        # GC pass cannot race an append from the collector thread.
         self._lock = threading.Lock()
+        self._io_lock = threading.Lock()
         self._records_written = 0
         self._write_failures = 0
         self._last_write_ts: datetime | None = None
         self._by_stage_reason: dict[tuple[str, str], int] = {}
+        self._gc_runs = 0
+        self._last_gc: dict[str, Any] | None = None
 
     # -- writes ------------------------------------------------------------
 
@@ -245,8 +280,9 @@ class QuarantineStore:
         try:
             table = self._build_table(items, write_ts)
             groups = self._group_indices(items, write_ts)
-            created_paths, entries = self._write_data_files(table, groups)
-            self._append_manifest(entries)
+            with self._io_lock:
+                created_paths, entries = self._write_data_files(table, groups)
+                self._append_manifest(entries)
         except Exception as exc:
             for path in created_paths:
                 with suppress(OSError):
@@ -444,6 +480,194 @@ class QuarantineStore:
             return pa.Table.from_batches([], schema=QUARANTINE_SCHEMA)
         return pa.concat_tables(tables).select(QUARANTINE_SCHEMA.names)
 
+    # -- retention / GC ----------------------------------------------------
+
+    def gc(
+        self,
+        retention_days: int | None = None,
+        *,
+        apply: bool = False,
+        now: datetime | None = None,
+    ) -> QuarantineGCReport:
+        """Delete Quarantine Data Files in whole UTC months past Retention.
+
+        The default is a dry run. Only complete UTC months whose month end is
+        at or before the cutoff are eligible; the current UTC month is always
+        skipped. ``retention_days=0`` means keep forever. The Quarantine
+        Manifest is switched atomically before any Data File is unlinked, and
+        empty month directories are pruned afterwards.
+        """
+        retention = (
+            self.retention_days
+            if retention_days is None
+            else int(retention_days)
+        )
+        if retention < 0:
+            msg = "quarantine retention_days must be zero (keep forever) or positive"
+            raise ValueError(msg)
+        current = to_utc(now) if now is not None else utc_now()
+        dry_run = not apply
+        if retention == 0:
+            report = QuarantineGCReport(
+                dry_run=dry_run, retention_days=retention
+            )
+            self._record_gc(report, current)
+            return report
+
+        cutoff_ns = datetime_to_ns(current) - retention * NANOS_PER_DAY
+        with self._io_lock:
+            manifest = self.read_manifest()
+            entries = [dict(raw) for raw in manifest.get("files", [])]
+            (
+                expired_months,
+                skipped_current,
+                to_remove,
+            ) = self._expired_entries(entries, current, cutoff_ns)
+            removed_files = tuple(str(entry["path"]) for entry in to_remove)
+            removed_bytes = sum(
+                self._entry_size(entry) for entry in to_remove
+            )
+            if dry_run or not to_remove:
+                report = QuarantineGCReport(
+                    dry_run=dry_run,
+                    retention_days=retention,
+                    removed_partitions=tuple(expired_months),
+                    removed_files=removed_files,
+                    removed_bytes=removed_bytes,
+                    skipped_current_month=tuple(skipped_current),
+                )
+                self._record_gc(report, current)
+                return report
+
+            removed_paths = set(removed_files)
+            for entry in entries:
+                if str(entry.get("path")) in removed_paths:
+                    entry["active"] = False
+            manifest["files"] = entries
+            try:
+                _write_json_atomic(self.manifest_path, manifest)
+            except Exception as exc:
+                logger.exception(
+                    "quarantine GC manifest update failed",
+                    extra={"event": "quarantine.gc_manifest_failed"},
+                )
+                report = QuarantineGCReport(
+                    dry_run=False,
+                    retention_days=retention,
+                    removed_partitions=tuple(expired_months),
+                    skipped_current_month=tuple(skipped_current),
+                    failures=(f"manifest: {exc}",),
+                )
+                self._record_gc(report, current)
+                return report
+
+            report = QuarantineGCReport(
+                dry_run=False,
+                retention_days=retention,
+                removed_partitions=tuple(expired_months),
+                removed_files=removed_files,
+                removed_bytes=removed_bytes,
+                skipped_current_month=tuple(skipped_current),
+                failures=self._unlink_removed(to_remove, expired_months),
+            )
+            self._record_gc(report, current)
+            return report
+
+    @staticmethod
+    def _expired_entries(
+        entries: Sequence[dict[str, Any]],
+        current: datetime,
+        cutoff_ns: int,
+    ) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+        """Select whole months past the cutoff, protecting the current month."""
+        expired_months: list[str] = []
+        skipped_current: list[str] = []
+        to_remove: list[dict[str, Any]] = []
+        months = QuarantineStore._entries_by_month(entries)
+        for (year, month), group in sorted(months.items()):
+            label = f"{year:04d}-{month:02d}"
+            if (year, month) == (current.year, current.month):
+                skipped_current.append(label)
+                continue
+            # A month is only complete once its last instant is at or before
+            # the cutoff, matching the Bars GC month-end rule.
+            if _month_end_ns(year, month) > cutoff_ns:
+                continue
+            expired_months.append(label)
+            to_remove.extend(group)
+        return expired_months, skipped_current, to_remove
+
+    @staticmethod
+    def _entries_by_month(
+        entries: Sequence[dict[str, Any]],
+    ) -> dict[tuple[int, int], list[dict[str, Any]]]:
+        months: dict[tuple[int, int], list[dict[str, Any]]] = {}
+        for entry in entries:
+            if not entry.get("active", True):
+                continue
+            year_month = _entry_month(entry)
+            if year_month is None:
+                continue
+            months.setdefault(year_month, []).append(entry)
+        return months
+
+    def _entry_size(self, entry: Mapping[str, Any]) -> int:
+        size = entry.get("size_bytes")
+        if size is not None:
+            return int(size)
+        with suppress(OSError):
+            return (self.root / str(entry["path"])).stat().st_size
+        return 0
+
+    def _unlink_removed(
+        self,
+        to_remove: Sequence[Mapping[str, Any]],
+        expired_months: Sequence[str],
+    ) -> tuple[str, ...]:
+        """Unlink inactive Data Files, then prune their empty month dirs."""
+        failures: list[str] = []
+        for entry in to_remove:
+            path = self.root / str(entry["path"])
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                # The entry stays inactive in the Manifest; report it so an
+                # operator can retry.
+                failures.append(f"{entry['path']}: {exc}")
+        self._prune_empty_months(
+            {(int(label[:4]), int(label[5:])) for label in expired_months}
+        )
+        return tuple(failures)
+
+    def _prune_empty_months(self, months: set[tuple[int, int]]) -> None:
+        years: set[int] = set()
+        for year, month in months:
+            directory = self.root / f"year={year:04d}" / f"month={month:02d}"
+            try:
+                directory.rmdir()
+            except OSError:
+                continue
+            years.add(year)
+        for year in years:
+            with suppress(OSError):
+                (self.root / f"year={year:04d}").rmdir()
+
+    def _record_gc(
+        self, report: QuarantineGCReport, now: datetime
+    ) -> None:
+        with self._lock:
+            self._gc_runs += 1
+            self._last_gc = {
+                "ts": ns_to_iso(datetime_to_ns(to_utc(now))),
+                "dry_run": report.dry_run,
+                "retention_days": report.retention_days,
+                "removed_partitions": list(report.removed_partitions),
+                "removed_files": len(report.removed_files),
+                "removed_bytes": report.removed_bytes,
+                "skipped_current_month": list(report.skipped_current_month),
+                "failures": list(report.failures),
+            }
+
     # -- observability -----------------------------------------------------
 
     def stats(self) -> dict[str, Any]:
@@ -452,6 +676,8 @@ class QuarantineStore:
             write_failures = self._write_failures
             last_write_ts = self._last_write_ts
             by_stage_reason = dict(self._by_stage_reason)
+            gc_runs = self._gc_runs
+            last_gc = None if self._last_gc is None else dict(self._last_gc)
         by_stage: dict[str, int] = {}
         by_reason: dict[str, int] = {}
         combined = []
@@ -466,26 +692,65 @@ class QuarantineStore:
                 }
             )
         try:
-            active_file_count = len(self.active_files())
+            active_files = self.active_files()
         except (OSError, ValueError):
-            active_file_count = 0
+            active_files = []
         return {
             "schema_version": self.schema_version,
             "root": str(self.root),
+            "retention_days": self.retention_days,
             "records_written": records_written,
             "write_failures": write_failures,
             "last_write_ts": None
             if last_write_ts is None
             else ns_to_iso(datetime_to_ns(last_write_ts)),
-            "active_file_count": active_file_count,
+            "active_file_count": len(active_files),
+            "active_bytes": sum(
+                int(entry.get("size_bytes") or 0) for entry in active_files
+            ),
+            "gc_runs": gc_runs,
+            "last_gc": last_gc,
             "records_by_source_stage": by_stage,
             "records_by_reason_code": by_reason,
             "records_by_stage_and_reason": combined,
         }
 
 
+def _entry_month(entry: Mapping[str, Any]) -> tuple[int, int] | None:
+    partition = entry.get("partition")
+    if isinstance(partition, Mapping):
+        year = str(partition.get("year", ""))
+        month = str(partition.get("month", ""))
+        if year.isdigit() and month.isdigit():
+            return int(year), int(month)
+    year_text: str | None = None
+    month_text: str | None = None
+    for part in Path(str(entry.get("path", ""))).parts:
+        if part.startswith("year="):
+            year_text = part[len("year=") :]
+        elif part.startswith("month="):
+            month_text = part[len("month=") :]
+    if (
+        year_text is not None
+        and month_text is not None
+        and year_text.isdigit()
+        and month_text.isdigit()
+    ):
+        return int(year_text), int(month_text)
+    return None
+
+
+def _month_end_ns(year: int, month: int) -> int:
+    if month == 12:
+        following = datetime(year + 1, 1, 1, tzinfo=UTC)
+    else:
+        following = datetime(year, month + 1, 1, tzinfo=UTC)
+    return datetime_to_ns(following)
+
+
 __all__ = [
     "QUARANTINE_DATASET_NAME",
+    "QUARANTINE_DEFAULT_RETENTION_DAYS",
     "QUARANTINE_DESCRIPTOR_NAME",
     "QUARANTINE_FILE_NAMING",
     "QUARANTINE_MANIFEST_NAME",
@@ -510,6 +775,7 @@ __all__ = [
     "SOURCE_STAGE_CCXT_LIVE_ROW",
     "SOURCE_STAGE_LIVE_INSTRUMENT_VALIDATE",
     "SOURCE_STAGE_LIVE_NORMALIZE",
+    "QuarantineGCReport",
     "QuarantineRecord",
     "QuarantineStore",
     "QuarantineWriteError",

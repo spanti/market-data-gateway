@@ -201,6 +201,10 @@ class QuarantineConfig(_ConfigModel):
     root: Path | None = None
     schema_version: int = Field(default=1, ge=1)
     rule_version: str = NORMALIZATION_RULE_VERSION
+    # Whole UTC months older than this are eligible for GC. 0 keeps them
+    # forever; GC itself is always an explicit operator command (dry run by
+    # default) and never a background task.
+    retention_days: int = Field(default=30, ge=0)
 
     @field_validator("rule_version")
     @classmethod

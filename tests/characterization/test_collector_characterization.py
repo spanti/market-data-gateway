@@ -7,8 +7,8 @@ data is fixed.
 The module also records the *current* source-stage differences the migration
 must preserve or deliberately change:
 
-* CCXT history: a malformed row is skipped and the source continues (there is
-  no Quarantine today; only a warning log).
+* CCXT history: a malformed row is quarantined and then skipped; the source
+  continues (ticket 10 replaced the old warning-only skip).
 * Archive import: a checksum/malformed file writes nothing for the whole file
   (whole-file atomicity, no partial rows).
 * Collector write queue overflow: the oldest Bar is dropped and the HWM is
@@ -40,6 +40,7 @@ from mdgw.core.bar import RawBar
 from mdgw.core.errors import UnknownInstrumentError
 from mdgw.core.time import datetime_to_ns
 from mdgw.ingest.ccxt_feed import CcxtFeedHandler
+from mdgw.quarantine import QuarantineStore
 from mdgw.service.bar_sink import BufferedBarSink
 from mdgw.service.collector_core import CollectorCore
 from mdgw.state.high_water_mark import HighWaterMarkStore
@@ -310,7 +311,9 @@ def _ccxt_row(open_ts: datetime, close: float = 100.5) -> list:
     return [_ms(open_ts), 100.0, 101.0, 99.0, close, 1.25]
 
 
-def test_ccxt_history_skips_malformed_rows_and_continues() -> None:
+def test_ccxt_history_skips_malformed_rows_and_continues(
+    tmp_path: Path,
+) -> None:
     first = minute(0)
     rows = [
         _ccxt_row(first),
@@ -325,6 +328,7 @@ def test_ccxt_history_skips_malformed_rows_and_continues() -> None:
             symbols=("BTC/USDT",),
         ),
         exchange=_StaticExchange({"BTC/USDT": rows}),
+        quarantine=QuarantineStore(tmp_path / "quarantine"),
     )
     try:
         bars = list(
@@ -338,7 +342,8 @@ def test_ccxt_history_skips_malformed_rows_and_continues() -> None:
     finally:
         handler.close()
 
-    # The malformed middle row is logged and skipped; the source continues.
+    # The malformed middle row is quarantined first, then skipped; the source
+    # continues.
     assert [bar.open_ts for bar in bars] == [
         first,
         first + timedelta(minutes=2),

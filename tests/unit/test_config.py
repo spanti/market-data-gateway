@@ -113,6 +113,25 @@ def test_quarantine_rejects_an_empty_rule_version() -> None:
         )
 
 
+def test_quarantine_retention_defaults_to_30_days_and_allows_forever() -> None:
+    assert GatewayConfig().storage.quarantine.retention_days == 30
+
+    forever = GatewayConfig.model_validate(
+        {"storage": {"quarantine": {"retention_days": 0}}}
+    )
+    assert forever.storage.quarantine.retention_days == 0
+
+    configured = GatewayConfig.model_validate(
+        {"storage": {"quarantine": {"retention_days": 90}}}
+    )
+    assert configured.storage.quarantine.retention_days == 90
+
+    with pytest.raises(ValidationError):
+        GatewayConfig.model_validate(
+            {"storage": {"quarantine": {"retention_days": -1}}}
+        )
+
+
 def test_quarantine_root_must_not_be_inside_the_bars_dataset() -> None:
     with pytest.raises(ValidationError, match="must not be inside"):
         GatewayConfig.model_validate(

@@ -20,6 +20,7 @@ from mdgw.api.ws_hub import WebSocketHub
 from mdgw.core.envelope import table_to_messages
 from mdgw.core.errors import UnknownInstrumentError
 from mdgw.core.time import utc_now
+from mdgw.ingest.composite import attach_quarantine
 from mdgw.replay.service import ReplayService
 from mdgw.service.collector_core import CollectorCore
 from mdgw.state.health import GapEvent, HealthTracker
@@ -94,8 +95,14 @@ class GatewayRuntime:
             health=self._health,
             asset_class_for=self._asset_class_for,
         )
-        # Independent Quarantine Dataset; never part of the Bars Dataset.
+        # Independent Quarantine Dataset; never part of the Bars Dataset. A
+        # handler constructed before the runtime shares this exact Store.
         self.quarantine = self._core.quarantine
+        attach_quarantine(
+            feed_handler,
+            self.quarantine,
+            rule_version=config.storage.quarantine.rule_version,
+        )
 
         self._streaming: StreamingInterface | None = None
         self._hub: WebSocketHub | None = None

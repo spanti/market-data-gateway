@@ -7,8 +7,12 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from mdgw.ingest.composite import build_configured_feed_handler
+from mdgw.ingest.composite import (
+    attach_quarantine,
+    build_configured_feed_handler,
+)
 from mdgw.metrics import MetricsRegistry
+from mdgw.quarantine import QuarantineStore
 from mdgw.service.bar_sink import BufferedBarSink
 from mdgw.service.collector_core import CollectorCore
 from mdgw.service.common import iso_to_seconds, ns_iso, update_dataset_metrics
@@ -43,8 +47,26 @@ class CollectorService:
         wait_for_api: bool | None = None,
     ) -> None:
         self.config = config
+        # The Collector owns the Quarantine Dataset; the same Store instance
+        # is used by the pipeline and by every ccxt Feed Handler it builds (or
+        # receives injected), so counters and the physical Dataset agree.
+        storage_root = (
+            data_root if data_root is not None else config.storage.root
+        )
+        quarantine = QuarantineStore(
+            config.storage.quarantine.resolved_root(storage_root),
+            schema_version=config.storage.quarantine.schema_version,
+            retention_days=config.storage.quarantine.retention_days,
+        )
         self._feed_handler = feed_handler or build_configured_feed_handler(
-            config.feeds
+            config.feeds,
+            quarantine=quarantine,
+            rule_version=config.storage.quarantine.rule_version,
+        )
+        attach_quarantine(
+            self._feed_handler,
+            quarantine,
+            rule_version=config.storage.quarantine.rule_version,
         )
         self.core = CollectorCore(
             feed_handler=self._feed_handler,
@@ -56,6 +78,7 @@ class CollectorService:
                 flush_max_bytes=config.storage.flush_max_bytes,
                 flush_max_age_s=config.storage.flush_max_age_s,
             ),
+            quarantine=quarantine,
         )
         self.metrics = MetricsRegistry()
         # `bars_written` now counts Bars that actually reached disk (including
@@ -435,6 +458,25 @@ class CollectorService:
                 ),
             )
             self._last_quarantine_failures = failures
+
+        # Capacity/retention visibility: record volume grows until an operator
+        # runs `mdgw quarantine-gc`. Only stable labels and plain gauges are
+        # used (no paths, request ids or exception text).
+        self.metrics.set(
+            "mdgw_collector_quarantine_active_files",
+            int(stats["active_file_count"]),
+            help="Active Quarantine Data Files",
+        )
+        self.metrics.set(
+            "mdgw_collector_quarantine_active_bytes",
+            int(stats["active_bytes"]),
+            help="Bytes held by active Quarantine Data Files",
+        )
+        self.metrics.set(
+            "mdgw_collector_quarantine_retention_days",
+            int(stats["retention_days"]),
+            help="Quarantine Retention in days (0 = keep forever)",
+        )
 
     def _uptime_s(self) -> float:
         if self._started_at is None:

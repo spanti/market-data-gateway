@@ -117,6 +117,7 @@ class CollectorCore:
         self.quarantine = quarantine or QuarantineStore(
             config.storage.quarantine.resolved_root(self.store.root),
             schema_version=config.storage.quarantine.schema_version,
+            retention_days=config.storage.quarantine.retention_days,
         )
         # `GatewayRuntime` passes its own resolver because tests replace the
         # runtime's Instrument Store after start.

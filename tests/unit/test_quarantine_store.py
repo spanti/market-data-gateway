@@ -7,6 +7,7 @@ and the atomic write/fail-closed behaviour directly.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -200,3 +201,129 @@ def test_parquet_files_are_never_named_like_bars_data_files(
         assert "asset_class=" not in path.as_posix()
         assert "venue=" not in path.as_posix()
         assert pq.ParquetFile(path).metadata.num_rows == 1
+
+
+# -- Retention / GC ---------------------------------------------------------
+
+
+def _write_at(
+    store: QuarantineStore,
+    recorded_ts: datetime,
+    *,
+    reason_code: str = REASON_FLOAT_VALUE,
+) -> None:
+    store.write_records([_record(recorded_ts=recorded_ts, reason_code=reason_code)])
+
+
+def test_stats_expose_retention_capacity_and_gc_state(tmp_path: Path) -> None:
+    store = QuarantineStore(tmp_path / "quarantine")
+    assert store.stats()["retention_days"] == 30
+
+    store.write_records([_record()])
+    stats = store.stats()
+    assert stats["active_file_count"] == 1
+    assert stats["active_bytes"] > 0
+    assert stats["gc_runs"] == 0
+    assert stats["last_gc"] is None
+
+    report = store.gc(30, apply=False, now=datetime(2024, 3, 2, tzinfo=UTC))
+
+    assert report.dry_run is True
+    assert report.removed_partitions == ("2024-01",)
+    stats = store.stats()
+    assert stats["retention_days"] == 30
+    assert stats["gc_runs"] == 1
+    assert stats["last_gc"]["dry_run"] is True
+    assert stats["last_gc"]["removed_partitions"] == ["2024-01"]
+
+
+def test_gc_dry_run_reports_expired_months_without_deleting(
+    tmp_path: Path,
+) -> None:
+    store = QuarantineStore(tmp_path / "quarantine")
+    store.write_records([_record()])
+
+    report = store.gc(30, apply=False, now=datetime(2024, 3, 2, tzinfo=UTC))
+
+    assert report.dry_run is True
+    assert report.removed_partitions == ("2024-01",)
+    assert len(report.removed_files) == 1
+    assert report.removed_bytes > 0
+    assert (store.root / report.removed_files[0]).exists()
+    assert store.stats()["active_file_count"] == 1
+    # The Manifest is untouched by a dry run.
+    manifest = json.loads(
+        (store.root / "_quarantine_manifest.json").read_text(encoding="utf-8")
+    )
+    assert all(entry["active"] for entry in manifest["files"])
+
+
+def test_gc_apply_deletes_expired_months_and_protects_the_current_month(
+    tmp_path: Path,
+) -> None:
+    store = QuarantineStore(tmp_path / "quarantine")
+    _write_at(store, datetime(2024, 1, 5, tzinfo=UTC))
+    _write_at(
+        store,
+        datetime(2024, 2, 5, tzinfo=UTC),
+        reason_code=REASON_UNKNOWN_INSTRUMENT,
+    )
+    _write_at(store, datetime(2024, 6, 10, tzinfo=UTC))
+    now = datetime(2024, 6, 15, tzinfo=UTC)
+
+    report = store.gc(30, apply=True, now=now)
+
+    assert report.dry_run is False
+    assert report.removed_partitions == ("2024-01", "2024-02")
+    assert report.skipped_current_month == ("2024-06",)
+    assert report.failures == ()
+    assert len(report.removed_files) == 2
+
+    assert not (store.root / "year=2024" / "month=01").exists()
+    assert not (store.root / "year=2024" / "month=02").exists()
+    assert (store.root / "year=2024" / "month=06").exists()
+    assert len(store.active_files()) == 1
+    assert store.stats()["active_file_count"] == 1
+    assert store.read_records().num_rows == 1
+
+    manifest = json.loads(
+        (store.root / "_quarantine_manifest.json").read_text(encoding="utf-8")
+    )
+    assert sum(1 for entry in manifest["files"] if entry["active"]) == 1
+    assert sum(1 for entry in manifest["files"] if not entry["active"]) == 2
+
+
+def test_gc_uses_the_complete_month_end_for_the_expiry_boundary(
+    tmp_path: Path,
+) -> None:
+    store = QuarantineStore(tmp_path / "quarantine")
+    _write_at(store, datetime(2024, 1, 31, 23, 59, tzinfo=UTC))
+
+    # Cutoff 2024-01-31T12:00Z: January has not completely expired yet.
+    early = store.gc(30, apply=False, now=datetime(2024, 3, 1, 12, tzinfo=UTC))
+    assert early.removed_partitions == ()
+
+    # Cutoff 2024-02-01T00:00Z: the whole UTC month is now older than cutoff.
+    late = store.gc(30, apply=False, now=datetime(2024, 3, 2, tzinfo=UTC))
+    assert late.removed_partitions == ("2024-01",)
+
+
+def test_gc_with_zero_retention_keeps_everything_forever(tmp_path: Path) -> None:
+    store = QuarantineStore(tmp_path / "quarantine", retention_days=0)
+    _write_at(store, datetime(2020, 1, 5, tzinfo=UTC))
+
+    report = store.gc(apply=True, now=datetime(2024, 6, 15, tzinfo=UTC))
+
+    assert store.stats()["retention_days"] == 0
+    assert report.removed_partitions == ()
+    assert report.removed_files == ()
+    assert len(store.active_files()) == 1
+    assert store.read_records().num_rows == 1
+
+
+def test_gc_rejects_a_negative_retention(tmp_path: Path) -> None:
+    store = QuarantineStore(tmp_path / "quarantine")
+
+    with pytest.raises(ValueError):
+        store.gc(-1, apply=False, now=datetime(2024, 6, 15, tzinfo=UTC))
+
