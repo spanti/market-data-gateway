@@ -1,13 +1,20 @@
 """Read the Bars a Replay Session needs from the Parquet Dataset.
 
-The Parquet read path can only push the time filter down to `open_ts` (the
-partition/column actually stored), while the Replay Protocol's range is defined
-on `close_ts`. `ReplayBarSource` therefore widens the physical scan by one Bar
-Interval, then filters on `close_ts` in Python: `start_ts` is inclusive and
-`end_ts` is exclusive.
+The stored physical column is `open_ts`, while the Replay Protocol's range is
+defined on `close_ts`. `ReplayBarSource` therefore widens the physical scan by
+one Bar Interval: `start_ts` is inclusive and `end_ts` is exclusive.
 
-v1 reads every matching Bar before the first message is published. Streaming
-pages are a ticket-14 performance concern, not a correctness one.
+M5A queries the Session's fixed Manifest Snapshot through DuckDB. One query
+does the close-time filter, the highest-Revision choice (latest `ingest_ts` on
+a tie), duplicate-subscription resolution and the five-key total order.
+`ReplayBarSource` keeps the full `list[Bar]` materialization and the push
+control loops unchanged so the complete event sequence can prove query
+equivalence.
+
+The pre-DuckDB PyArrow read is kept as a private, test-only path
+(`read(..., read=None)`) for migration differential tests and benchmarks.
+Production Replay Sessions always pass their `StoreRead`, which selects the
+DuckDB seam. There is no production engine switch.
 """
 
 from __future__ import annotations
@@ -17,6 +24,7 @@ from typing import TYPE_CHECKING
 from mdgw.core.bar import Bar
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import datetime_to_ns
+from mdgw.store.parquet_dataset import ReplayReadQuery
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids an import cycle
     from collections.abc import Sequence
@@ -60,6 +68,38 @@ def _revision_key(bar: Bar) -> tuple[int, int]:
     return (bar.revision, datetime_to_ns(bar.ingest_ts))
 
 
+def replay_read_queries(
+    subscriptions: Sequence[BarSubscription],
+    *,
+    start_ts_ns: int,
+    end_ts_ns: int,
+) -> tuple[ReplayReadQuery, ...]:
+    """Distinct `(instrument_id, interval)` scan windows for one Snapshot.
+
+    Identical subscriptions are collapsed before the query is built, so the
+    number of `UNION ALL` branches never depends on client duplication. The
+    physical `open_ts` start is widened by one Bar Interval; the `close_ts`
+    window itself stays exactly `[start_ts, end_ts)`.
+    """
+    seen: set[tuple[str, str]] = set()
+    queries: list[ReplayReadQuery] = []
+    for subscription in subscriptions:
+        key = (subscription.instrument_id, subscription.interval)
+        if key in seen:
+            continue
+        seen.add(key)
+        queries.append(
+            ReplayReadQuery(
+                instrument_id=subscription.instrument_id,
+                interval=subscription.interval,
+                open_start_ns=start_ts_ns - interval_ns(subscription.interval),
+                close_start_ns=start_ts_ns,
+                close_end_ns=end_ts_ns,
+            )
+        )
+    return tuple(queries)
+
+
 class ReplayBarSource:
     """Reads and total-orders the Bars for a Replay Session."""
 
@@ -76,11 +116,35 @@ class ReplayBarSource:
     ) -> list[Bar]:
         """Return the deduplicated, ordered Bars within the `close_ts` range.
 
-        A Replay Session passes its long-lived `StoreRead`, so the whole
-        Session (including a later seek) reads from one fixed Snapshot. Direct
-        callers that do not hold one get the legacy one-shot per-subscription
-        read.
+        A Replay Session passes its long-lived `StoreRead`: the DuckDB query
+        then reads the fixed Snapshot and Lease acquired at Session creation.
+        Passing no `read` selects the private legacy PyArrow path that is only
+        used by migration differential tests and benchmarks.
         """
+        queries = replay_read_queries(
+            subscriptions,
+            start_ts_ns=start_ts_ns,
+            end_ts_ns=end_ts_ns,
+        )
+        if read is not None:
+            table = read.read_replay_bars(queries)
+            # The query already produced the final order; materialization is
+            # kept intact in M5A so the control loops stay unchanged.
+            return [Bar(**row) for row in table.to_pylist()]
+        return self._read_legacy(
+            subscriptions,
+            start_ts_ns=start_ts_ns,
+            end_ts_ns=end_ts_ns,
+        )
+
+    def _read_legacy(
+        self,
+        subscriptions: Sequence[BarSubscription],
+        *,
+        start_ts_ns: int,
+        end_ts_ns: int,
+    ) -> list[Bar]:
+        """Pre-DuckDB PyArrow read: private migration/differential path only."""
         kept: dict[tuple[str, str, int], Bar] = {}
 
         for subscription in subscriptions:
@@ -88,20 +152,11 @@ class ReplayBarSource:
             # `close_ts >= start_ts` is equivalent to
             # `open_ts >= start_ts - interval`; the store can push that down.
             physical_start_ns = start_ts_ns - interval_ns(interval)
-            batches = (
-                read.iter_batches(
-                    instrument_id=subscription.instrument_id,
-                    interval=interval,
-                    start_ns=physical_start_ns,
-                    end_ns=end_ts_ns,
-                )
-                if read is not None
-                else self._store.iter_batches(
-                    instrument_id=subscription.instrument_id,
-                    interval=interval,
-                    start_ns=physical_start_ns,
-                    end_ns=end_ts_ns,
-                )
+            batches = self._store.iter_batches(
+                instrument_id=subscription.instrument_id,
+                interval=interval,
+                start_ns=physical_start_ns,
+                end_ns=end_ts_ns,
             )
             for batch in batches:
                 for row in batch.to_pylist():

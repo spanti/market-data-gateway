@@ -31,8 +31,11 @@ from mdgw.core.bar import Bar  # noqa: E402
 from mdgw.core.schema import bars_to_logical_table  # noqa: E402
 from mdgw.replay.service import ReplayService  # noqa: E402
 from mdgw.replay.session import BarSubscription, ReplaySessionSpec  # noqa: E402
-from mdgw.replay.source import ReplayBarSource  # noqa: E402
-from mdgw.store.parquet_dataset import ParquetBarStore  # noqa: E402
+from mdgw.replay.source import ReplayBarSource, interval_ns  # noqa: E402
+from mdgw.store.parquet_dataset import (  # noqa: E402
+    BarReadQuery,
+    ParquetBarStore,
+)
 from mdgw.streaming import table_to_ipc  # noqa: E402
 
 app = typer.Typer(
@@ -85,20 +88,41 @@ def replay(
     sent_counts: list[int] = []
     query_durations: list[float] = []
     query_counts: list[int] = []
+    legacy_query_durations: list[float] = []
     with tempfile.TemporaryDirectory(prefix="mdgw-bench-replay-") as tmp:
         store = ParquetBarStore(Path(tmp))
         store.write_bars(bars, asset_class="crypto")
 
-        # Replay query preparation alone (scan + close_ts filter + Revision
-        # dedupe + five-key sort), before any Arrow IPC / publish cost.
+        # Replay query preparation alone (Snapshot + lease acquisition,
+        # DuckDB scan, close_ts filter, Revision dedupe and five-key sort),
+        # before any Arrow IPC / publish cost. This is the production path.
         source = ReplayBarSource(store)
+        snapshot_query = BarReadQuery(
+            instrument_id=subscription.instrument_id,
+            interval=subscription.interval,
+            start_ns=start_ns - interval_ns(subscription.interval),
+            end_ns=end_ns,
+        )
         for _ in range(repeat):
             started = time.perf_counter()
-            prepared = source.read(
-                [subscription], start_ts_ns=start_ns, end_ts_ns=end_ns
-            )
+            with store.open_read(
+                queries=(snapshot_query,), lease_id="bench-replay"
+            ) as read:
+                prepared = source.read(
+                    [subscription],
+                    start_ts_ns=start_ns,
+                    end_ts_ns=end_ns,
+                    read=read,
+                )
             query_durations.append(time.perf_counter() - started)
             query_counts.append(len(prepared))
+
+        # The pre-DuckDB PyArrow path is measured only for comparison; it is
+        # not reachable from a production Replay Session.
+        for _ in range(repeat):
+            started = time.perf_counter()
+            source.read([subscription], start_ts_ns=start_ns, end_ts_ns=end_ns)
+            legacy_query_durations.append(time.perf_counter() - started)
 
         for index in range(repeat):
             service = ReplayService(
@@ -132,12 +156,20 @@ def replay(
     query_best = min(query_durations)
     query_median = statistics.median(query_durations)
     query_rows = query_counts[-1]
+    legacy_best = min(legacy_query_durations)
+    legacy_median = statistics.median(legacy_query_durations)
     typer.echo(f"mode: asap replay  rows: {sent:,}  passes: {repeat}")
     typer.echo(
-        f"query prep: best {query_best:.3f}s "
+        f"query prep (duckdb): best {query_best:.3f}s "
         f"({format_rate(query_rows, query_best)})  "
         f"median {query_median:.3f}s "
         f"({format_rate(query_rows, query_median)})"
+    )
+    typer.echo(
+        f"query prep (legacy): best {legacy_best:.3f}s "
+        f"({format_rate(query_rows, legacy_best)})  "
+        f"median {legacy_median:.3f}s "
+        f"({format_rate(query_rows, legacy_median)})"
     )
     typer.echo(f"best:   {best:.3f}s  {format_rate(sent, best)}")
     typer.echo(f"median: {median:.3f}s  {format_rate(sent, median)}")

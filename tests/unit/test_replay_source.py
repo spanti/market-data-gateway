@@ -8,11 +8,15 @@ from decimal import Decimal
 from pathlib import Path
 
 from mdgw.core.bar import Bar
-from mdgw.core.schema import INTERVALS
+from mdgw.core.schema import BAR_SCHEMA, INTERVALS, empty_logical_table
 from mdgw.core.time import datetime_to_ns
 from mdgw.replay.session import BarSubscription
-from mdgw.replay.source import ReplayBarSource, bar_order_key
-from mdgw.store.parquet_dataset import ParquetBarStore
+from mdgw.replay.source import ReplayBarSource, bar_order_key, interval_ns
+from mdgw.store.parquet_dataset import (
+    BarReadQuery,
+    ParquetBarStore,
+    ReplayReadQuery,
+)
 
 UTC = timezone.utc
 BASE = datetime(2026, 10, 30, 0, 0, tzinfo=UTC)
@@ -193,3 +197,277 @@ def test_duplicate_subscriptions_do_not_duplicate_bars(tmp_path: Path) -> None:
     )
 
     assert len(bars) == 1
+
+
+# -- DuckDB replay query -----------------------------------------------------
+
+
+def _duckdb_read(
+    store: ParquetBarStore,
+    subscriptions: list[BarSubscription],
+    *,
+    start_minute: int,
+    end_minute: int,
+) -> list[Bar]:
+    """Read through the production DuckDB seam on one fixed Snapshot."""
+    start_ns = datetime_to_ns(BASE + timedelta(minutes=start_minute))
+    end_ns = datetime_to_ns(BASE + timedelta(minutes=end_minute))
+    queries = tuple(
+        BarReadQuery(
+            instrument_id=subscription.instrument_id,
+            interval=subscription.interval,
+            start_ns=start_ns - interval_ns(subscription.interval),
+            end_ns=end_ns,
+        )
+        for subscription in subscriptions
+    )
+    with store.open_read(queries=queries, lease_id="unit-replay") as read:
+        return ReplayBarSource(store).read(
+            subscriptions,
+            start_ts_ns=start_ns,
+            end_ts_ns=end_ns,
+            read=read,
+        )
+
+
+def _snapshot_query(
+    *,
+    instrument_id: str = BTC,
+    interval: str = "1m",
+    start_minute: int,
+    end_minute: int,
+) -> BarReadQuery:
+    start_ns = datetime_to_ns(BASE + timedelta(minutes=start_minute))
+    return BarReadQuery(
+        instrument_id=instrument_id,
+        interval=interval,
+        start_ns=start_ns - interval_ns(interval),
+        end_ns=datetime_to_ns(BASE + timedelta(minutes=end_minute)),
+    )
+
+
+def _replay_query(
+    *,
+    instrument_id: str = BTC,
+    interval: str = "1m",
+    start_minute: int,
+    end_minute: int,
+) -> ReplayReadQuery:
+    start_ns = datetime_to_ns(BASE + timedelta(minutes=start_minute))
+    return ReplayReadQuery(
+        instrument_id=instrument_id,
+        interval=interval,
+        open_start_ns=start_ns - interval_ns(interval),
+        close_start_ns=start_ns,
+        close_end_ns=datetime_to_ns(BASE + timedelta(minutes=end_minute)),
+    )
+
+
+def _signature(bar: Bar) -> tuple:
+    return (
+        bar.instrument_id,
+        bar.interval,
+        datetime_to_ns(bar.open_ts),
+        datetime_to_ns(bar.close_ts),
+        bar.seq,
+        bar.revision,
+        bar.open,
+    )
+
+
+def test_store_read_replay_query_filters_dedupes_and_orders(
+    tmp_path: Path,
+) -> None:
+    """One DuckDB query does close-window, Revision choice and five-key order.
+
+    The query lives on `StoreRead`, so the Session's fixed Snapshot entries are
+    its only input (never a Dataset-root glob).
+    """
+    store = ParquetBarStore(tmp_path)
+    store.write_bars(
+        [
+            # Overlapping Data Files for the same identity: highest revision.
+            _bar(open_minute=1, revision=0, price="100"),
+            _bar(open_minute=2, revision=1, price="200"),
+            _bar(open_minute=3, seq=3, price="100"),
+            _bar(open_minute=4, seq=None, price="100"),
+        ],
+        asset_class="crypto",
+    )
+    store.write_bars(
+        [
+            _bar(open_minute=1, revision=2, price="300"),
+            _bar(open_minute=2, revision=1, ingest_minute=5, price="250"),
+            # A 5m Bar opening before the window closes inside it.
+            _bar(interval="5m", open_minute=-3, price="100"),
+            _bar(open_minute=0, price="100"),
+        ],
+        asset_class="crypto",
+    )
+    store.write_bars(
+        [
+            _bar(instrument_id=ETH, open_minute=1, seq=None, price="100"),
+        ],
+        asset_class="crypto",
+    )
+
+    replay_queries = (
+        _replay_query(start_minute=2, end_minute=5),
+        _replay_query(
+            interval="5m", start_minute=2, end_minute=5
+        ),
+        _replay_query(
+            instrument_id=ETH, start_minute=2, end_minute=5
+        ),
+    )
+    snapshot_queries = (
+        _snapshot_query(start_minute=2, end_minute=5),
+        _snapshot_query(interval="5m", start_minute=2, end_minute=5),
+        _snapshot_query(
+            instrument_id=ETH, start_minute=2, end_minute=5
+        ),
+    )
+    with store.open_read(
+        queries=snapshot_queries, lease_id="unit-replay"
+    ) as read:
+        table = read.read_replay_bars(replay_queries)
+
+    assert table.schema.equals(BAR_SCHEMA, check_metadata=False)
+    assert [_signature(Bar(**row)) for row in table.to_pylist()] == [
+        # close_ts 2m: BTC 1m (seq NULL) before BTC 5m (interval tie-break).
+        (BTC, "1m", datetime_to_ns(BASE + timedelta(minutes=1)),
+         datetime_to_ns(BASE + timedelta(minutes=2)), None, 2, Decimal("300")),
+        (BTC, "5m", datetime_to_ns(BASE - timedelta(minutes=3)),
+         datetime_to_ns(BASE + timedelta(minutes=2)), None, 0, Decimal("100")),
+        (ETH, "1m", datetime_to_ns(BASE + timedelta(minutes=1)),
+         datetime_to_ns(BASE + timedelta(minutes=2)), None, 0, Decimal("100")),
+        # close_ts 3m: equal Revision, latest ingest_ts wins.
+        (BTC, "1m", datetime_to_ns(BASE + timedelta(minutes=2)),
+         datetime_to_ns(BASE + timedelta(minutes=3)), None, 1, Decimal("250")),
+        # Numeric seq sorts before NULL seq at the same close_ts ordering key.
+        (BTC, "1m", datetime_to_ns(BASE + timedelta(minutes=3)),
+         datetime_to_ns(BASE + timedelta(minutes=4)), 3, 0, Decimal("100")),
+        # close_ts 5m is the exclusive end (open 4m closes at 5m): absent.
+    ]
+
+
+def test_duckdb_source_matches_legacy_for_the_full_bar_sequence(
+    tmp_path: Path,
+) -> None:
+    """The production DuckDB read reproduces every legacy Bar exactly."""
+    store = ParquetBarStore(tmp_path)
+    store.write_bars(
+        [
+            _bar(open_minute=0, revision=1, price="100"),
+            _bar(open_minute=1, seq=None, price="100"),
+            _bar(open_minute=2, seq=2, price="100"),
+            _bar(open_minute=3, seq=None, price="100"),
+        ],
+        asset_class="crypto",
+    )
+    store.write_bars(
+        [
+            _bar(open_minute=0, revision=2, price="200"),
+            _bar(open_minute=1, seq=None, revision=1, ingest_minute=5),
+            _bar(instrument_id=ETH, open_minute=1, seq=None),
+        ],
+        asset_class="crypto",
+    )
+    store.write_bars(
+        [
+            _bar(instrument_id=ETH, open_minute=1, seq=None),
+            _bar(interval="5m", open_minute=0, seq=None),
+            _bar(open_minute=1, seq=None, revision=1, ingest_minute=1),
+        ],
+        asset_class="crypto",
+    )
+    subscriptions = [
+        BarSubscription(BTC, "1m"),
+        BarSubscription(BTC, "5m"),
+        BarSubscription(ETH, "1m"),
+    ]
+
+    legacy = _read(
+        store, subscriptions, start_minute=0, end_minute=5
+    )
+    duckdb = _duckdb_read(
+        store, subscriptions, start_minute=0, end_minute=5
+    )
+
+    assert duckdb == legacy
+    assert [bar.revision for bar in duckdb] == [2, 1, 0, 0, 0]
+
+
+def test_duckdb_source_dedupes_identical_subscriptions_before_querying(
+    tmp_path: Path,
+) -> None:
+    store = ParquetBarStore(tmp_path)
+    store.write_bars([_bar(open_minute=0)], asset_class="crypto")
+
+    class _RecordingRead:
+        queries: tuple[ReplayReadQuery, ...] | None = None
+
+        def read_replay_bars(self, queries):
+            self.queries = tuple(queries)
+            return empty_logical_table()
+
+    read = _RecordingRead()
+    ReplayBarSource(store).read(
+        [
+            BarSubscription(BTC, "1m"),
+            BarSubscription(BTC, "1m"),
+            BarSubscription(BTC, "5m"),
+            BarSubscription(ETH, "1m"),
+        ],
+        start_ts_ns=datetime_to_ns(BASE),
+        end_ts_ns=datetime_to_ns(BASE + timedelta(minutes=2)),
+        read=read,  # type: ignore[arg-type] - dedicated query seam
+    )
+
+    assert read.queries is not None
+    assert [(query.instrument_id, query.interval) for query in read.queries] == [
+        (BTC, "1m"),
+        (BTC, "5m"),
+        (ETH, "1m"),
+    ]
+
+
+def test_store_read_replay_query_returns_empty_contract_table(
+    tmp_path: Path,
+) -> None:
+    store = ParquetBarStore(tmp_path)
+    store.write_bars([_bar(open_minute=0)], asset_class="crypto")
+
+    with store.open_read(
+        queries=(_snapshot_query(start_minute=5, end_minute=8),),
+        lease_id="unit-replay",
+    ) as read:
+        table = read.read_replay_bars(
+            (_replay_query(start_minute=5, end_minute=8),)
+        )
+
+    assert table.num_rows == 0
+    assert table.schema.equals(BAR_SCHEMA, check_metadata=False)
+
+
+def test_store_read_replay_query_fails_on_a_missing_data_file(
+    tmp_path: Path,
+) -> None:
+    store = ParquetBarStore(tmp_path)
+    store.write_bars([_bar(open_minute=0)], asset_class="crypto")
+    entries = store._active_entries()
+    (store.dataset_root / entries[0]["path"]).unlink()
+
+    with store.open_read(
+        queries=(_snapshot_query(start_minute=0, end_minute=2),),
+        lease_id="unit-replay",
+    ) as read:
+        try:
+            read.read_replay_bars(
+                (_replay_query(start_minute=0, end_minute=2),)
+            )
+        except FileNotFoundError:
+            pass
+        else:  # pragma: no cover - explicit failure path
+            msg = "a missing Data File must fail the read"
+            raise AssertionError(msg)
