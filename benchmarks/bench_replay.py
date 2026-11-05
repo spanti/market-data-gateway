@@ -231,6 +231,10 @@ def _run_memory_pass(
             )
             started = time.perf_counter()
             session_id = service.create_session(spec)
+            if mode == "step":
+                # A step Session starts paused; grant enough Credits to let
+                # the bounded stream drain while memory stays bounded.
+                service.step_session(session_id, rows)
             finished = service.wait_session(session_id, timeout=timeout_s)
             duration = time.perf_counter() - started
             sent = service.session_bars_sent(session_id)
@@ -289,7 +293,7 @@ def replay(
     mode: str = typer.Option(
         "asap",
         "--mode",
-        help="Replay mode for the timed and memory passes (asap|realtime)",
+        help="Replay mode for the timed and memory passes (asap|realtime|step)",
     ),
     speed: float = typer.Option(
         1_000_000.0,
@@ -337,9 +341,9 @@ def replay(
             "--prefetch-batches must be positive",
             param_hint="--prefetch-batches",
         )
-    if mode not in {"asap", "realtime"}:
+    if mode not in {"asap", "realtime", "step"}:
         raise typer.BadParameter(
-            "--mode must be 'asap' or 'realtime'", param_hint="--mode"
+            "--mode must be 'asap', 'realtime' or 'step'", param_hint="--mode"
         )
     if speed <= 0:
         raise typer.BadParameter("--speed must be positive", param_hint="--speed")
@@ -422,6 +426,8 @@ def replay(
             )
             started = time.perf_counter()
             session_id = service.create_session(spec)
+            if mode == "step":
+                service.step_session(session_id, rows)
             finished = service.wait_session(session_id, timeout=timeout_s)
             durations.append(time.perf_counter() - started)
             sent_counts.append(service.session_bars_sent(session_id))
