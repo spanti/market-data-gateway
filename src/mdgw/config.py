@@ -17,6 +17,7 @@ from pydantic import (
 )
 
 from mdgw.core.schema import INTERVALS
+from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
 
 if TYPE_CHECKING:
     from mdgw.store.duckdb_reader import DuckDBOptions
@@ -192,14 +193,14 @@ class QuarantineConfig(_ConfigModel):
     """Independent Quarantine Dataset settings.
 
     ``root=None`` means ``<storage.root>/quarantine``. The schema version is
-    independent of the Bar Data Contract; the rule version records which
-    Normalization rules produced a live rejection and is expanded into Data
-    File metadata by later tickets.
+    independent of the Bar Data Contract. ``rule_version`` is the live
+    Normalization Rule Version stamped on Quarantine Records and on new Bars
+    Manifest entries; it is audit metadata, never a Schema authority.
     """
 
     root: Path | None = None
     schema_version: int = Field(default=1, ge=1)
-    rule_version: str = "1"
+    rule_version: str = NORMALIZATION_RULE_VERSION
     # Whole UTC months older than this are eligible for GC. 0 keeps them
     # forever; GC itself is always an explicit operator command (dry run by
     # default) and never a background task.

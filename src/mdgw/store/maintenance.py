@@ -24,6 +24,7 @@ from pyarrow import ArrowException
 
 from mdgw.core.schema import PHYSICAL_SCHEMA
 from mdgw.core.time import datetime_to_ns, to_utc, utc_now
+from mdgw.normalize.version import normalize_rule_versions
 from mdgw.store.manifest import (
     PARTITION_FIELDS,
     instrument_id_for_partition,
@@ -655,6 +656,15 @@ def _write_compacted_file(
     start_ns = min(entry["start_ns"] for entry in eligible)
     end_ns = max(entry["end_ns"] for entry in eligible)
     max_ingest_ns = max(int(entry.get("max_ingest_ns") or 0) for entry in eligible)
+    # Audit lineage only: union of the sources' sets. Compaction never
+    # re-normalizes Bar values, and an empty set stays empty (legacy/unknown).
+    rule_versions = normalize_rule_versions(
+        [
+            version
+            for entry in eligible
+            for version in entry.get("rule_versions") or ()
+        ]
+    )
     directory = _partition_directory(dataset_root, partition)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"data-{start_ns}-{end_ns}-{uuid4()}.parquet"
@@ -678,6 +688,7 @@ def _write_compacted_file(
         "created_ns": time.time_ns(),
         "partition": dict(partition),
         "max_ingest_ns": max_ingest_ns,
+        "rule_versions": list(rule_versions),
     }
 
 

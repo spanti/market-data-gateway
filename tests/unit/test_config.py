@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from mdgw.config import FeedConfig, GatewayConfig, load_config
+from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -83,7 +84,7 @@ def test_quarantine_config_defaults_to_storage_subdirectory() -> None:
     quarantine = GatewayConfig().storage.quarantine
     assert quarantine.root is None
     assert quarantine.schema_version == 1
-    assert quarantine.rule_version == "1"
+    assert quarantine.rule_version == NORMALIZATION_RULE_VERSION
     assert quarantine.resolved_root(Path("data")) == Path("data/quarantine")
 
 

@@ -51,6 +51,10 @@ from mdgw.backfill_common import (
 )
 from mdgw.core.time import datetime_to_ns, to_utc, utc_now
 from mdgw.normalize.bar import normalize_bar
+from mdgw.normalize.version import (
+    SCALAR_NORMALIZATION_RULE_VERSION,
+    SCALAR_NORMALIZATION_RULE_VERSIONS,
+)
 from mdgw.quarantine import (
     REASON_ARCHIVE_CHECKSUM_MISMATCH,
     REASON_ARCHIVE_FIELD_ERROR,
@@ -144,7 +148,7 @@ def import_archive(  # ruff: ignore[too-many-arguments]
     ingest_ts: datetime | None = None,
     today: date | None = None,
     quarantine: QuarantineStore | None = None,
-    rule_version: str = "1",
+    rule_version: str = SCALAR_NORMALIZATION_RULE_VERSION,
 ) -> ArchiveReport:
     """Import all archive files covering `[start, end]` for every Instrument.
 
@@ -306,7 +310,10 @@ def _import_period(
         return
 
     context.store.write_bars(
-        result.written, asset_class=instrument.asset_class
+        result.written,
+        asset_class=instrument.asset_class,
+        # Archive import normalizes with the scalar reference rules.
+        rule_versions=SCALAR_NORMALIZATION_RULE_VERSIONS,
     )
     report.bars_written += len(result.written)
 

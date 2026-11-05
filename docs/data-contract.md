@@ -229,8 +229,34 @@ One per Dataset root. It is descriptive metadata:
 
 `_manifest.json` is authoritative: a reader may read only entries with
 `active = true` that still exist. Each entry carries `path`, `start_ns`,
-`end_ns`, `row_count`, `active`, `size_bytes`, `created_ns`, `max_ingest_ns`
-and the `partition` map.
+`end_ns`, `row_count`, `active`, `size_bytes`, `created_ns`, `max_ingest_ns`,
+the `partition` map and `rule_versions`.
+
+`rule_versions` is the sorted, de-duplicated set of Normalization Rule
+Versions that produced the entry's rows. It is **audit metadata only**, not a
+Schema authority:
+
+- New Data Files always record the Rule Versions that actually ran (the live
+  Polars batch rules or the scalar Backfill/archive rules).
+- Entries written before this metadata existed, or with an explicit empty
+  list, mean legacy/unknown. Readers must treat a missing or empty
+  `rule_versions` as an empty set; no historical version is ever invented and
+  the entry stays readable.
+- Compaction does not re-run Normalization. The output entry's set is the
+  union of its source entries' sets, and Bar field values and Revisions are
+  copied unchanged.
+- Readers decide Schema compatibility from the Data Contract Version
+  (`_dataset.json` / Bar `schema_version`) alone. An old, unknown or future
+  Rule Version never blocks a read.
+- A Normalization change that alters public Bar semantics (field values or
+  the Bar Schema) must raise the Data Contract Version, not merely the Rule
+  Version. Changing only the Rule Version is for audit-visible implementation
+  differences that keep the public contract identical.
+
+The Quarantine Dataset records the same audit identity per rejection in its
+`rule_version` field, alongside its independent
+`quarantine_schema_version`. Those two versions and the Bar Data Contract
+Version are separate values with separate meanings.
 
 Raw `pyarrow.dataset` scans of the directory bypass the Manifest and can see
 files that Compaction has already marked inactive. Use the REST API or

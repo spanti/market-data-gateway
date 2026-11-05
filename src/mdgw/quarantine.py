@@ -10,6 +10,13 @@ Replay.
 A write is atomic: Parquet files are written first, then the Manifest is
 appended. If the Manifest append fails the new files are removed and
 ``QuarantineWriteError`` is raised, so callers can stay fail-closed.
+
+Three versions are deliberately distinct:
+
+* ``QUARANTINE_SCHEMA_VERSION`` describes this Dataset's record envelope;
+* the Bar Data Contract Version (from ``mdgw.core.bar``) describes Bar rows;
+* ``rule_version`` names the Normalization rules applied to the rejected
+  input. It is audit metadata only and never decides Schema compatibility.
 """
 
 from __future__ import annotations
@@ -375,6 +382,10 @@ class QuarantineStore:
             if not record.source_location:
                 msg = "quarantine source_location must not be empty"
                 raise ValueError(msg)
+            rule_version = record.rule_version
+            if not isinstance(rule_version, str) or not rule_version.strip():
+                msg = "quarantine rule_version must be a non-empty string"
+                raise ValueError(msg)
 
     def _build_table(
         self, records: Sequence[QuarantineRecord], write_ts: datetime
@@ -391,7 +402,7 @@ class QuarantineStore:
                     "recorded_ts": datetime_to_ns(recorded),
                     "source_stage": record.source_stage,
                     "reason_code": record.reason_code,
-                    "rule_version": record.rule_version,
+                    "rule_version": record.rule_version.strip(),
                     "feed": record.feed,
                     "instrument_id": record.instrument_id,
                     "interval": record.interval,

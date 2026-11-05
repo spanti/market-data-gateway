@@ -16,6 +16,8 @@ from urllib.parse import unquote
 
 import pyarrow.parquet as pq
 
+from mdgw.normalize.version import normalize_rule_versions
+
 DATASET_NAME = "bars"
 MANIFEST_NAME = "_manifest.json"
 DATASET_DESCRIPTOR_NAME = "_dataset.json"
@@ -131,6 +133,11 @@ def normalize_manifest_entry(
             "created_ns": int(created_ns or 0),
             "partition": partition,
             "max_ingest_ns": int(entry.get("max_ingest_ns") or end_ns or 0),
+            # Audit metadata, never a Schema authority. A missing value means
+            # "legacy/unknown" and must never make the entry unreadable.
+            "rule_versions": list(
+                normalize_rule_versions(entry.get("rule_versions"))
+            ),
         }
     )
     return normalized
