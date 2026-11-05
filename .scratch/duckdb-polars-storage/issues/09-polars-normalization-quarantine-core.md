@@ -22,7 +22,8 @@
 - Branch: `ticket/09-polars-normalization-quarantine-core`; worktree
   `E:/total-project/mdgw-worktrees/duckdb-09`.
 - Commits: `e826ec7` feat(collector): normalize live batches with Polars and
-  quarantine rejections; the docs commit below closes the ticket. Merged
+  quarantine rejections; `69ddcec` fix(quarantine): fail closed on record build
+  errors too; the docs commit closes the ticket. Merged
   `integration/duckdb-polars-storage` (tip `d14aebd`) before closing; it was
   already contained.
 
