@@ -222,6 +222,46 @@ class DuckDBArrowScanner:
         finally:
             self.close()
 
+    def earliest_batches(
+        self,
+        files: Sequence[str],
+        interval: str,
+        query: BarReadQuery,
+        *,
+        batch_size: int,
+        keep: int,
+    ) -> Iterator[pa.RecordBatch]:
+        """Yield the globally earliest ``keep`` raw rows ordered by `open_ts`.
+
+        This is the paginated JSON page reader. One static query reads every
+        Data File of the Snapshot selection, filters the request window and
+        lets DuckDB order the whole selection by `open_ts` ascending before it
+        applies the row limit. A page therefore cannot be assembled from
+        per-batch minima.
+
+        The storage-order tie-break (Manifest file position, then physical row
+        number) reproduces the stable-sort order the previous page reader
+        produced for rows sharing an `open_ts`. It is not a public tie-break
+        and carries no cursor state. No `DISTINCT`, `QUALIFY` or other dedup is
+        involved: raw Revisions and duplicate rows stay raw. A sort that cannot
+        fit the configured DuckDB memory/temp budget raises instead of
+        returning a short page.
+        """
+        try:  # ruff: ignore[too-many-statements-in-try-clause] - explicit resource scope
+            self._connect()
+            sql, params = _build_earliest_sql(files, query, keep=keep)
+            reader = self._open_sql_reader(sql, params, batch_size=batch_size)
+            try:
+                yield from self._reader_batches(reader, interval)
+            finally:
+                self._close_reader()
+            self._exhausted = True
+        except BaseException:
+            self._failed = True
+            raise
+        finally:
+            self.close()
+
     def count(self, files: Sequence[str], query: BarReadQuery) -> int:
         """Exact raw-row count for the selected Data Files of one Snapshot.
 
@@ -404,6 +444,42 @@ def _build_scan_sql(
     if limit is not None:
         sql = f"{sql} LIMIT $row_limit"
         params["row_limit"] = int(limit)
+    return sql, params
+
+
+def _build_earliest_sql(
+    files: Sequence[str],
+    query: BarReadQuery,
+    *,
+    keep: int,
+) -> tuple[str, dict[str, Any]]:
+    """Static globally ordered page SQL: `open_ts` ASC, then storage order.
+
+    `filename` and `file_row_number` are only referenced by `ORDER BY`, so the
+    projected Arrow batch still contains exactly the physical Bar columns. The
+    tie-break reproduces the previous stable sort for equal timestamps without
+    changing the documented `open_ts`-only ordering promise.
+    """
+    if keep < 1:
+        msg = "earliest row limit must be positive"
+        raise ValueError(msg)
+    params: dict[str, Any] = {
+        "files": [str(path) for path in files],
+        "row_limit": int(keep),
+    }
+    clauses = _predicate_clauses(query, params)
+    sql = (
+        f"SELECT {_SELECT_PHYSICAL} "  # ruff: ignore[hardcoded-sql-expression] - bound values
+        "FROM read_parquet($files, hive_partitioning = false, "
+        "filename = true, file_row_number = true)"
+    )
+    if clauses:
+        sql = f"{sql} WHERE {' AND '.join(clauses)}"
+    sql = (
+        f"{sql} ORDER BY open_ts ASC, "
+        "list_position($files, filename) ASC, file_row_number ASC "
+        "LIMIT $row_limit"
+    )
     return sql, params
 
 

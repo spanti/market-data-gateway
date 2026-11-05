@@ -99,6 +99,10 @@ class _RecordingRead:
         self._record("read_arrow_bars")
         return self._inner.read_arrow_bars(*args, **kwargs)
 
+    def read_earliest_arrow_bars(self, *args, **kwargs):
+        self._record("read_earliest_arrow_bars")
+        return self._inner.read_earliest_arrow_bars(*args, **kwargs)
+
     def iter_batches(self, *args, **kwargs):
         self._record("iter_batches")
         yield from self._inner.iter_batches(*args, **kwargs)
@@ -226,7 +230,7 @@ def test_json_request_uses_one_snapshot_and_one_lease(tmp_path: Path) -> None:
     assert [event for event, _ in store.events] == [
         "open",
         "count_arrow",
-        "iter_batches",
+        "read_earliest_arrow_bars",
         "close",
     ]
     generations = {generation for _, generation in store.events}

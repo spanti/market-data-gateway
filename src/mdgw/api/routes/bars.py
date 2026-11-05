@@ -284,26 +284,6 @@ def _open_store_read(store: ParquetBarStore, query: BarQuery) -> StoreRead:
     return store.open_read(**_query_filters(query))
 
 
-def _read_earliest_bars(read: StoreRead, *, keep: int) -> pa.Table:
-    """Return the globally earliest ``keep`` Bars in ascending `open_ts` order.
-
-    Storage order is not a time order (Manifest entries are append-ordered and
-    Data Files may overlap), so a plain `limit` read cannot produce a page.
-    Scanning every matching row and retaining only the smallest ``keep`` rows
-    keeps memory bounded by the page size while preserving Arrow types exactly
-    (no Python datetime/decimal round-trip).
-    """
-    selected: pa.Table | None = None
-    for batch in read.iter_batches(limit=None):
-        table = pa.Table.from_batches([batch], schema=BAR_SCHEMA)
-        if selected is not None:
-            table = pa.concat_tables([selected, table])
-        selected = table.sort_by([("open_ts", "ascending")]).slice(0, keep)
-    if selected is None:
-        return pa.Table.from_batches([], schema=BAR_SCHEMA)
-    return selected
-
-
 # -- JSON -------------------------------------------------------------------
 
 
@@ -346,12 +326,13 @@ def _build_json_payload(store: ParquetBarStore, query: BarQuery) -> dict:
         assert query.limit is not None  # narrowed by `paginated`
         limit = query.limit
         # The paginated JSON surface has an explicit ordering contract:
-        # open_ts ascending. Storage order is not ordered (the Manifest is
-        # append-ordered and files may overlap), so reading `limit + 1` rows
-        # first would pick the wrong page. Stream every matching row and
-        # retain only the smallest `limit + 1` by `open_ts`, then render them
-        # in ascending order.
-        table = _read_earliest_bars(read, keep=limit + 1)
+        # `open_ts` ascending. Storage order is not a time order (Manifest
+        # entries are append-ordered and Data Files may overlap), so DuckDB
+        # orders the whole Snapshot selection and applies `limit + 1` in one
+        # query. That is the page plus the first unreturned row, which yields
+        # `has_more` and `next_start`. No per-batch Python concat/sort runs,
+        # and raw Revisions are not deduplicated.
+        table = read.read_earliest_arrow_bars(keep=limit + 1)
 
         has_more = table.num_rows > limit
         next_start: str | None = None
