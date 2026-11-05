@@ -94,6 +94,16 @@ def temp_data_files(directory: Path) -> list[Path]:
     ]
 
 
+def wait_until(predicate, *, timeout: float = 5.0) -> bool:
+    """Temp-file cleanup is asynchronous; poll briefly instead of racing it."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
+
+
 class TempDirMonitor(threading.Thread):
     """Poll the configured temp directory while a query is running."""
 
@@ -536,7 +546,7 @@ def test_relation_arrow_reader_is_incremental_not_materialised(
         assert opened < 2.0, f"opening the reader took {opened:.2f}s"
         assert elapsed < 2.0, f"first three batches took {elapsed:.2f}s"
         assert [batch.num_rows for batch in batches] == [10_000, 10_000, 10_000]
-        assert temp_data_files(temp_directory) == []
+        assert wait_until(lambda: temp_data_files(temp_directory) == [])
 
         # The connection is immediately reusable once the reader is closed.
         assert connection.sql("select 1").fetchall() == [(1,)]
@@ -657,12 +667,12 @@ def test_early_reader_close_releases_a_spilling_query(tmp_path: Path) -> None:
         monitor.finish()
 
         assert monitor.max_files > 0, "sorts at 64MB were expected to spill"
-        assert temp_data_files(temp_directory) == []
+        assert wait_until(lambda: temp_data_files(temp_directory) == [])
         assert connection.sql("select 9").fetchall() == [(9,)]
     finally:
         monitor.finish()
         connection.close()
-    assert list(temp_directory.iterdir()) == []
+    assert wait_until(lambda: not list(temp_directory.iterdir()))
 
 
 def test_reader_close_does_not_leak_process_threads(tmp_path: Path) -> None:
@@ -711,12 +721,12 @@ def test_low_memory_sort_spills_to_configured_temp_directory_and_cleans_up(
         assert len(rows) == 3_000_000
         assert monitor.max_files > 0
         assert monitor.max_bytes > 0
-        assert temp_data_files(temp_directory) == []
+        assert wait_until(lambda: temp_data_files(temp_directory) == [])
     finally:
         monitor.finish()
         connection.close()
     # Closing the connection removes even the per-connection owner marker.
-    assert list(temp_directory.iterdir()) == []
+    assert wait_until(lambda: not list(temp_directory.iterdir()))
 
 
 @pytest.mark.parametrize(
@@ -760,7 +770,7 @@ def test_sort_and_aggregate_results_are_identical_across_thread_counts(
         assert prefix == expected
     finally:
         connection.close()
-    assert temp_data_files(temp_directory) == []
+    assert wait_until(lambda: temp_data_files(temp_directory) == [])
 
 
 def test_temp_directory_limit_raises_explicit_error_and_cleans_up(
@@ -780,8 +790,8 @@ def test_temp_directory_limit_raises_explicit_error_and_cleans_up(
             ).fetchall()
         message = str(info.value).lower()
         assert "memory" in message or "temp" in message or "offload" in message
-        assert temp_data_files(temp_directory) == []
+        assert wait_until(lambda: temp_data_files(temp_directory) == [])
         assert connection.sql("select 5").fetchall() == [(5,)]
     finally:
         connection.close()
-    assert list(temp_directory.iterdir()) == []
+    assert wait_until(lambda: not list(temp_directory.iterdir()))
