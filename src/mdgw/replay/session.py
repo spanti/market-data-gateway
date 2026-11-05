@@ -223,11 +223,14 @@ class ReplaySession:
         publish_event: Callable[[Mapping[str, Any]], None],
         *,
         heartbeat_s: float = 1.0,
+        source: ReplayBarSource | None = None,
     ) -> None:
         self.session_id = session_id
         self.spec = spec
         self._store = store
-        self._source = ReplayBarSource(store)
+        # `source` is a migration/differential-test seam. The production path
+        # (ReplayService) always builds the DuckDB-backed source.
+        self._source = source if source is not None else ReplayBarSource(store)
         self._publish_bar = publish_bar
         self._publish_event = publish_event
         self._heartbeat_s = heartbeat_s
@@ -238,6 +241,7 @@ class ReplaySession:
         self._finished = threading.Event()
         self._thread: threading.Thread | None = None
         self._reason = "exhausted"
+        self._failure: BaseException | None = None
 
         # Cursor / clock / Step Credit state, guarded by `_cond`.
         self._cond = threading.Condition()
@@ -269,6 +273,17 @@ class ReplaySession:
     @property
     def is_terminal(self) -> bool:
         return self._state.terminal
+
+    @property
+    def failure(self) -> BaseException | None:
+        """The read failure that terminated the worker, if any.
+
+        M5A temporary boundary: ticket 16 turns this into the public
+        `reason=error` End of Session. Until then no End of Session is
+        published on failure, so an unreadable Dataset never looks like an
+        empty `exhausted` Replay.
+        """
+        return self._failure
 
     def start(self) -> None:
         with self._state_lock:
@@ -418,7 +433,13 @@ class ReplaySession:
     def _run(self) -> None:
         try:
             self._run_worker()
-        except Exception:  # pragma: no cover - defensive
+        except Exception as exc:
+            # M5A temporary error boundary. The public protocol cannot express
+            # `reason=error` yet (ticket 16), so no End of Session is published
+            # and the failure is recorded for that follow-up. A read error is
+            # never converted into an empty `exhausted` replay.
+            self._failure = exc
+            self._reason = "error"
             logger.exception("Replay Session %s failed", self.session_id)
         finally:
             self._set_state(
@@ -432,24 +453,19 @@ class ReplaySession:
         self._set_state(SessionState.RUNNING)
         read = None
         try:
-            try:
-                read = self._open_session_read()
-                bars = (
-                    []
-                    if read is None or self._cancel.is_set()
-                    else self._source.read(
-                        self.spec.subscriptions,
-                        start_ts_ns=self.spec.start_ts_ns,
-                        end_ts_ns=self.spec.end_ts_ns,
-                        read=read,
-                    )
+            read = self._open_session_read()
+            # A read failure propagates to `_run` on purpose: it must not
+            # become an empty Bars list with a normal End of Session.
+            bars = (
+                []
+                if read is None or self._cancel.is_set()
+                else self._source.read(
+                    self.spec.subscriptions,
+                    start_ts_ns=self.spec.start_ts_ns,
+                    end_ts_ns=self.spec.end_ts_ns,
+                    read=read,
                 )
-            except Exception:  # pragma: no cover - defensive, surfaced via log
-                logger.exception(
-                    "Replay Session %s failed while reading its Bars",
-                    self.session_id,
-                )
-                bars = []
+            )
 
             with self._cond:
                 self._bars = bars

@@ -63,9 +63,12 @@ from mdgw.core.time import datetime_to_ns  # noqa: E402
 from mdgw.ingest.fake import FakeFeedHandler  # noqa: E402
 from mdgw.replay.service import ReplayService  # noqa: E402
 from mdgw.replay.session import BarSubscription, ReplaySessionSpec  # noqa: E402
-from mdgw.replay.source import ReplayBarSource  # noqa: E402
+from mdgw.replay.source import ReplayBarSource, interval_ns  # noqa: E402
 from mdgw.runtime import GatewayRuntime  # noqa: E402
-from mdgw.store.parquet_dataset import ParquetBarStore  # noqa: E402
+from mdgw.store.parquet_dataset import (  # noqa: E402
+    BarReadQuery,
+    ParquetBarStore,
+)
 from mdgw.streaming import table_to_ipc  # noqa: E402
 
 INSTRUMENT = "binance:BTC/USDT"
@@ -620,10 +623,25 @@ def run_replay_scenarios(
     source = ReplayBarSource(store)
     encoded: list[int] = [0]
 
+    snapshot_query = BarReadQuery(
+        instrument_id=subscription.instrument_id,
+        interval=subscription.interval,
+        start_ns=start_ns - interval_ns(subscription.interval),
+        end_ns=end_ns,
+    )
+
     def query_prep():
-        result = source.read(
-            [subscription], start_ts_ns=start_ns, end_ts_ns=end_ns
-        )
+        # Production path: fixed Snapshot + Lease, DuckDB scan, Revision
+        # dedupe and five-key order, then the M5A full materialization.
+        with store.open_read(
+            queries=(snapshot_query,), lease_id="bench-baseline-replay"
+        ) as read:
+            result = source.read(
+                [subscription],
+                start_ts_ns=start_ns,
+                end_ts_ns=end_ns,
+                read=read,
+            )
         encoded[0] = len(result)
         return result
 

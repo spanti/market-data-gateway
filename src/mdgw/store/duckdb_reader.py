@@ -71,6 +71,26 @@ def ensure_supported_duckdb() -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class ReplayScanBranch:
+    """One distinct Replay subscription's explicit Data File scan.
+
+    The Store resolves the branch's Data Files from the Session's fixed
+    Manifest Snapshot; DuckDB only ever sees this explicit list. `open_ts`
+    starts at `open_start_ns`, widened by one Bar Interval from the inclusive
+    `close_start_ns`, so a Bar closing exactly at the window start is not
+    missed. `close_end_ns` bounds both the physical `open_ts` scan and the
+    inclusive/exclusive `close_ts` window.
+    """
+
+    files: tuple[str, ...]
+    instrument_id: str
+    interval: str
+    open_start_ns: int
+    close_start_ns: int
+    close_end_ns: int
+
+
+@dataclass(frozen=True, slots=True)
 class DuckDBOptions:
     """Explicit DuckDB read resources; never an engine switch."""
 
@@ -259,6 +279,43 @@ class DuckDBArrowScanner:
         except BaseException:
             self._failed = True
             raise
+        finally:
+            self.close()
+
+    def replay_batches(
+        self,
+        branches: Sequence[ReplayScanBranch],
+        *,
+        batch_size: int,
+    ) -> list[pa.RecordBatch]:
+        """Run the Replay query and materialize every batch.
+
+        M5A deliberately keeps the full materialization: the query itself does
+        the close-time filter, the Revision choice, duplicate-subscription
+        resolution and the five-key total order. A mid-read failure propagates
+        and discards the partial list; it is never returned as a short result.
+        The Reader and connection are closed on success, exception and
+        cancellation; only a clean scan returns the connection to the cache.
+        """
+        try:  # ruff: ignore[too-many-statements-in-try-clause] - explicit resource scope
+            self._connect()
+            sql, params = _build_replay_sql(branches)
+            reader = self._open_sql_reader(sql, params, batch_size=batch_size)
+            try:
+                batches: list[pa.RecordBatch] = []
+                while True:
+                    batch = self._next_batch(reader)
+                    if batch is _END_OF_STREAM:
+                        break
+                    batches.append(batch)
+            finally:
+                self._close_reader()
+        except BaseException:
+            self._failed = True
+            raise
+        else:
+            self._exhausted = True
+            return batches
         finally:
             self.close()
 
@@ -500,6 +557,61 @@ def _build_count_sql(
     return sql, params
 
 
+def _build_replay_sql(
+    branches: Sequence[ReplayScanBranch],
+) -> tuple[str, dict[str, Any]]:
+    """Static Replay SQL: one branch per distinct subscription, then five keys.
+
+    Only the branch count is structural SQL text. Every caller value (file
+    list, Instrument, Interval, time bounds) is a named bound parameter, so a
+    caller can never inject SQL, a path list member or an expression. The
+    outer `QUALIFY` keeps one Bar per `(instrument_id, interval, open_ts)`:
+    highest Revision first, latest `ingest_ts` on a Revision tie. The final
+    `ORDER BY` is the Replay Protocol's five-key total order; `seq` is numeric
+    before NULL.
+    """
+    if not branches:
+        msg = "a Replay query needs at least one scan branch"
+        raise ValueError(msg)
+
+    params: dict[str, Any] = {}
+    selects: list[str] = []
+    for index, branch in enumerate(branches):
+        files_key = f"files_{index}"
+        instrument_key = f"instrument_{index}"
+        interval_key = f"interval_{index}"
+        open_start_key = f"open_start_{index}"
+        close_start_key = f"close_start_{index}"
+        close_end_key = f"close_end_{index}"
+        params[files_key] = [str(path) for path in branch.files]
+        params[instrument_key] = branch.instrument_id
+        params[interval_key] = branch.interval
+        params[open_start_key] = ns_to_iso(branch.open_start_ns)
+        params[close_start_key] = ns_to_iso(branch.close_start_ns)
+        params[close_end_key] = ns_to_iso(branch.close_end_ns)
+        selects.append(
+            f"SELECT {_SELECT_PHYSICAL}, "  # ruff: ignore[hardcoded-sql-expression] - bound values only
+            f"CAST(${interval_key} AS VARCHAR) AS interval "
+            f"FROM read_parquet(${files_key}, hive_partitioning = false) "
+            f"WHERE instrument_id = ${instrument_key} "
+            f"AND open_ts >= ${open_start_key}::TIMESTAMPTZ_NS "
+            f"AND open_ts < ${close_end_key}::TIMESTAMPTZ_NS "
+            f"AND close_ts >= ${close_start_key}::TIMESTAMPTZ_NS "
+            f"AND close_ts < ${close_end_key}::TIMESTAMPTZ_NS"
+        )
+    sql = (
+        "WITH replay_candidates AS (\n  "
+        + "\n  UNION ALL\n  ".join(selects)
+        + "\n)\nSELECT * FROM replay_candidates\n"
+        "QUALIFY row_number() OVER ("
+        "PARTITION BY instrument_id, interval, open_ts "
+        "ORDER BY revision DESC, ingest_ts DESC) = 1\n"
+        "ORDER BY close_ts ASC, instrument_id ASC, seq ASC NULLS LAST, "
+        "interval ASC, open_ts ASC"
+    )
+    return sql, params
+
+
 def _restore_partition_batch(
     physical: pa.RecordBatch, interval: str
 ) -> pa.RecordBatch:
@@ -521,5 +633,6 @@ __all__ = [
     "DuckDBConnectionCache",
     "DuckDBOptions",
     "DuckDBUnavailableError",
+    "ReplayScanBranch",
     "ensure_supported_duckdb",
 ]

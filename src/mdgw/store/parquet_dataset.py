@@ -37,6 +37,7 @@ from mdgw.store.duckdb_reader import (
     DuckDBArrowScanner,
     DuckDBConnectionCache,
     DuckDBOptions,
+    ReplayScanBranch,
     ensure_supported_duckdb,
 )
 from mdgw.store.maintenance import (
@@ -534,6 +535,24 @@ class BarReadQuery:
 
 
 @dataclass(frozen=True, slots=True)
+class ReplayReadQuery:
+    """One distinct Replay subscription and its DuckDB scan window.
+
+    `open_start_ns` is the physical `open_ts` lower bound, widened by one Bar
+    Interval from the inclusive `close_start_ns`, so a Bar closing exactly at
+    the Replay window start is not missed. `close_end_ns` is exclusive.
+    Identical `(instrument_id, interval)` subscriptions are resolved to one
+    query before it reaches the Store.
+    """
+
+    instrument_id: str
+    interval: str
+    open_start_ns: int
+    close_start_ns: int
+    close_end_ns: int
+
+
+@dataclass(frozen=True, slots=True)
 class ManifestSnapshot:
     """One Manifest read: stable generation plus its selected active entries."""
 
@@ -745,6 +764,51 @@ class StoreRead:
                 if self._active_scanner is scanner:
                     self._active_scanner = None
 
+    def read_replay_bars(
+        self, queries: Sequence[ReplayReadQuery]
+    ) -> pa.Table:
+        """Materialize the deduplicated, five-key ordered Bars of a Replay query.
+
+        This is the Replay Source seam. It reads exactly the active Data Files
+        selected from this read's fixed Manifest Snapshot; DuckDB never globs
+        the Dataset root. One `UNION ALL` branch is emitted per distinct
+        `(instrument_id, interval)` subscription, each with its own explicit
+        file list and bound close-time window. Deduplication, Revision choice
+        and the total order happen inside one DuckDB query, so the REST
+        raw-Revision semantics cannot leak into Replay.
+
+        M5A keeps the full materialization: every batch is consumed before
+        this returns. A failure at any point raises; it is never turned into
+        an empty or short result. The Arrow export is restored to
+        `BAR_SCHEMA` (field order and nullability) before it crosses the Store
+        boundary.
+        """
+        self._ensure_open()
+        branches = self._replay_scan_branches(queries)
+        if not branches:
+            return empty_logical_table()
+        self._scans += 1
+        scanner = DuckDBArrowScanner(self._store.duckdb_connections)
+        with self._close_lock:
+            if self._closed:
+                msg = "StoreRead is closed"
+                raise RuntimeError(msg)
+            self._active_scanner = scanner
+        try:
+            batches = scanner.replay_batches(
+                branches,
+                batch_size=self._store.duckdb.arrow_batch_size,
+            )
+        finally:
+            scanner.close()
+            with self._close_lock:
+                if self._active_scanner is scanner:
+                    self._active_scanner = None
+        if not batches:
+            return empty_logical_table()
+        table = pa.Table.from_batches(batches)
+        return table.select(BAR_SCHEMA.names).cast(BAR_SCHEMA)
+
     def read_bars(
         self,
         *,
@@ -920,6 +984,51 @@ class StoreRead:
                     raise
                 self._reacquire()
         return []
+
+    def _replay_scan_branches(
+        self, queries: Sequence[ReplayReadQuery]
+    ) -> tuple[ReplayScanBranch, ...]:
+        """Explicit Data Files per distinct Replay subscription.
+
+        Selection is re-run against this read's fixed Snapshot entries, so a
+        subscription can only see the Data Files the Session leased at
+        creation. A missing file is an explicit read failure: the Snapshot is
+        fixed for the whole Session and is never silently replaced by newer
+        data.
+        """
+        dataset_root = self._store.dataset_root
+        branches: list[ReplayScanBranch] = []
+        for query in queries:
+            entries = _select_entries(
+                self.snapshot.entries,
+                instrument_id=query.instrument_id,
+                interval=query.interval,
+                start_ns=query.open_start_ns,
+                end_ns=query.close_end_ns,
+            )
+            paths = tuple(
+                str(dataset_root / str(entry["path"])) for entry in entries
+            )
+            missing = [path for path in paths if not Path(path).is_file()]
+            if missing:
+                msg = (
+                    "Data File is missing from the selected Snapshot: "
+                    f"{missing[0]}"
+                )
+                raise FileNotFoundError(msg)
+            if not paths:
+                continue
+            branches.append(
+                ReplayScanBranch(
+                    files=paths,
+                    instrument_id=query.instrument_id,
+                    interval=query.interval,
+                    open_start_ns=query.open_start_ns,
+                    close_start_ns=query.close_start_ns,
+                    close_end_ns=query.close_end_ns,
+                )
+            )
+        return tuple(branches)
 
     def _arrow_scan_groups(
         self, query: BarReadQuery
