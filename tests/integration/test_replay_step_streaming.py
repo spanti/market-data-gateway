@@ -669,9 +669,20 @@ def test_step_midstream_read_failure_is_an_error_not_exhaustion() -> None:
 
     bars, events = recorder.snapshot()
     assert len(bars) == 2
-    # No End of Session: ticket 16 turns this into `reason=error`. The Bars
-    # before the failure keep their real `bars_sent` count.
-    assert events == []
+    # A read failure is an explicit `reason=error` termination. The Bars
+    # published before it keep their real count.
+    assert events == [
+        {
+            "op": "end_of_session",
+            "session_id": "step-stream",
+            "reason": "error",
+            "bars_sent": 2,
+            "error": {
+                "code": "internal_error",
+                "message": "replay read failed",
+            },
+        }
+    ]
     assert session.bars_sent == 2
     assert isinstance(session.failure, OSError)
     assert read.close_calls >= 1

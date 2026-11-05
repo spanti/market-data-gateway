@@ -7,6 +7,7 @@ exercised end to end.
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -21,7 +22,12 @@ from mdgw.core.time import datetime_to_ns, iso_to_ns
 from mdgw.replay.server import ReplayServer
 from mdgw.replay.service import ReplayService
 from mdgw.store.parquet_dataset import ParquetBarStore
-from mdgw_client import ClientError, GatewayClient, ReplaySession
+from mdgw_client import (
+    ClientError,
+    GatewayClient,
+    ReplayFailedError,
+    ReplaySession,
+)
 from mdgw_client.live import READY_TOPIC
 from mdgw_client.replay import _ReplayReceiver
 
@@ -702,6 +708,118 @@ def test_full_session_queue_drops_oldest_but_never_the_eos() -> None:
         receiver.close()
         publisher.close()
         context.term()
+
+
+def _corrupt_data_files(store: ParquetBarStore) -> None:
+    files = sorted(store.dataset_root.rglob("*.parquet"))
+    assert files
+    for path in files:
+        path.write_bytes(b"this is not a parquet file")
+
+
+def test_asap_read_failure_raises_a_sticky_replay_failed_error(
+    tmp_path: Path,
+) -> None:
+    store = ParquetBarStore(tmp_path / "data")
+    _populate(store, range(3))
+    _corrupt_data_files(store)
+    server = ReplayServer(ReplayService(store))
+    server.start()
+    client = _client(server)
+    session = None
+    try:
+        session = client.replay.create_session(
+            _subscriptions(), START, END, replay_mode="asap"
+        )
+        with pytest.raises(ReplayFailedError) as excinfo:
+            _collect_until_eos(session)
+
+        error = excinfo.value
+        assert error.code == "internal_error"
+        assert error.message == "replay read failed"
+        assert error.bars_sent == 0
+        assert session.ended is True
+        assert session.end_of_session == {
+            "op": "end_of_session",
+            "session_id": session.session_id,
+            "reason": "error",
+            "bars_sent": 0,
+            "error": {
+                "code": "internal_error",
+                "message": "replay read failed",
+            },
+        }
+        # The failure is sticky: a later call is not normal completion.
+        with pytest.raises(ReplayFailedError) as again:
+            session.next_event(timeout=1.0)
+        assert again.value.code == "internal_error"
+    finally:
+        if session is not None:
+            session.close()
+        client.close()
+        server.stop()
+
+
+def test_schema_version_mismatch_reaches_the_sdk_with_its_stable_code(
+    tmp_path: Path,
+) -> None:
+    store = ParquetBarStore(tmp_path / "data")
+    _populate(store, range(1))
+    descriptor_path = store.dataset_root / "_dataset.json"
+    descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+    descriptor["schema_version"] = 2
+    descriptor_path.write_text(json.dumps(descriptor), encoding="utf-8")
+    server = ReplayServer(ReplayService(store))
+    server.start()
+    client = _client(server)
+    session = None
+    try:
+        session = client.replay.create_session(
+            _subscriptions(), START, END, replay_mode="asap"
+        )
+        with pytest.raises(ReplayFailedError) as excinfo:
+            _collect_until_eos(session)
+        assert excinfo.value.code == "schema_version_mismatch"
+        assert excinfo.value.message == (
+            "Dataset schema version is not supported"
+        )
+        assert excinfo.value.bars_sent == 0
+        assert session.end_of_session["reason"] == "error"
+        assert session.end_of_session["error"]["code"] == (
+            "schema_version_mismatch"
+        )
+    finally:
+        if session is not None:
+            session.close()
+        client.close()
+        server.stop()
+
+
+def test_empty_replay_still_ends_normally_for_the_sdk(tmp_path: Path) -> None:
+    store = ParquetBarStore(tmp_path / "data")
+    server = ReplayServer(ReplayService(store))
+    server.start()
+    client = _client(server)
+    session = None
+    try:
+        session = client.replay.create_session(
+            _subscriptions(), START, END, replay_mode="asap"
+        )
+        assert _collect_until_eos(session) == []
+        assert session.end_of_session == {
+            "op": "end_of_session",
+            "session_id": session.session_id,
+            "reason": "exhausted",
+            "bars_sent": 0,
+        }
+        assert "error" not in session.end_of_session
+        with pytest.raises(StopIteration):
+            session.next_event(timeout=1.0)
+    finally:
+        if session is not None:
+            session.close()
+        client.close()
+        server.stop()
 
 
 def test_replay_receiver_survives_a_malformed_topic_frame() -> None:
