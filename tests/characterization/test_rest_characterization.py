@@ -62,6 +62,14 @@ def _iso(offset: int) -> str:
     return ns_to_iso(datetime_to_ns(minute(offset)))
 
 
+def _message_multiset(table: pa.Table) -> list[str]:
+    """Exact message content and multiplicity, ignoring physical scan order."""
+    return sorted(
+        json.dumps(message, sort_keys=True)
+        for message in table_to_messages(table)
+    )
+
+
 def _walk_pages(
     base_url: str,
     *,
@@ -301,7 +309,9 @@ def test_arrow_stream_uses_the_exact_contract_schema(tmp_path: Path) -> None:
     assert table.num_rows == 4
     assert table.column("interval").to_pylist() == ["1m"] * 4
     assert set(table.column("instrument_id").to_pylist()) == {BTC, ETH}
-    assert table_to_messages(table) == table_to_messages(
+    # Non-paginated output has no ordering contract: freeze exact row content
+    # and duplicate counts against the PyArrow Store read, not scan order.
+    assert _message_multiset(table) == _message_multiset(
         dataset.store.read_bars(interval="1m")
     )
 
