@@ -71,6 +71,11 @@ def _message_multiset(table: pa.Table) -> list[str]:
     )
 
 
+def _message_multiset_of(messages: list[dict]) -> list[str]:
+    """Exact message content and multiplicity, ignoring physical scan order."""
+    return sorted(json.dumps(message, sort_keys=True) for message in messages)
+
+
 def _walk_pages(
     base_url: str,
     *,
@@ -348,10 +353,13 @@ def test_csv_text_has_exact_header_decimals_and_timestamps(tmp_path: Path) -> No
     assert lines[0] == ",".join(BAR_SCHEMA.names)
     assert len(lines) == 3
     open_index = BAR_SCHEMA.names.index("open")
-    assert lines[1].split(",")[open_index] == "65000.1"
-    assert lines[2].split(",")[open_index] == precise
+    # Non-paginated CSV has no ordering contract: select rows by content.
+    by_open = {
+        line.split(",")[open_index]: line.split(",") for line in lines[1:]
+    }
+    assert set(by_open) == {"65000.1", precise}
     open_ts_index = BAR_SCHEMA.names.index("open_ts")
-    assert lines[2].split(",")[open_ts_index] == _iso(1)
+    assert by_open[precise][open_ts_index] == _iso(1)
     assert all(
         NS_TIMESTAMP.fullmatch(line.split(",")[open_ts_index]) is not None
         for line in lines[1:]
@@ -371,7 +379,9 @@ def test_export_materializes_complete_parquet_and_arrow_files(
             f"{runtime.base_url}{EXPORT}?interval=1m&format=arrow"
         )
 
-    expected = table_to_messages(dataset.store.read_bars(interval="1m"))
+    expected = _message_multiset_of(
+        table_to_messages(dataset.store.read_bars(interval="1m"))
+    )
     assert parquet_status == 200
     assert parquet_headers.get("Content-Type") == PARQUET
     assert (
@@ -381,7 +391,7 @@ def test_export_materializes_complete_parquet_and_arrow_files(
     assert int(parquet_headers["Content-Length"]) == len(parquet_body)
     parquet_table = pq.read_table(pa.BufferReader(parquet_body))
     assert parquet_table.schema == BAR_SCHEMA
-    assert table_to_messages(parquet_table) == expected
+    assert _message_multiset(parquet_table) == expected
 
     assert arrow_status == 200
     assert arrow_headers.get("Content-Type") == ARROW_FILE
@@ -392,7 +402,7 @@ def test_export_materializes_complete_parquet_and_arrow_files(
     assert int(arrow_headers["Content-Length"]) == len(arrow_body)
     arrow_table = pa.ipc.open_file(pa.BufferReader(arrow_body)).read_all()
     assert arrow_table.schema == BAR_SCHEMA
-    assert table_to_messages(arrow_table) == expected
+    assert _message_multiset(arrow_table) == expected
 
 
 def test_inactive_manifest_entries_never_reach_any_response_format(
