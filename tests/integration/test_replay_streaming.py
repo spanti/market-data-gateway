@@ -3,8 +3,8 @@
 Seams under test:
 - `ReplayService` + real Parquet/DuckDB: asap publishes the ordered query in
   configured batches and never materializes the whole result first.
-- `ReplaySession` with an explicit read: asap and realtime use the streaming
-  path (realtime has its own suite), step stays materialized, and a
+- `ReplaySession` with an explicit read: asap, realtime and step all use the
+  streaming path (realtime and step have their own suites), and a
   stopped/failed read never looks like a normal exhaustion.
 - Prefetch: the read runs ahead of the publisher by a bounded number of
   batches only.
@@ -692,10 +692,10 @@ def test_a_globally_sorted_replay_spills_to_the_configured_temp_directory(
     assert temp_peak[0] > 0
 
 
-def test_step_keeps_the_materialized_read_path() -> None:
-    """Step stays materialized until ticket 15 moves it onto the stream."""
+def test_step_streams_the_query_instead_of_materializing() -> None:
+    """Step consumes the bounded stream like asap and realtime."""
 
-    class _MaterializedOnlyRead:
+    class _StreamingRead:
         def __init__(self) -> None:
             self.bars = [_bar(0), _bar(1)]
             self.stream_calls = 0
@@ -714,7 +714,7 @@ def test_step_keeps_the_materialized_read_path() -> None:
         def close(self) -> None:
             pass
 
-    read = _MaterializedOnlyRead()
+    read = _StreamingRead()
     recorder = _Recorder()
     session = ReplaySession(
         "step-materialized",
@@ -740,8 +740,8 @@ def test_step_keeps_the_materialized_read_path() -> None:
     published, events = recorder.snapshot()
     assert len(published) == 2
     assert events[-1]["reason"] == "exhausted"
-    assert read.stream_calls == 0
-    assert read.materialized_calls == 1
+    assert read.stream_calls == 1
+    assert read.materialized_calls == 0
 
 
 def test_asap_without_files_still_sends_exhausted(tmp_path: Path) -> None:

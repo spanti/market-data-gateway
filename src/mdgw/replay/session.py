@@ -15,17 +15,15 @@ Three Replay Modes share the same deterministic ordering and End of Session:
 - `realtime` the same bounded stream paced by a Replay Clock; a seek starts a
              new query generation on the same fixed Snapshot while
              `pause`/`resume`/`set_speed` stay legal.
-- `step`     the session starts paused and waits for Step Credits; `step(n)`
-             grants n more Bars. `seek` is legal while (always) paused. Step
-             keeps its materialized read until ticket 15 moves it onto the
-             same stream.
+- `step`     the same bounded stream, one Bar per Step Credit. The session
+             starts paused; `step(n)` grants n more Bars and a seek replaces
+             the query generation while credits granted after it survive.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-from bisect import bisect_left
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -217,9 +215,10 @@ class ReplaySession:
     `publish_bar(bar)` and `publish_event(mapping)`. The Session never builds
     topics or Arrow IPC frames; that belongs to the transport adapter.
 
-    Controls acquire `_cond`; the worker only holds it while inspecting or
-    moving the cursor, never while publishing. That keeps control operations
-    (notably `step`) responsive even when a publish blocks.
+    Controls acquire `_cond`; the worker only holds it while checking its
+    generation, consuming a credit or computing a Clock wait, never while
+    publishing. That keeps control operations (notably `step`) responsive even
+    when a publish blocks.
     """
 
     def __init__(  # ruff: ignore[too-many-arguments] - explicit publish seam
@@ -250,9 +249,8 @@ class ReplaySession:
         self._publish_bar = publish_bar
         self._publish_event = publish_event
         self._heartbeat_s = heartbeat_s
-        # asap reads the ordered DuckDB query through a bounded prefetch. The
-        # materialized modes keep their existing single read until tickets
-        # 14/15 move them onto the same seam.
+        # Every Replay Mode reads through the same bounded DuckDB batch
+        # stream; these configure its batch size and prefetch depth.
         self._batch_size = batch_size
         self._prefetch_batches = prefetch_batches
 
@@ -264,19 +262,17 @@ class ReplaySession:
         self._reason = "exhausted"
         self._failure: BaseException | None = None
 
-        # Cursor / clock / Step Credit state, guarded by `_cond`.
+        # Clock / Step Credit state, guarded by `_cond`. No Replay Mode keeps
+        # the Bars or their close times: they live only in the bounded
+        # prefetch and in the Bar currently being published.
         self._cond = threading.Condition()
-        # Step mode still materializes (ticket 15 moves it onto the stream).
-        self._bars: list[Bar] | None = None
-        self._close_ts_ns: list[int] = []
-        self._cursor = 0
         self._credits = 0
         self._speed = spec.speed
         self._bars_sent = 0
-        self._pending_seek_ns: int | None = None
-        # Realtime query generations. A seek increments `_generation` and
-        # records its start position; the worker replaces the current bounded
-        # stream only after the old generation's Reader is cancelled.
+        # Query generations shared by realtime and step. A seek increments
+        # `_generation` and records its start position; the worker replaces
+        # the current bounded stream only after the old generation's Reader
+        # is cancelled.
         self._generation = 0
         self._generation_start_ns = spec.start_ts_ns
         # True until the current generation's first readable batch is ready.
@@ -450,27 +446,21 @@ class ReplaySession:
         # A seek discards credits granted before it; credits granted after it
         # survive, even when the next generation's read has not finished yet.
         self._credits = 0
-        if self.spec.replay_mode == "realtime":
-            # Invalidate the current generation and let the worker open a new
-            # query on the same fixed Snapshot/Lease. The Clock is re-anchored
-            # to the seek position only when that generation's first batch is
-            # ready, so seek I/O never consumes virtual time.
-            self._generation += 1
-            self._generation_start_ns = ts_ns
-            self._awaiting_generation = True
-            if self._clock_started:
-                self._clock.seek(ts_ns)
-                self._clock.pause()
+        # Invalidate the current generation and let the worker open a new
+        # query on the same fixed Snapshot/Lease. Both realtime and step use
+        # this path; consecutive seeks leave the latest target as the one the
+        # worker opens next.
+        self._generation += 1
+        self._generation_start_ns = ts_ns
+        if self.spec.replay_mode != "realtime":
             return
-        # Step keeps its materialized seek: before the Parquet read finishes
-        # there is no cursor to bisect, so the worker applies the pending seek
-        # right after the read.
-        if self._bars is None:
-            self._pending_seek_ns = ts_ns
-            return
-        self._cursor = bisect_left(self._close_ts_ns, ts_ns)
+        # The Clock is re-anchored to the seek position only when that
+        # generation's first batch is ready, so seek I/O never consumes
+        # virtual time.
+        self._awaiting_generation = True
         if self._clock_started:
             self._clock.seek(ts_ns)
+            self._clock.pause()
 
     # -- worker ------------------------------------------------------------
 
@@ -514,22 +504,14 @@ class ReplaySession:
                     else self._run_asap_streaming(read)
                 )
             elif self.spec.replay_mode == "step":
-                # Step keeps its materialized read until ticket 15. A read
-                # failure propagates to `_run` on purpose: it must not become
-                # an empty Bars list with a normal End of Session.
-                bars = (
-                    []
-                    if self._cancel.is_set()
-                    else self._source.read(
-                        self.spec.subscriptions,
-                        start_ts_ns=self.spec.start_ts_ns,
-                        end_ts_ns=self.spec.end_ts_ns,
-                        read=read,
-                    )
-                )
-                self._install_materialized(bars)
+                # Step uses the same bounded, generation-aware stream as
+                # realtime; Step Credits replace Clock pacing. A read failure
+                # propagates to `_run` on purpose: it must not become an empty
+                # stream with a normal End of Session.
                 self._reason = (
-                    "stopped" if self._cancel.is_set() else self._run_step(bars)
+                    "stopped"
+                    if self._cancel.is_set()
+                    else self._run_step_streaming(read)
                 )
             else:
                 # Realtime uses the same bounded stream as asap, paced by the
@@ -551,27 +533,6 @@ class ReplaySession:
             # every path is covered and repeated close is harmless.
             if read is not None:
                 read.close()
-
-    def _install_materialized(self, bars: list[Bar]) -> None:
-        with self._cond:
-            self._bars = bars
-            self._close_ts_ns = [datetime_to_ns(bar.close_ts) for bar in bars]
-            self._cursor = 0
-            # Start the clock *after* the read; reading time must not consume
-            # replay time. A session paused during the read stays paused at
-            # `start_ts`.
-            self._clock.start(self.spec.start_ts_ns)
-            self._clock_started = True
-            self._awaiting_generation = False
-            if self._paused and not self._clock.paused:
-                self._clock.pause()
-            if self._pending_seek_ns is not None:
-                pending = self._pending_seek_ns
-                self._pending_seek_ns = None
-                # Credits granted *after* the seek are intentionally
-                # preserved; the seek already reset the credits it saw.
-                self._cursor = bisect_left(self._close_ts_ns, pending)
-                self._clock.seek(pending)
 
     def _open_session_read(self) -> StoreRead | None:
         """Acquire the Session's one fixed Snapshot and one Lease."""
@@ -659,13 +620,17 @@ class ReplaySession:
             self._publish_and_count(bar)
         return False
 
-    def _run_realtime_streaming(self, read: StoreRead) -> str:
-        """Pace the bounded query stream, replacing it for each seek.
+    def _run_generation_streaming(
+        self,
+        read: StoreRead,
+        consume: Callable[[BoundedPrefetcher[list[Bar]], int, int], str],
+    ) -> str:
+        """Run query generations until one ends with anything but a seek.
 
         Every iteration owns one query generation of the Session's fixed
         Manifest Snapshot. A seek increments the generation and records the
-        new start position; the worker observes that while pacing, closes the
-        old prefetcher (which cancels that generation's Reader/connection
+        new start position; the worker observes that while consuming, closes
+        the old prefetcher (which cancels that generation's Reader/connection
         without releasing the Snapshot or Lease) and opens a new one at the
         seek position. Bars and failures of a superseded generation are
         discarded, never published and never reported.
@@ -676,17 +641,25 @@ class ReplaySession:
                     return "stopped"
                 generation = self._generation
                 start_ns = self._generation_start_ns
-            prefetcher = self._open_realtime_prefetch(
+            prefetcher = self._open_generation_prefetch(
                 read, start_ns, generation
             )
             try:
-                outcome = self._pace_stream(prefetcher, generation, start_ns)
+                outcome = consume(prefetcher, generation, start_ns)
             finally:
                 prefetcher.close()
             if outcome != "superseded":
                 return outcome
 
-    def _open_realtime_prefetch(
+    def _run_realtime_streaming(self, read: StoreRead) -> str:
+        """Pace the bounded generation stream with the Replay Clock."""
+        return self._run_generation_streaming(read, self._pace_stream)
+
+    def _run_step_streaming(self, read: StoreRead) -> str:
+        """Publish the bounded generation stream one Step Credit per Bar."""
+        return self._run_generation_streaming(read, self._consume_step_stream)
+
+    def _open_generation_prefetch(
         self, read: StoreRead, start_ns: int, generation: int
     ) -> BoundedPrefetcher[list[Bar]]:
         """One generation's bounded prefetch on the shared StoreRead."""
@@ -771,18 +744,21 @@ class ReplaySession:
         except BaseException:
             # An interrupted read is the expected consequence of stop or of a
             # replaced generation; any other producer failure stays explicit.
-            with self._cond:
-                if self._cancel.is_set():
-                    return "stopped"
-                if self._generation != generation:
-                    return "superseded"
+            outcome = self._generation_stop_reason(generation)
+            if outcome is not None:
+                return outcome
             raise
+        outcome = self._generation_stop_reason(generation)
+        return outcome or "exhausted"
+
+    def _generation_stop_reason(self, generation: int) -> str | None:
+        """`stopped`/`superseded` if the generation must not continue."""
         with self._cond:
             if self._cancel.is_set():
                 return "stopped"
             if self._generation != generation:
                 return "superseded"
-        return "exhausted"
+        return None
 
     def _start_generation_clock_locked(self, start_ns: int) -> None:
         """Anchor the Clock at the generation start when its data is ready.
@@ -800,25 +776,59 @@ class ReplaySession:
         else:
             self._clock.resume()
 
-    def _run_step(self, bars: list[Bar]) -> str:
-        while True:
-            with self._cond:
-                while (
-                    not self._cancel.is_set()
-                    and self._cursor < len(bars)
-                    and self._credits <= 0
-                ):
-                    self._cond.wait()
+    def _consume_step_stream(
+        self,
+        prefetcher: BoundedPrefetcher[list[Bar]],
+        generation: int,
+        _start_ns: int,
+    ) -> str:
+        """Publish one generation's Bars, exactly one Step Credit per Bar.
+
+        The worker parks under `_cond` while it has no credit, so a temporary
+        shortage can never end the Session. A Bar handed over by a superseded
+        generation is rejected before it can consume a credit; the generation
+        check and the credit decrement share one critical section and form
+        that Bar's commit point. `exhausted` is returned only after the
+        current generation's stream ended and every prefetched Bar was
+        published.
+        """
+        try:
+            for bars in prefetcher:
+                for bar in bars:
+                    outcome = self._await_step_credit(generation)
+                    if outcome is not None:
+                        return outcome
+                    self._publish_and_count(bar)
+        except BaseException:
+            # An interrupted read is the expected consequence of stop or of a
+            # replaced generation; any other producer failure stays explicit.
+            outcome = self._generation_stop_reason(generation)
+            if outcome is not None:
+                return outcome
+            raise
+        outcome = self._generation_stop_reason(generation)
+        return outcome or "exhausted"
+
+    def _await_step_credit(self, generation: int) -> str | None:
+        """Consume one credit for the current generation.
+
+        Returns `stopped`/`superseded` when the Session or generation ended,
+        and `None` when a credit was consumed. The generation check and the
+        decrement share one critical section: a Bar handed over by a replaced
+        generation is discarded before it can consume a credit.
+        """
+        with self._cond:
+            while True:
                 if self._cancel.is_set():
                     return "stopped"
-                if self._cursor >= len(bars):
-                    # Last Bar already published, or the session started
-                    # empty / was seeked past the end: End of Session now.
-                    return "exhausted"
-                bar = bars[self._cursor]
-                self._cursor += 1
-                self._credits -= 1
-            self._publish_and_count(bar)
+                if self._generation != generation:
+                    return "superseded"
+                if self._credits > 0:
+                    self._credits -= 1
+                    return None
+                # A prefetched Bar without a credit waits for `step`, stop or
+                # a seek; a temporary shortage is never exhaustion.
+                self._cond.wait()
 
     def _publish_and_count(self, bar: Bar) -> None:
         self._publish_bar(bar)
