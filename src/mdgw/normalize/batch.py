@@ -1,12 +1,12 @@
 """Polars batch Normalization at the Collector ingest boundary.
 
-Raw Bars are validated and normalized once per ``CollectorCore.ingest()``
-batch, never one DataFrame per message. Values enter Polars through typed
-Arrow columns (``decimal128(38,18)`` and ``timestamp[ns, tz=UTC]``), because
-both Arrow-typed and untyped decimal paths silently rescale over-scale input.
-This module therefore rejects float-shaped values and over-scale decimals
-before they can reach a Polars Decimal Series, and lets Polars compute the
-Instrument, Interval and closed-Bar rules for the whole batch.
+Raw Bars are validated and normalized once per batch, never one DataFrame per
+message. Decimals are validated exactly in Python before any Arrow conversion
+(both Arrow-typed and untyped decimal paths silently rescale over-scale input,
+and floats are rejected outright); they never enter a Polars Decimal Series.
+The typed Arrow columns passed to Polars carry only the fields the batch rules
+read, and Polars computes the Instrument, Interval and closed-Bar rules for
+the whole batch.
 
 This is the single production Normalization rule source: live Collector
 batches, Backfill and archive import all call ``normalize_batch``.
