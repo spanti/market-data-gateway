@@ -32,6 +32,7 @@ from mdgw.core.schema import (
     schema_json,
 )
 from mdgw.core.time import datetime_to_ns, ns_to_iso
+from mdgw.normalize.version import NORMALIZATION_RULE_VERSIONS, normalize_rule_versions
 from mdgw.store.duckdb_reader import (
     DuckDBArrowScanner,
     DuckDBConnectionCache,
@@ -95,6 +96,7 @@ class ParquetBarStore:
         session_lock_timeout_s: int = DEFAULT_LOCK_TIMEOUT_S,
         read_lease_heartbeat_s: float | None = None,
         duckdb: DuckDBOptions | None = None,
+        rule_versions: Sequence[str] | None = None,
     ) -> None:
         # The DuckDB 2.x Relation Arrow Reader is a formal runtime dependency,
         # not an optional engine: fail at Store/app startup, never at request
@@ -119,11 +121,35 @@ class ParquetBarStore:
             msg = "read_lease_heartbeat_s must be positive"
             raise ValueError(msg)
         self.read_lease_heartbeat_s = float(read_lease_heartbeat_s)
+        # Audit metadata only: this never participates in Schema compatibility.
+        self.rule_versions = (
+            normalize_rule_versions(rule_versions)
+            if rule_versions is not None
+            else tuple(sorted(NORMALIZATION_RULE_VERSIONS))
+        )
         self._lock = threading.Lock()
 
     # -- writes ------------------------------------------------------------
 
-    def write_bars(self, bars: Sequence[Bar], *, asset_class: str) -> list[dict]:
+    def write_bars(
+        self,
+        bars: Sequence[Bar],
+        *,
+        asset_class: str,
+        rule_versions: Sequence[str] | None = None,
+    ) -> list[dict]:
+        """Write Bars and stamp their Manifest entries with the Rule Versions.
+
+        ``rule_versions`` defaults to the Store's configured set, so live and
+        test call sites do not have to repeat it. Callers that intentionally
+        use different Normalization rules (Backfill/archive scalar rules) pass
+        their own set explicitly; this is audit metadata, not an engine switch.
+        """
+        versions = (
+            self.rule_versions
+            if rule_versions is None
+            else normalize_rule_versions(rule_versions)
+        )
         groups: dict[tuple[str, str, str, str, int, int], list[Bar]] = defaultdict(list)
         for bar in bars:
             instrument = InstrumentId.parse(bar.instrument_id)
@@ -138,7 +164,7 @@ class ParquetBarStore:
 
         written: list[dict] = []
         for key, group in sorted(groups.items()):
-            written.append(self._write_partition(key, group))
+            written.append(self._write_partition(key, group, versions))
 
         if written:
             last_flushed_ns = max(
@@ -153,6 +179,7 @@ class ParquetBarStore:
         self,
         key: tuple[str, str, str, str, int, int],
         bars: Sequence[Bar],
+        rule_versions: Sequence[str],
     ) -> dict:
         asset_class, venue, file_symbol, interval, year, month = key
         partition = {
@@ -192,6 +219,7 @@ class ParquetBarStore:
             "created_ns": time.time_ns(),
             "partition": partition,
             "max_ingest_ns": max(datetime_to_ns(bar.ingest_ts) for bar in bars),
+            "rule_versions": list(rule_versions),
         }
 
     def _ensure_dataset_descriptor(self, last_flushed_ns: int | None = None) -> None:

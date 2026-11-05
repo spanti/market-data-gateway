@@ -47,6 +47,7 @@ from mdgw.backfill_common import (
 )
 from mdgw.core.time import datetime_to_ns, to_utc, utc_now
 from mdgw.normalize.bar import normalize_bar
+from mdgw.normalize.version import SCALAR_NORMALIZATION_RULE_VERSIONS
 
 if TYPE_CHECKING:
     from mdgw.aggregate import BarAggregator
@@ -262,7 +263,10 @@ def _import_period(
         return
 
     context.store.write_bars(
-        result.written, asset_class=instrument.asset_class
+        result.written,
+        asset_class=instrument.asset_class,
+        # Archive import normalizes with the scalar reference rules.
+        rule_versions=SCALAR_NORMALIZATION_RULE_VERSIONS,
     )
     report.bars_written += len(result.written)
 

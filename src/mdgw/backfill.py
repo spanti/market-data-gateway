@@ -27,6 +27,7 @@ from mdgw.backfill_common import (
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.time import datetime_to_ns, ns_to_datetime, to_utc
 from mdgw.normalize.bar import normalize_bar
+from mdgw.normalize.version import SCALAR_NORMALIZATION_RULE_VERSIONS
 from mdgw.state.health import (
     GAP_BACKFILL_LIMIT,
     GAP_HISTORY_UNSUPPORTED,
@@ -147,7 +148,13 @@ def run_backfill(  # ruff: ignore[too-many-arguments] -- public entry point; par
         if not bars_to_write:
             continue
 
-        store.write_bars(bars_to_write, asset_class=asset_class_for(instrument_id))
+        store.write_bars(
+            bars_to_write,
+            asset_class=asset_class_for(instrument_id),
+            # Backfill normalizes with the scalar reference rules, so its
+            # lineage must not claim the live Polars Rule Version.
+            rule_versions=SCALAR_NORMALIZATION_RULE_VERSIONS,
+        )
         report.written_bars += len(bars_to_write)
 
         # The HWM advances only after the Data Files and Manifest are durable.
