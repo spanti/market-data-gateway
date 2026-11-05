@@ -228,15 +228,8 @@ def test_scan_order_is_not_a_contract_but_content_is_complete(
     rows = _scan(dataset.store)
     # Do not freeze the physical scan order as a contract: only that every
     # stored row, and each duplicate/revision, is present exactly once.
+    # DuckDB makes no non-paginated ordering promise.
     assert _identities(rows) == sorted(expected)
-    # The current implementation happens to follow Manifest append order.
-    assert [(row["open_ts"], row["revision"]) for row in rows] == [
-        (minute(9), 0),
-        (minute(5), 0),
-        (minute(10), 0),
-        (minute(5), 1),
-        (minute(15), 0),
-    ]
 
 
 def test_large_dataset_scan_and_count(tmp_path: Path) -> None:

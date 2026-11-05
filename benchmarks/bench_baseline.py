@@ -63,11 +63,12 @@ from mdgw.core.time import datetime_to_ns  # noqa: E402
 from mdgw.ingest.fake import FakeFeedHandler  # noqa: E402
 from mdgw.replay.service import ReplayService  # noqa: E402
 from mdgw.replay.session import BarSubscription, ReplaySessionSpec  # noqa: E402
-from mdgw.replay.source import ReplayBarSource, interval_ns  # noqa: E402
+from mdgw.replay.source import interval_ns  # noqa: E402
 from mdgw.runtime import GatewayRuntime  # noqa: E402
 from mdgw.store.parquet_dataset import (  # noqa: E402
     BarReadQuery,
     ParquetBarStore,
+    ReplayReadQuery,
 )
 from mdgw.streaming import table_to_ipc  # noqa: E402
 
@@ -620,7 +621,6 @@ def run_replay_scenarios(
     start_ns = datetime_to_ns(bars[0].open_ts)
     end_ns = datetime_to_ns(bars[-1].close_ts) + 1
     subscription = BarSubscription(INSTRUMENT, INTERVAL)
-    source = ReplayBarSource(store)
     encoded: list[int] = [0]
 
     snapshot_query = BarReadQuery(
@@ -629,19 +629,28 @@ def run_replay_scenarios(
         start_ns=start_ns - interval_ns(subscription.interval),
         end_ns=end_ns,
     )
+    replay_query = ReplayReadQuery(
+        instrument_id=subscription.instrument_id,
+        interval=subscription.interval,
+        open_start_ns=start_ns - interval_ns(subscription.interval),
+        close_start_ns=start_ns,
+        close_end_ns=end_ns,
+    )
 
     def query_prep():
-        # Production path: fixed Snapshot + Lease, DuckDB scan, Revision
-        # dedupe and five-key order, then the M5A full materialization.
+        # Production path: fixed Snapshot + Lease, then the one bounded
+        # DuckDB stream (Revision dedupe and five-key order), fully drained
+        # into Bar values for the separate IPC-encode scenario.
         with store.open_read(
             queries=(snapshot_query,), lease_id="bench-baseline-replay"
         ) as read:
-            result = source.read(
-                [subscription],
-                start_ts_ns=start_ns,
-                end_ts_ns=end_ns,
-                read=read,
-            )
+            result = [
+                Bar(**row)
+                for batch in read.iter_replay_batches(
+                    (replay_query,), batch_size=65_536
+                )
+                for row in batch.to_pylist()
+            ]
         encoded[0] = len(result)
         return result
 

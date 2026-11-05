@@ -1,11 +1,9 @@
 # ruff: file-ignore[implicit-namespace-package]
 """DuckDB count and materialized reads for the JSON REST surface.
 
-Ticket 06 moves the JSON row-ceiling count and the non-paginated JSON read
-onto the DuckDB scan. These tests use the `StoreRead` seam as the old/new
-differential boundary: `count_arrow()` and `read_arrow_bars()` must agree with
-the pre-migration PyArrow `count()` / `read_bars()` on exact row content,
-duplicate multiplicity and the Data Contract schema, while the comparison is
+The JSON row-ceiling count and the non-paginated JSON read use the one
+DuckDB scan: `count_arrow()` and `read_arrow_bars()` preserve exact row
+content, duplicate multiplicity and the Data Contract schema. Assertions are
 order insensitive because non-paginated output has no ordering contract.
 """
 
@@ -92,11 +90,11 @@ def test_count_arrow_counts_raw_revisions_and_duplicate_rows(
 
     with store.open_read(interval="1m") as read:
         assert read.count_arrow() == 6
-        # Differential: the pre-migration PyArrow count sees the same raw rows.
-        assert read.count_arrow() == read.count()
+        # The public count is the same query on the same Snapshot.
+        assert read.count() == 6
 
 
-def test_read_arrow_bars_matches_pyarrow_for_multi_file_revisions(
+def test_read_arrow_bars_preserves_multi_file_revisions(
     tmp_path: Path,
 ) -> None:
     store = ParquetBarStore(tmp_path)
@@ -106,13 +104,16 @@ def test_read_arrow_bars_matches_pyarrow_for_multi_file_revisions(
     _write(store, [_bar(0, revision=2), _bar(1, revision=1)])
 
     with store.open_read(interval="1m") as read:
-        expected = read.read_bars()
-    with store.open_read(interval="1m") as read:
         actual = read.read_arrow_bars()
 
     assert actual.schema.equals(BAR_SCHEMA)
-    assert actual.num_rows == expected.num_rows == 6
-    assert _row_multiset(actual) == _row_multiset(expected)
+    assert actual.num_rows == 6
+    assert Counter(
+        (row["open_ts"].minute, row["revision"])
+        for row in actual.to_pylist()
+    ) == Counter(
+        {(0, 0): 2, (0, 1): 1, (0, 2): 1, (1, 0): 1, (1, 1): 1}
+    )
 
 
 def test_count_and_read_apply_instrument_interval_and_half_open_bounds(
@@ -177,7 +178,7 @@ def test_read_arrow_bars_limit_only_caps_rows_from_the_matching_set(
     _write(store, [_bar(minute, revision=1) for minute in range(2)])
 
     with store.open_read(interval="1m") as read:
-        full = _row_multiset(read.read_bars())
+        full = _row_multiset(read.read_arrow_bars())
     assert sum(full.values()) == 7
 
     for limit in (0, 1, 6, 7, 8):
@@ -219,12 +220,10 @@ def test_revision_heavy_count_and_read_preserve_every_raw_revision(
     _write(store, [_bar(minute) for minute in range(1, 6)])
 
     with store.open_read(interval="1m") as read:
-        expected = read.read_bars()
         assert read.count_arrow() == 9
         actual = read.read_arrow_bars()
 
     assert actual.num_rows == 9
-    assert _row_multiset(actual) == _row_multiset(expected)
     revisions_at_start = sorted(
         row["revision"]
         for row in actual.to_pylist()

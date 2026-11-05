@@ -42,7 +42,7 @@ from mdgw.core.bar import Bar  # noqa: E402
 from mdgw.core.schema import bars_to_logical_table  # noqa: E402
 from mdgw.replay.service import ReplayService  # noqa: E402
 from mdgw.replay.session import BarSubscription, ReplaySessionSpec  # noqa: E402
-from mdgw.replay.source import ReplayBarSource, interval_ns  # noqa: E402
+from mdgw.replay.source import interval_ns  # noqa: E402
 from mdgw.store.duckdb_reader import DuckDBOptions  # noqa: E402
 from mdgw.store.parquet_dataset import (  # noqa: E402
     BarReadQuery,
@@ -355,16 +355,14 @@ def replay(
     query_durations: list[float] = []
     query_counts: list[int] = []
     stream_durations: list[float] = []
-    legacy_query_durations: list[float] = []
     with tempfile.TemporaryDirectory(prefix="mdgw-bench-replay-") as tmp:
         store = ParquetBarStore(Path(tmp))
         store.write_bars(bars, asset_class="crypto")
 
         # Replay query preparation alone (Snapshot + lease acquisition,
         # DuckDB scan, close_ts filter, Revision dedupe and five-key sort),
-        # before any Arrow IPC / publish cost. This is the materialized path
-        # still used by realtime/step.
-        source = ReplayBarSource(store)
+        # before any Arrow IPC / publish cost. This fully drains the one
+        # production bounded stream.
         snapshot_query = BarReadQuery(
             instrument_id=subscription.instrument_id,
             interval=subscription.interval,
@@ -383,14 +381,14 @@ def replay(
             with store.open_read(
                 queries=(snapshot_query,), lease_id="bench-replay"
             ) as read:
-                prepared = source.read(
-                    [subscription],
-                    start_ts_ns=start_ns,
-                    end_ts_ns=end_ns,
-                    read=read,
+                prepared = sum(
+                    batch.num_rows
+                    for batch in read.iter_replay_batches(
+                        (replay_query,), batch_size=batch_size
+                    )
                 )
             query_durations.append(time.perf_counter() - started)
-            query_counts.append(len(prepared))
+            query_counts.append(prepared)
 
         # The streaming asap path: Snapshot + lease + query preparation until
         # the first Arrow batch is ready (the global sort still runs first),
@@ -406,13 +404,6 @@ def replay(
                 next(batches, None)
                 batches.close()
             stream_durations.append(time.perf_counter() - started)
-
-        # The pre-DuckDB PyArrow path is measured only for comparison; it is
-        # not reachable from a production Replay Session.
-        for _ in range(repeat):
-            started = time.perf_counter()
-            source.read([subscription], start_ts_ns=start_ns, end_ts_ns=end_ns)
-            legacy_query_durations.append(time.perf_counter() - started)
 
         for index in range(repeat):
             service = ReplayService(
@@ -452,13 +443,11 @@ def replay(
     query_rows = query_counts[-1]
     stream_best = min(stream_durations)
     stream_median = statistics.median(stream_durations)
-    legacy_best = min(legacy_query_durations)
-    legacy_median = statistics.median(legacy_query_durations)
     typer.echo(
         f"mode: {mode} replay  rows: {sent:,}  passes: {repeat}  speed: {speed:g}"
     )
     typer.echo(
-        f"query prep (duckdb materialized): best {query_best:.3f}s "
+        f"query prep (streamed): best {query_best:.3f}s "
         f"({format_rate(query_rows, query_best)})  "
         f"median {query_median:.3f}s "
         f"({format_rate(query_rows, query_median)})"
@@ -466,12 +455,6 @@ def replay(
     typer.echo(
         f"stream first batch (duckdb): best {stream_best:.3f}s  "
         f"median {stream_median:.3f}s"
-    )
-    typer.echo(
-        f"query prep (legacy): best {legacy_best:.3f}s "
-        f"({format_rate(query_rows, legacy_best)})  "
-        f"median {legacy_median:.3f}s "
-        f"({format_rate(query_rows, legacy_median)})"
     )
     typer.echo(f"best:   {best:.3f}s  {format_rate(sent, best)}")
     typer.echo(f"median: {median:.3f}s  {format_rate(sent, median)}")

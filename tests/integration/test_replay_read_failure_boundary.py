@@ -206,10 +206,6 @@ class _ScriptedRead:
         finally:
             generation.finished.set()
 
-    def read_replay_bars(self, queries):
-        msg = "Replay must not materialize the failure boundary"
-        raise AssertionError(msg)
-
     def close(self) -> None:
         self.close_calls += 1
 

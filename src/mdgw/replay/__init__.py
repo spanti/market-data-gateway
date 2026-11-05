@@ -9,7 +9,7 @@ from mdgw.replay.session import (
     ReplaySessionSpec,
     SessionState,
 )
-from mdgw.replay.source import ReplayBarSource, bar_order_key
+from mdgw.replay.source import ReplayBarSource
 
 __all__ = [
     "BarSubscription",
@@ -20,5 +20,4 @@ __all__ = [
     "ReplaySession",
     "ReplaySessionSpec",
     "SessionState",
-    "bar_order_key",
 ]

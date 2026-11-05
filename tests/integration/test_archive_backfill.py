@@ -592,8 +592,12 @@ def test_imported_data_can_be_compacted(tmp_path: Path) -> None:
     )
     _run_import(tmp_path / "data", archive_dir, start=day, end=day)
 
+    # Non-paginated reads have no physical-order contract: compare the same
+    # rows in a deterministic content order (revisions share `open_ts`).
     before = {
-        interval: store.read_bars(interval=interval).sort_by("open_ts")
+        interval: store.read_bars(interval=interval).sort_by(
+            [("open_ts", "ascending"), ("revision", "ascending")]
+        )
         for interval in ("1m", "5m")
     }
     report = store.compact(
@@ -604,7 +608,9 @@ def test_imported_data_can_be_compacted(tmp_path: Path) -> None:
     assert report.failures == ()
     assert report.new_files
     for interval, table in before.items():
-        after = store.read_bars(interval=interval).sort_by("open_ts")
+        after = store.read_bars(interval=interval).sort_by(
+            [("open_ts", "ascending"), ("revision", "ascending")]
+        )
         assert after.equals(table)
 
 

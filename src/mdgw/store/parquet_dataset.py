@@ -11,14 +11,12 @@ import statistics
 import threading
 import time
 from collections import defaultdict
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 from uuid import uuid4
 
 import pyarrow as pa
-import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from mdgw.core.errors import SchemaVersionMismatch
@@ -26,7 +24,6 @@ from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import (
     BAR_SCHEMA,
     PARTITION_COLUMNS,
-    UTC_TS,
     bars_to_physical_table,
     empty_logical_table,
     schema_json,
@@ -67,7 +64,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 DATASET_SCHEMA_VERSION = 1
 FILE_NAMING = "data-<start_ns>-<end_ns>-<uuid>.parquet"
-DEFAULT_BATCH_SIZE = 65_536
 # One Manifest refresh is enough for the Compaction/GC race: the switching
 # process has already written the new Manifest before it unlinks the old files.
 MANIFEST_REFRESH_ATTEMPTS = 2
@@ -77,14 +73,15 @@ READ_LEASE_ATTEMPTS = 3
 # StoreRead filters are optional; this sentinel distinguishes "not passed"
 # from an explicit `None` (= no filter on that dimension).
 _UNSET = object()
-# `interval` is a Hive partition column, not a physical column in Data Files.
-PHYSICAL_READ_COLUMNS: tuple[str, ...] = tuple(
-    name for name in BAR_SCHEMA.names if name != "interval"
-)
 
 
 class ParquetBarStore:
-    """Writes immutable Data Files and reads them back through pyarrow.dataset."""
+    """Writes immutable Data Files and reads them through one DuckDB seam.
+
+    Every read method opens a fixed Manifest Snapshot protected by a Dataset
+    Read Lease and delegates to the same Manifest-pruned DuckDB Relation Arrow
+    Reader. There is no second PyArrow row-filtering implementation.
+    """
 
     def __init__(  # ruff: ignore[too-many-arguments] - keyword-only store tuning knobs
         self,
@@ -141,10 +138,11 @@ class ParquetBarStore:
     ) -> list[dict]:
         """Write Bars and stamp their Manifest entries with the Rule Versions.
 
-        ``rule_versions`` defaults to the Store's configured set, so live and
-        test call sites do not have to repeat it. Callers that intentionally
-        use different Normalization rules (Backfill/archive scalar rules) pass
-        their own set explicitly; this is audit metadata, not an engine switch.
+        ``rule_versions`` defaults to the Store's configured set, which is the
+        one Polars batch Normalization rule source used by live ingest,
+        Backfill and archive import. An explicit set is only audit metadata
+        for callers with a deliberate lineage override; it is not an engine
+        switch.
         """
         versions = (
             self.rule_versions
@@ -273,7 +271,6 @@ class ParquetBarStore:
         start_ns: int | None = None,
         end_ns: int | None = None,
         queries: Sequence[BarReadQuery] | None = None,
-        batch_size: int | None = None,
         lease_id: str | None = None,
         subscriptions: Sequence[dict[str, str]] | None = None,
         lease_heartbeat_s: float | None = None,
@@ -329,11 +326,6 @@ class ParquetBarStore:
             lease_id=lease_id,
             subscriptions=subscriptions,
             heartbeat_s=heartbeat_s,
-            batch_size=(
-                batch_size
-                if batch_size is not None
-                else DEFAULT_BATCH_SIZE
-            ),
         )
 
     def iter_batches(  # ruff: ignore[too-many-arguments] - keyword-only query filters
@@ -349,18 +341,18 @@ class ParquetBarStore:
         """Yield Bar RecordBatches from one fixed Manifest Snapshot.
 
         `start_ns` is inclusive and `end_ns` is exclusive, both applied to
-        `open_ts`. `limit` caps the total number of rows yielded. This legacy
-        one-shot form delegates to `open_read`; callers that need several
-        observations (count, existence probe, read) should hold one StoreRead.
+        `open_ts`. `limit` caps the total number of rows yielded. This
+        one-shot form delegates to `open_read`'s DuckDB scan; callers that
+        need several observations (count, existence probe, read) should hold
+        one StoreRead.
         """
         with self.open_read(
             instrument_id=instrument_id,
             interval=interval,
             start_ns=start_ns,
             end_ns=end_ns,
-            batch_size=batch_size,
         ) as read:
-            yield from read.iter_batches(limit=limit)
+            yield from read.iter_batches(limit=limit, batch_size=batch_size)
 
     def count_bars(
         self,
@@ -636,12 +628,10 @@ class StoreRead:
         lease_id: str | None,
         subscriptions: Sequence[dict[str, str]] | None,
         heartbeat_s: float,
-        batch_size: int,
     ) -> None:
         self._store = store
         self.snapshot = snapshot
         self.lease = lease
-        self.batch_size = batch_size
         self._default_query = default_query
         self._acquisition_queries = tuple(acquisition_queries)
         self._lease_id = lease_id
@@ -667,42 +657,21 @@ class StoreRead:
         limit: int | None = None,
         batch_size: int | None = None,
     ):
-        """Yield Bar RecordBatches from this read's fixed Snapshot."""
-        self._ensure_open()
-        query = self._resolve_query(instrument_id, interval, start_ns, end_ns)
-        self._scans += 1
-        effective_batch_size = batch_size or self.batch_size
-        opened = self._open_files(query)
+        """Yield contract Bar RecordBatches through the DuckDB scan.
 
-        remaining = limit
-        try:
-            for parquet_file, partition_interval in opened:
-                for physical_batch in parquet_file.iter_batches(
-                    columns=list(PHYSICAL_READ_COLUMNS),
-                    batch_size=effective_batch_size,
-                ):
-                    batch = _with_partition_interval(
-                        physical_batch, partition_interval
-                    )
-                    batch = _filter_batch(
-                        batch,
-                        instrument_id=query.instrument_id,
-                        interval=query.interval,
-                        start_ns=query.start_ns,
-                        end_ns=query.end_ns,
-                    )
-                    if batch.num_rows == 0:
-                        continue
-                    if remaining is not None:
-                        if remaining <= 0:
-                            return
-                        if batch.num_rows > remaining:
-                            batch = batch.slice(0, remaining)
-                        remaining -= batch.num_rows
-                    self._yielded = True
-                    yield batch
-        finally:
-            _close_parquet_files(opened)
+        This is the one read semantics: it delegates to the Manifest-pruned
+        DuckDB Relation Arrow Reader of this read's fixed Snapshot. The Store's
+        public one-shot ``iter_batches`` and Backfill use it; there is no
+        Python/PyArrow row-filtering path.
+        """
+        yield from self.iter_arrow_batches(
+            instrument_id=instrument_id,
+            interval=interval,
+            start_ns=start_ns,
+            end_ns=end_ns,
+            limit=limit,
+            batch_size=batch_size,
+        )
 
     def iter_arrow_batches(  # ruff: ignore[too-many-arguments] - keyword-only query filters
         self,
@@ -763,15 +732,16 @@ class StoreRead:
         start_ns: Any = _UNSET,
         end_ns: Any = _UNSET,
     ) -> int:
-        """Count matching Bars on this read's fixed Snapshot."""
-        return sum(
-            batch.num_rows
-            for batch in self.iter_batches(
-                instrument_id=instrument_id,
-                interval=interval,
-                start_ns=start_ns,
-                end_ns=end_ns,
-            )
+        """Count matching raw Bar rows on this read's fixed Snapshot.
+
+        Delegates to the exact DuckDB count so count and read share one query
+        semantics and one Snapshot/Lease.
+        """
+        return self.count_arrow(
+            instrument_id=instrument_id,
+            interval=interval,
+            start_ns=start_ns,
+            end_ns=end_ns,
         )
 
     def count_arrow(
@@ -814,51 +784,6 @@ class StoreRead:
                 if self._active_scanner is scanner:
                     self._active_scanner = None
 
-    def read_replay_bars(
-        self, queries: Sequence[ReplayReadQuery]
-    ) -> pa.Table:
-        """Materialize the deduplicated, five-key ordered Bars of a Replay query.
-
-        This is the Replay Source seam. It reads exactly the active Data Files
-        selected from this read's fixed Manifest Snapshot; DuckDB never globs
-        the Dataset root. One `UNION ALL` branch is emitted per distinct
-        `(instrument_id, interval)` subscription, each with its own explicit
-        file list and bound close-time window. Deduplication, Revision choice
-        and the total order happen inside one DuckDB query, so the REST
-        raw-Revision semantics cannot leak into Replay.
-
-        M5A keeps the full materialization: every batch is consumed before
-        this returns. A failure at any point raises; it is never turned into
-        an empty or short result. The Arrow export is restored to
-        `BAR_SCHEMA` (field order and nullability) before it crosses the Store
-        boundary.
-        """
-        self._ensure_open()
-        branches = self._replay_scan_branches(queries)
-        if not branches:
-            return empty_logical_table()
-        self._scans += 1
-        scanner = DuckDBArrowScanner(self._store.duckdb_connections)
-        with self._close_lock:
-            if self._closed:
-                msg = "StoreRead is closed"
-                raise RuntimeError(msg)
-            self._active_scanner = scanner
-        try:
-            batches = scanner.replay_batches(
-                branches,
-                batch_size=self._store.duckdb.arrow_batch_size,
-            )
-        finally:
-            scanner.close()
-            with self._close_lock:
-                if self._active_scanner is scanner:
-                    self._active_scanner = None
-        if not batches:
-            return empty_logical_table()
-        table = pa.Table.from_batches(batches)
-        return table.select(BAR_SCHEMA.names).cast(BAR_SCHEMA)
-
     def iter_replay_batches(
         self,
         queries: Sequence[ReplayReadQuery],
@@ -868,12 +793,12 @@ class StoreRead:
     ) -> Iterator[pa.RecordBatch]:
         """Yield the ordered Replay Bars as a stream of contract RecordBatches.
 
-        This is the bounded M5B seam. It resolves the same explicit Data Files
-        from this read's fixed Manifest Snapshot as `read_replay_bars()` and
-        runs the same close-time filter, Revision choice, duplicate-subscription
-        resolution and five-key total order. Unlike that materializing call, it
-        hands each Arrow RecordBatch to the caller as soon as DuckDB produces
-        it, so a caller never needs the complete result in memory.
+        This is the only Replay read seam. It resolves the explicit Data Files
+        of this read's fixed Manifest Snapshot and runs the close-time filter,
+        Revision choice, duplicate-subscription resolution and five-key total
+        order inside one DuckDB query. It hands each Arrow RecordBatch to the
+        caller as soon as DuckDB produces it, so a caller never needs the
+        complete result in memory.
 
         Consuming the returned generator is what starts the query (and the
         single scanner); closing it, or closing this `StoreRead` from another
@@ -931,18 +856,14 @@ class StoreRead:
         end_ns: Any = _UNSET,
         limit: int | None = None,
     ) -> pa.Table:
-        batches = list(
-            self.iter_batches(
-                instrument_id=instrument_id,
-                interval=interval,
-                start_ns=start_ns,
-                end_ns=end_ns,
-                limit=limit,
-            )
+        """Materialize contract Bars through the DuckDB scan."""
+        return self.read_arrow_bars(
+            instrument_id=instrument_id,
+            interval=interval,
+            start_ns=start_ns,
+            end_ns=end_ns,
+            limit=limit,
         )
-        if not batches:
-            return empty_logical_table()
-        return pa.Table.from_batches(batches, schema=BAR_SCHEMA)
 
     def read_arrow_bars(
         self,
@@ -1071,33 +992,6 @@ class StoreRead:
             end_ns=None if end_ns is _UNSET else end_ns,
         )
 
-    def _open_files(
-        self, query: BarReadQuery
-    ) -> list[tuple[pq.ParquetFile, str]]:
-        """Open every selected file; refresh once if one disappeared."""
-        for attempt in range(MANIFEST_REFRESH_ATTEMPTS):
-            entries = _select_entries(
-                self.snapshot.entries,
-                instrument_id=query.instrument_id,
-                interval=query.interval,
-                start_ns=query.start_ns,
-                end_ns=query.end_ns,
-            )
-            try:
-                return _open_parquet_files(self._store.dataset_root, entries)
-            except FileNotFoundError:
-                # A concurrent writer ignored the lease (or deleted the file
-                # externally). Only a read that has not produced a row and has
-                # not completed an earlier scan may switch snapshots.
-                if (
-                    self._scans > 1
-                    or self._yielded
-                    or attempt + 1 >= MANIFEST_REFRESH_ATTEMPTS
-                ):
-                    raise
-                self._reacquire()
-        return []
-
     def _replay_scan_branches(
         self, queries: Sequence[ReplayReadQuery]
     ) -> tuple[ReplayScanBranch, ...]:
@@ -1149,8 +1043,8 @@ class StoreRead:
         """Explicit Data Files per partition interval, after a miss retry.
 
         Selecting entries and checking that their files exist happens before a
-        DuckDB connection is opened, exactly like the PyArrow path. A missing
-        file before any row was produced may switch to a newer Snapshot once;
+        DuckDB connection is opened. A missing file before any row was produced
+        may switch to a newer Snapshot once;
         after that it is a read failure, never a silently short result.
         """
         dataset_root = self._store.dataset_root
@@ -1260,25 +1154,6 @@ def _lease_scope(
     return tuple(partitions), tuple(sorted(months))
 
 
-def _open_parquet_files(
-    dataset_root: Path, entries: Sequence[dict]
-) -> list[tuple[pq.ParquetFile, str]]:
-    opened: list[tuple[pq.ParquetFile, str]] = []
-    try:
-        for entry in entries:
-            path = Path(dataset_root) / str(entry["path"])
-            opened.append(
-                (
-                    pq.ParquetFile(path),
-                    str(entry["partition"].get("interval", "")),
-                )
-            )
-    except BaseException:
-        _close_parquet_files(opened)
-        raise
-    return opened
-
-
 def _select_entries(
     entries: Sequence[dict],
     *,
@@ -1314,71 +1189,6 @@ def _select_entries(
                 continue
         selected.append(entry)
     return selected
-
-
-def _with_partition_interval(
-    physical_batch: pa.RecordBatch, partition_interval: str
-) -> pa.RecordBatch:
-    """Rebuild the logical schema, restoring the Hive `interval` column."""
-    arrays: list[pa.Array] = []
-    for name in BAR_SCHEMA.names:
-        if name == "interval":
-            arrays.append(
-                pa.array(
-                    [partition_interval] * physical_batch.num_rows,
-                    type=BAR_SCHEMA.field("interval").type,
-                )
-            )
-        else:
-            arrays.append(physical_batch.column(name))
-    return pa.RecordBatch.from_arrays(arrays, schema=BAR_SCHEMA)
-
-
-def _filter_batch(
-    batch: pa.RecordBatch,
-    *,
-    instrument_id: str | None,
-    interval: str | None,
-    start_ns: int | None,
-    end_ns: int | None,
-) -> pa.RecordBatch:
-    mask = None
-
-    def combine(clause) -> None:
-        nonlocal mask
-        mask = clause if mask is None else pc.and_(mask, clause)
-
-    if instrument_id is not None:
-        combine(
-            pc.equal(
-                batch.column("instrument_id"),
-                pa.scalar(instrument_id, type=pa.string()),
-            )
-        )
-    if interval is not None:
-        combine(
-            pc.equal(
-                batch.column("interval"), pa.scalar(interval, type=pa.string())
-            )
-        )
-    if start_ns is not None:
-        combine(
-            pc.greater_equal(
-                batch.column("open_ts"), pa.scalar(start_ns, type=UTC_TS)
-            )
-        )
-    if end_ns is not None:
-        combine(
-            pc.less(batch.column("open_ts"), pa.scalar(end_ns, type=UTC_TS))
-        )
-    return batch if mask is None else batch.filter(mask)
-
-
-def _close_parquet_files(files: Sequence[tuple[pq.ParquetFile, str]]) -> None:
-    for parquet_file, _ in files:
-        # Best-effort close on an error path: never mask the original failure.
-        with suppress(Exception):  # pragma: no cover - defensive close path
-            parquet_file.close()
 
 
 def _median_file_size(entries: Sequence[dict]) -> int | float | None:
