@@ -41,7 +41,7 @@ Typical use::
 from __future__ import annotations
 
 from mdgw_client.client import GatewayClient
-from mdgw_client.errors import ClientError
+from mdgw_client.errors import ClientError, ReplayFailedError
 from mdgw_client.live import LiveSubscription, StreamEvent
 from mdgw_client.replay import ReplayClient, ReplaySession
 from mdgw_client.schema import BAR_SCHEMA
@@ -52,6 +52,7 @@ __all__ = [
     "GatewayClient",
     "LiveSubscription",
     "ReplayClient",
+    "ReplayFailedError",
     "ReplaySession",
     "StreamEvent",
 ]

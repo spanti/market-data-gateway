@@ -30,10 +30,13 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from mdgw.core.errors import (
+    INTERNAL_ERROR,
+    SCHEMA_VERSION_MISMATCH,
     InvalidInstrumentError,
     InvalidIntervalError,
     InvalidParameterError,
     InvalidRangeError,
+    SchemaVersionMismatch,
 )
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import INTERVALS
@@ -55,6 +58,26 @@ SUPPORTED_REPLAY_MODES = frozenset({"asap", "realtime", "step"})
 DEFAULT_REPLAY_BATCH_SIZE = 4_096
 #: Bounded prefetch depth: batches the reader may run ahead of the publisher.
 DEFAULT_REPLAY_PREFETCH_BATCHES = 2
+#: Sanitized public messages for `reason="error"`. They never contain SQL,
+#: Data File paths, stack traces or raw DuckDB/Polars exception text; the real
+#: cause stays on `session.failure` and in the server log.
+REPLAY_SCHEMA_VERSION_MISMATCH_MESSAGE = "Dataset schema version is not supported"
+REPLAY_READ_FAILED_MESSAGE = "replay read failed"
+
+
+def classify_replay_failure(exc: BaseException) -> dict[str, str]:
+    """Map a read failure to the public stable error object.
+
+    `SchemaVersionMismatch` keeps the existing public error code; every other
+    DuckDB I/O/OOM, Manifest/file, Arrow or unclassified read failure becomes
+    `internal_error`. The message is fixed so engine internals cannot leak.
+    """
+    if isinstance(exc, SchemaVersionMismatch):
+        return {
+            "code": SCHEMA_VERSION_MISMATCH,
+            "message": REPLAY_SCHEMA_VERSION_MISMATCH_MESSAGE,
+        }
+    return {"code": INTERNAL_ERROR, "message": REPLAY_READ_FAILED_MESSAGE}
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +284,9 @@ class ReplaySession:
         self._thread: threading.Thread | None = None
         self._reason = "exhausted"
         self._failure: BaseException | None = None
+        # Exactly one End of Session is published on every path, including a
+        # read failure and a stop racing that failure.
+        self._eos_published = False
 
         # Clock / Step Credit state, guarded by `_cond`. No Replay Mode keeps
         # the Bars or their close times: they live only in the bounded
@@ -305,10 +331,9 @@ class ReplaySession:
     def failure(self) -> BaseException | None:
         """The read failure that terminated the worker, if any.
 
-        M5A temporary boundary: ticket 16 turns this into the public
-        `reason=error` End of Session. Until then no End of Session is
-        published on failure, so an unreadable Dataset never looks like an
-        empty `exhausted` Replay.
+        Server-side diagnostics only. The public contract is the sanitized
+        `reason="error"` End of Session; the raw engine exception is never part
+        of it.
         """
         return self._failure
 
@@ -471,14 +496,9 @@ class ReplaySession:
     def _run(self) -> None:
         try:
             self._run_worker()
-        except Exception as exc:
-            # M5A temporary error boundary. The public protocol cannot express
-            # `reason=error` yet (ticket 16), so no End of Session is published
-            # and the failure is recorded for that follow-up. A read error is
-            # never converted into an empty `exhausted` replay.
-            self._failure = exc
-            self._reason = "error"
+        except Exception as exc:  # worker boundary
             logger.exception("Replay Session %s failed", self.session_id)
+            self._handle_worker_failure(exc)
         finally:
             self._set_state(
                 SessionState.STOPPED
@@ -486,6 +506,30 @@ class ReplaySession:
                 else SessionState.FINISHED
             )
             self._finished.set()
+
+    def _handle_worker_failure(self, exc: Exception) -> None:
+        """Terminate the Session with exactly one public End of Session.
+
+        The StoreRead (Reader, connection, lease) has already been released by
+        `_run_worker`'s `finally` before this runs. A stop that raced the read
+        failure wins: the public reason stays `stopped` and no error object is
+        emitted. Otherwise the failure becomes `reason="error"` with the real
+        published count and a sanitized stable error object. The raw exception
+        stays on `session.failure` and in the server log.
+        """
+        self._failure = exc
+        if self._eos_published:
+            # The worker already terminated the Session; a late cleanup
+            # failure must not rewrite its public reason or double-publish.
+            return
+        if self._cancel.is_set():
+            self._reason = "stopped"
+            self._publish_end_of_session("stopped")
+            return
+        self._reason = "error"
+        self._publish_end_of_session(
+            "error", error=classify_replay_failure(exc)
+        )
 
     def _run_worker(self) -> None:
         self._set_state(SessionState.RUNNING)
@@ -837,14 +881,40 @@ class ReplaySession:
 
     # -- wire format -------------------------------------------------------
 
-    def _publish_end_of_session(self, reason: str) -> None:
-        event = {
+    def _publish_end_of_session(
+        self, reason: str, *, error: Mapping[str, str] | None = None
+    ) -> None:
+        """Publish the single terminal event and mark the Session as ended.
+
+        The error object is part of the public protocol only for
+        `reason="error"`; `exhausted` and `stopped` keep exactly their existing
+        shape. `bars_sent` is read under `_cond` so it is the precise number of
+        Bars published before termination. A transport failure while sending
+        the End of Session is logged and cannot produce a second one.
+        """
+        if self._eos_published:
+            return
+        self._eos_published = True
+        with self._cond:
+            bars_sent = self._bars_sent
+        event: dict[str, Any] = {
             "op": "end_of_session",
             "session_id": self.session_id,
             "reason": reason,
-            "bars_sent": self._bars_sent,
+            "bars_sent": bars_sent,
         }
-        self._publish_event(event)
+        if reason == "error":
+            event["error"] = dict(
+                error
+                or {"code": INTERNAL_ERROR, "message": REPLAY_READ_FAILED_MESSAGE}
+            )
+        try:
+            self._publish_event(event)
+        except Exception:  # terminal transport sink
+            logger.exception(
+                "Replay Session %s could not publish End of Session",
+                self.session_id,
+            )
         logger.info(
             "replay end of session",
             extra={

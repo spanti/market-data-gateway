@@ -374,8 +374,10 @@ Bars from every subscription are merged in this total order:
 4. `interval`
 5. `open_ts`
 
-When the range is exhausted, or after `stop`, the session publishes one End of
-Session message on `replay.<session_id>.control`:
+When the range is exhausted, after `stop`, or when a read fails, the session
+publishes exactly one End of Session message on
+`replay.<session_id>.control`. Normal completion and `stop` keep their existing
+shape:
 
 ```json
 {
@@ -386,7 +388,34 @@ Session message on `replay.<session_id>.control`:
 }
 ```
 
-`reason` is `exhausted` or `stopped`.
+A read failure (corrupt Parquet, an unavailable Manifest or Data File, an
+incompatible Dataset Schema, resource exhaustion or a failed query) terminates
+the session with `reason: "error"` and a stable error object:
+
+```json
+{
+  "op": "end_of_session",
+  "session_id": "rpl-...",
+  "reason": "error",
+  "bars_sent": 42,
+  "error": {
+    "code": "internal_error",
+    "message": "replay read failed"
+  }
+}
+```
+
+`reason` is `exhausted`, `stopped` or `error`. The `error` object is present
+only for `reason="error"`; its `code` is the stable `schema_version_mismatch`
+(for an unsupported Dataset Schema Version) or `internal_error` (every other
+read failure). The message is sanitized: it never contains SQL, Data File
+paths, stack traces or raw DuckDB/Polars exception text; the real cause is
+logged server-side. Bars published before the failure are not rolled back or
+re-sent, so `bars_sent` is the exact number of Bars the client received. After
+a failure the session is terminal and its query Reader, connection and Dataset
+Read Lease are released. The client SDK raises `ReplayFailedError` (carrying
+the server `code`, `message` and `bars_sent`) for `reason="error"`; normal
+`exhausted`/`stopped` End of Session still ends iteration as before.
 
 ## 8. Stable error codes
 

@@ -492,9 +492,20 @@ def test_a_midstream_read_failure_is_an_explicit_error_not_exhaustion() -> None:
         BASE,
         BASE + timedelta(minutes=1),
     ]
-    # No End of Session: ticket 16 turns this into `reason=error`. The bars
-    # before the failure keep their real `bars_sent` count.
-    assert events == []
+    # A read failure is an explicit `reason=error` termination. The Bars
+    # published before it keep their real count; the raw path stays private.
+    assert events == [
+        {
+            "op": "end_of_session",
+            "session_id": "stream-failure",
+            "reason": "error",
+            "bars_sent": 2,
+            "error": {
+                "code": "internal_error",
+                "message": "replay read failed",
+            },
+        }
+    ]
     assert session.bars_sent == 2
     assert isinstance(session.failure, OSError)
     assert "later.parquet" in str(session.failure)

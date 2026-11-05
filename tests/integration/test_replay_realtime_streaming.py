@@ -375,7 +375,18 @@ def test_a_midstream_read_failure_is_an_explicit_error_not_exhaustion() -> None:
     bars, events = _finish(session, recorder)
 
     assert len(bars) == 2
-    assert events == []
+    assert events == [
+        {
+            "op": "end_of_session",
+            "session_id": "rt-stream",
+            "reason": "error",
+            "bars_sent": 2,
+            "error": {
+                "code": "internal_error",
+                "message": "replay read failed",
+            },
+        }
+    ]
     assert session.bars_sent == 2
     assert isinstance(session.failure, OSError)
     assert read.close_calls >= 1
@@ -529,7 +540,18 @@ def test_a_failure_in_a_seek_generation_is_an_error_not_exhaustion() -> None:
 
     bars, events = recorder.snapshot()
     assert bars == []
-    assert events == []
+    assert events == [
+        {
+            "op": "end_of_session",
+            "session_id": "rt-stream",
+            "reason": "error",
+            "bars_sent": 0,
+            "error": {
+                "code": "internal_error",
+                "message": "replay read failed",
+            },
+        }
+    ]
     assert session.bars_sent == 0
     assert isinstance(session.failure, OSError)
 

@@ -56,6 +56,46 @@ class ClientError(Exception):
         )
 
 
+class ReplayFailedError(ClientError):
+    """A Replay Session terminated with ``reason="error"``.
+
+    The Session is over and cannot be resumed. ``code``/``message`` come from
+    the gateway's stable, sanitized error object; ``bars_sent`` is the exact
+    number of Bars the server published before the failure. A normal
+    ``exhausted``/``stopped`` End of Session never raises this error.
+    """
+
+    def __init__(
+        self, code: str, message: str, *, bars_sent: int | None = None
+    ) -> None:
+        super().__init__(code, message)
+        self.bars_sent = bars_sent
+
+
+def replay_error_from_end_of_session(event: Any) -> ReplayFailedError:
+    """Build the sticky failure for a ``reason="error"`` End of Session.
+
+    A malformed error object is a client protocol error rather than normal
+    replay completion, so the caller still sees an explicit failure.
+    """
+    payload = event if isinstance(event, dict) else {}
+    error = payload.get("error")
+    code = error.get("code") if isinstance(error, dict) else None
+    message = error.get("message") if isinstance(error, dict) else None
+    bars_sent = payload.get("bars_sent")
+    return ReplayFailedError(
+        code if isinstance(code, str) and code else PROTOCOL_ERROR,
+        message
+        if isinstance(message, str) and message
+        else "Replay Session failed",
+        bars_sent=(
+            bars_sent
+            if isinstance(bars_sent, int) and not isinstance(bars_sent, bool)
+            else None
+        ),
+    )
+
+
 def error_from_rest_body(
     body: bytes | str, *, status: int | None = None
 ) -> ClientError:

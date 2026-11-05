@@ -19,7 +19,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, NoReturn, Self
 
 import zmq
 
@@ -29,7 +29,9 @@ from mdgw_client.errors import (
     PROTOCOL_ERROR,
     TIMEOUT,
     ClientError,
+    ReplayFailedError,
     error_from_control_response,
+    replay_error_from_end_of_session,
 )
 from mdgw_client.live import READY_TOPIC, StreamEvent
 from mdgw_client.schema import ipc_to_table
@@ -652,6 +654,9 @@ class ReplaySession:
         self._client = client
         self._channel = channel
         self._end_of_session: dict[str, Any] | None = None
+        # Sticky `reason="error"` failure: every later `next_event` raises it
+        # instead of reporting normal completion.
+        self._session_failure: ReplayFailedError | None = None
         self._ended = threading.Event()
         self._released = threading.Event()
         self._control_lock = threading.Lock()
@@ -727,7 +732,7 @@ class ReplaySession:
 
         while True:
             if self.ended and self.end_of_session is not None:
-                raise StopIteration
+                self._raise_session_end()
             poll: float | None = None
             if deadline is not None:
                 remaining = deadline - time.monotonic()
@@ -760,15 +765,28 @@ class ReplaySession:
                     isinstance(control, dict)
                     and control.get("op") == "end_of_session"
                 ):
+                    event = dict(control)
+                    failure = (
+                        replay_error_from_end_of_session(event)
+                        if event.get("reason") == "error"
+                        else None
+                    )
                     with self._control_lock:
-                        self._end_of_session = control
+                        self._end_of_session = event
+                        self._session_failure = failure
                     self._ended.set()
-                    raise StopIteration
+                    self._raise_session_end()
                 continue
             if ".market." in topic:
                 return StreamEvent(
                     topic=topic, table=ipc_to_table(payload), kind="bar"
                 )
+
+    def _raise_session_end(self) -> NoReturn:
+        """End the iteration; a failed Session raises its sticky failure."""
+        if self._session_failure is not None:
+            raise self._session_failure
+        raise StopIteration
 
     def __iter__(self) -> Iterator[StreamEvent]:
         while True:
