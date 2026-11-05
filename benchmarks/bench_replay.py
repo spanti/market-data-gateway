@@ -27,9 +27,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _bench_common import bar_range_ns, format_rate, make_bars  # noqa: E402
 
+from mdgw.core.bar import Bar  # noqa: E402
+from mdgw.core.schema import bars_to_logical_table  # noqa: E402
 from mdgw.replay.service import ReplayService  # noqa: E402
 from mdgw.replay.session import BarSubscription, ReplaySessionSpec  # noqa: E402
+from mdgw.replay.source import ReplayBarSource  # noqa: E402
 from mdgw.store.parquet_dataset import ParquetBarStore  # noqa: E402
+from mdgw.streaming import table_to_ipc  # noqa: E402
 
 app = typer.Typer(
     add_completion=False,
@@ -37,8 +41,9 @@ app = typer.Typer(
 )
 
 
-def _drop(topic: str, payload: bytes) -> None:
-    """No-op market sink: the Replay Session still encodes the Arrow IPC frame."""
+def _drop(_session_id: str, bar: Bar) -> None:
+    """Encode each Bar as Arrow IPC and discard it, like the Replay adapter."""
+    table_to_ipc(bars_to_logical_table([bar]))
 
 
 @app.command()
@@ -78,12 +83,27 @@ def replay(
 
     durations: list[float] = []
     sent_counts: list[int] = []
+    query_durations: list[float] = []
+    query_counts: list[int] = []
     with tempfile.TemporaryDirectory(prefix="mdgw-bench-replay-") as tmp:
         store = ParquetBarStore(Path(tmp))
         store.write_bars(bars, asset_class="crypto")
 
+        # Replay query preparation alone (scan + close_ts filter + Revision
+        # dedupe + five-key sort), before any Arrow IPC / publish cost.
+        source = ReplayBarSource(store)
+        for _ in range(repeat):
+            started = time.perf_counter()
+            prepared = source.read(
+                [subscription], start_ts_ns=start_ns, end_ts_ns=end_ns
+            )
+            query_durations.append(time.perf_counter() - started)
+            query_counts.append(len(prepared))
+
         for index in range(repeat):
-            service = ReplayService(store, publish=_drop, max_sessions=4)
+            service = ReplayService(
+                store, publish_bar=_drop, max_sessions=4
+            )
             spec = ReplaySessionSpec(
                 subscriptions=(subscription,),
                 start_ts_ns=start_ns,
@@ -109,7 +129,16 @@ def replay(
     best = min(durations)
     median = statistics.median(durations)
     sent = sent_counts[-1]
+    query_best = min(query_durations)
+    query_median = statistics.median(query_durations)
+    query_rows = query_counts[-1]
     typer.echo(f"mode: asap replay  rows: {sent:,}  passes: {repeat}")
+    typer.echo(
+        f"query prep: best {query_best:.3f}s "
+        f"({format_rate(query_rows, query_best)})  "
+        f"median {query_median:.3f}s "
+        f"({format_rate(query_rows, query_median)})"
+    )
     typer.echo(f"best:   {best:.3f}s  {format_rate(sent, best)}")
     typer.echo(f"median: {median:.3f}s  {format_rate(sent, median)}")
     return 0

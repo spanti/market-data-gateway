@@ -198,6 +198,7 @@ def test_nautilus_macd_example_help_exits_zero() -> None:
         BENCHMARKS / "bench_ingest.py",
         BENCHMARKS / "bench_query.py",
         BENCHMARKS / "bench_replay.py",
+        BENCHMARKS / "bench_baseline.py",
     ],
     ids=lambda path: path.name,
 )
