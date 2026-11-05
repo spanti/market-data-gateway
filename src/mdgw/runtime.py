@@ -73,6 +73,7 @@ class GatewayRuntime:
             format_version=config.storage.format_version,
             schema_version=config.storage.schema_version,
             duckdb=config.storage.duckdb.to_options(),
+            rule_versions={config.storage.quarantine.rule_version},
         )
         self.instrument_store: InstrumentStore | None = None
         self.aggregator = BarAggregator(

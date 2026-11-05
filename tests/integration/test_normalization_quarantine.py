@@ -20,6 +20,7 @@ from mdgw.core.bar import RawBar
 from mdgw.core.errors import UnknownInstrumentError
 from mdgw.core.time import datetime_to_ns, utc_now
 from mdgw.normalize.batch import BatchNormalizationError
+from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
 from mdgw.quarantine import (
     REASON_FLOAT_VALUE,
     REASON_INVALID_INSTRUMENT,
@@ -169,7 +170,7 @@ def test_mixed_batch_quarantines_every_rejection_and_leaves_state_untouched(
         assert float_row["instrument_id"] == BTC
         assert float_row["interval"] == "1m"
         assert float_row["open_ts"] is not None
-        assert float_row["rule_version"] == "1"
+        assert float_row["rule_version"] == NORMALIZATION_RULE_VERSION
         assert json.loads(float_row["raw_record"])["open"] == 1.5
         assert json.loads(float_row["details"])["field"] == "open"
         assert float_row["source_location"].startswith("live:batch:")
