@@ -24,8 +24,9 @@
 `.scratch/duckdb-polars-storage/spike-report.md`.
 
 - Branch: `ticket/02-compatibility-spike` (worktree `E:/total-project/mdgw-worktrees/duckdb-02`).
-- Commits: `c0e3898` (spike evidence, tests, dependencies, report); merge
-  `a6f3a7d` merged `integration/duckdb-polars-storage` with no conflicts.
+- Commits: `c0e3898` (spike evidence, tests, dependencies, report);
+  `1410b79` (poll for asynchronous temp-file cleanup; 15/15 stress runs);
+  merge `a6f3a7d` merged `integration/duckdb-polars-storage` with no conflicts.
 - Exact versions: Python 3.13.18, DuckDB 2.0.0, Polars 2.1.0, PyArrow 26.0.0;
   Windows 11 10.0.26200 x86-64, 16 logical CPUs.
 
