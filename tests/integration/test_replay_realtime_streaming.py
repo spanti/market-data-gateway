@@ -887,9 +887,13 @@ class _SnapshotStore:
         self._inner = inner
         self.acquired = threading.Event()
         self.proceed = threading.Event()
+        self.open_count = 0
+        self._lock = threading.Lock()
 
     def open_read(self, **kwargs: Any):
         read = self._inner.open_read(**kwargs)
+        with self._lock:
+            self.open_count += 1
         self.acquired.set()
         assert self.proceed.wait(10), "test did not release the replay read"
         return read
@@ -911,6 +915,8 @@ def test_realtime_seek_never_reads_files_published_after_the_snapshot(
         store.proceed.set()
         # Past the old Snapshot's last close (4m), before the new Bars (7m+).
         assert session.seek(datetime_to_ns(BASE + timedelta(minutes=5.5)))
+        # A seek re-queries the same StoreRead: one Snapshot, one lease.
+        assert store.open_count == 1
         assert session.set_speed(1e9)
         assert session.resume()
         assert session.wait(timeout=15)
