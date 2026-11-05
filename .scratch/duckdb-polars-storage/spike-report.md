@@ -37,7 +37,8 @@ D:/Anaconda3/envs/nautilus/python.exe -m pytest -q
 Result at the time of writing:
 
 - Contract spike tests: **39 passed, 1 skipped** (the Linux-only POSIX test).
-- Full offline suite: **743 passed, 5 failed, 1 skipped, 1 deselected**.
+- Full offline suite after merging the integration tip: **791 passed, 5 failed,
+  1 skipped, 1 deselected**.
   The 5 failures are the pre-existing Typer/Click baseline failures
   (`tests/integration/test_archive_backfill.py` ×4 and
   `tests/unit/test_cli_flags.py::test_run_rejects_an_unknown_service_role`);
