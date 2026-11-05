@@ -188,6 +188,35 @@ class DuckDBConfig(_ConfigModel):
         )
 
 
+class QuarantineConfig(_ConfigModel):
+    """Independent Quarantine Dataset settings.
+
+    ``root=None`` means ``<storage.root>/quarantine``. The schema version is
+    independent of the Bar Data Contract; the rule version records which
+    Normalization rules produced a live rejection and is expanded into Data
+    File metadata by later tickets.
+    """
+
+    root: Path | None = None
+    schema_version: int = Field(default=1, ge=1)
+    rule_version: str = "1"
+
+    @field_validator("rule_version")
+    @classmethod
+    def _non_empty_rule_version(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            msg = "quarantine rule_version must be a non-empty string"
+            raise ValueError(msg)
+        return cleaned
+
+    def resolved_root(self, storage_root: Path) -> Path:
+        """Resolve the configured root against the Storage root."""
+        if self.root is not None:
+            return Path(self.root)
+        return Path(storage_root) / "quarantine"
+
+
 class StorageConfig(_ConfigModel):
     root: Path = Path("./data")
     schema_version: int = 1
@@ -197,6 +226,22 @@ class StorageConfig(_ConfigModel):
     flush_max_bytes: int = 67_108_864
     flush_max_age_s: int = 3_600
     duckdb: DuckDBConfig = Field(default_factory=DuckDBConfig)
+    quarantine: QuarantineConfig = Field(default_factory=QuarantineConfig)
+
+    @model_validator(mode="after")
+    def _quarantine_root_is_independent(self) -> StorageConfig:
+        """The Quarantine Dataset must never live inside the Bars Dataset."""
+        if self.quarantine.root is None:
+            return self
+        quarantine_root = Path(self.quarantine.root).resolve()
+        bars_root = (Path(self.root) / "bars").resolve()
+        if quarantine_root == bars_root or bars_root in quarantine_root.parents:
+            msg = (
+                "storage.quarantine.root must not be inside the Bars Dataset "
+                f"({bars_root})"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class RetentionConfig(_ConfigModel):
