@@ -377,10 +377,16 @@ def test_csv_text_header_and_exact_decimal_rendering(tmp_path: Path) -> None:
         ",".join(_csv_row(message))
         for message in json.loads(json_body)["bars"]
     ]
-    assert lines[1:] == expected
+    # Non-paginated output has no ordering contract; compare exact content and
+    # multiplicity instead of physical scan order.
+    assert sorted(lines[1:]) == sorted(expected)
     open_index = BAR_SCHEMA.names.index("open")
-    assert expected[0].split(",")[open_index] == precise
-    assert "e-" not in expected[0].lower()
+    precise_row = next(
+        line
+        for line in lines[1:]
+        if line.split(",")[open_index] == precise
+    )
+    assert "e-" not in precise_row.lower()
 
 
 def test_empty_csv_is_header_only(tmp_path: Path) -> None:
@@ -416,7 +422,17 @@ def test_export_formats_preserve_headers_length_and_table_semantics(
             "?interval=1m&format=arrow"
         )
 
-    messages = json.loads(json_body)["bars"]
+    # Non-paginated exports have no ordering contract; compare exact content
+    # and multiplicity, not physical scan order.
+    messages = sorted(
+        json.dumps(message, sort_keys=True)
+        for message in json.loads(json_body)["bars"]
+    )
+
+    def canonical(messages_: list[dict]) -> list[str]:
+        return sorted(
+            json.dumps(message, sort_keys=True) for message in messages_
+        )
 
     assert parquet_status == 200
     assert _header(parquet_headers, "Content-Type") == PARQUET
@@ -430,7 +446,7 @@ def test_export_formats_preserve_headers_length_and_table_semantics(
     parquet_table = pq.read_table(pa.BufferReader(parquet_body))
     assert parquet_table.schema == BAR_SCHEMA
     assert parquet_table.num_rows == 2
-    assert table_to_messages(parquet_table) == messages
+    assert canonical(table_to_messages(parquet_table)) == messages
 
     assert arrow_status == 200
     assert _header(arrow_headers, "Content-Type") == ARROW_FILE
@@ -444,7 +460,7 @@ def test_export_formats_preserve_headers_length_and_table_semantics(
     arrow_table = pa.ipc.open_file(pa.BufferReader(arrow_body)).read_all()
     assert arrow_table.schema == BAR_SCHEMA
     assert arrow_table.num_rows == 2
-    assert table_to_messages(arrow_table) == messages
+    assert canonical(table_to_messages(arrow_table)) == messages
 
 
 def test_empty_exports_are_valid_files_with_the_canonical_schema(

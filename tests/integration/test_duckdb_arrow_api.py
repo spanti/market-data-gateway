@@ -3,8 +3,8 @@
 The public `/api/v1/bars?format=arrow` response is compared with the
 pre-migration PyArrow Store read: exact per-row content, duplicate counts and
 the exact Data Contract schema. Non-paginated output has no ordering contract,
-so row comparisons are order insensitive. Other surfaces (JSON, CSV, export)
-are asserted to keep using the existing PyArrow scan.
+so row comparisons are order insensitive. Ticket 08 extended this seam to CSV
+and export; JSON keeps the existing Store read/count.
 """
 
 # ruff: file-ignore[implicit-namespace-package]
@@ -193,7 +193,14 @@ class _RecordingStore(ParquetBarStore):
         return read
 
 
-def test_only_the_arrow_route_chooses_the_duckdb_scan(tmp_path: Path) -> None:
+def test_history_streams_and_export_choose_the_duckdb_scan(
+    tmp_path: Path,
+) -> None:
+    """Ticket 08 moves CSV and export onto the same DuckDB seam as Arrow.
+
+    JSON keeps the existing Store read/count so its ceiling, pagination and
+    Time Cursor semantics are untouched by this ticket.
+    """
     store = _RecordingStore(tmp_path)
     _write(store, [_bar(0)])
     with _serve(create_app(store)) as server:
@@ -209,15 +216,16 @@ def test_only_the_arrow_route_chooses_the_duckdb_scan(tmp_path: Path) -> None:
         _get(_url(server.base_url, EXPORT, interval="1m", format="parquet"))
         export_call = list(store.reads[-1].calls)
 
+        _get(_url(server.base_url, EXPORT, interval="1m", format="arrow"))
+        arrow_export_call = list(store.reads[-1].calls)
+
     assert arrow_call == ["iter_arrow_batches"]
-    assert "iter_batches" not in arrow_call
-    assert "iter_batches" in csv_call
-    assert "iter_batches" in export_call
+    assert csv_call == ["iter_arrow_batches"]
+    assert export_call == ["iter_arrow_batches"]
+    assert arrow_export_call == ["iter_arrow_batches"]
+    assert "iter_batches" not in arrow_call + csv_call + export_call
     assert "count" in json_call
-    assert all(
-        "iter_arrow_batches" not in call
-        for call in (json_call, csv_call, export_call)
-    )
+    assert "iter_arrow_batches" not in json_call
 
 
 # -- content and schema parity ---------------------------------------------
