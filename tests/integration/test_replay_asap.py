@@ -233,15 +233,18 @@ class _GatedRead:
     def _wait(self) -> None:
         assert self._gate.wait(5), "test never released the read gate"
 
-    def iter_replay_batches(self, queries, *, batch_size=None):
-        # asap consumes this seam; it must block before DuckDB starts.
+    def iter_replay_batches(
+        self, queries, *, batch_size=None, cancellation=None
+    ):
+        # asap and realtime consume this seam; it must block before DuckDB
+        # starts.
         self._wait()
         yield from self._inner.iter_replay_batches(
-            queries, batch_size=batch_size
+            queries, batch_size=batch_size, cancellation=cancellation
         )
 
     def read_replay_bars(self, queries):
-        # realtime/step still materialize through this seam.
+        # step still materializes through this seam (ticket 15).
         self._wait()
         return self._inner.read_replay_bars(queries)
 

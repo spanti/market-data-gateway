@@ -7,9 +7,9 @@ one Bar Interval: `start_ts` is inclusive and `end_ts` is exclusive.
 M5A queries the Session's fixed Manifest Snapshot through DuckDB. One query
 does the close-time filter, the highest-Revision choice (latest `ingest_ts` on
 a tie), duplicate-subscription resolution and the five-key total order.
-`ReplayBarSource` keeps the full `list[Bar]` materialization and the push
-control loops unchanged so the complete event sequence can prove query
-equivalence.
+`iter_bars()` exposes that same query as a bounded batch stream; asap and
+realtime consume it (realtime per query generation), while `read()` keeps the
+full `list[Bar]` materialization for step until ticket 15.
 
 The pre-DuckDB PyArrow read is kept as a private, test-only path
 (`read(..., read=None)`) for migration differential tests and benchmarks.
@@ -30,7 +30,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, avoids an import cycle
     from collections.abc import Iterator, Sequence
 
     from mdgw.replay.session import BarSubscription
-    from mdgw.store.parquet_dataset import ParquetBarStore, StoreRead
+    from mdgw.store.parquet_dataset import (
+        ParquetBarStore,
+        ReplayScanCancellation,
+        StoreRead,
+    )
 
 
 def interval_ns(interval: str) -> int:
@@ -137,7 +141,7 @@ class ReplayBarSource:
             end_ts_ns=end_ts_ns,
         )
 
-    def iter_bars(  # ruff: ignore[no-self-use] - overridden by migration sources
+    def iter_bars(  # ruff: ignore[no-self-use,too-many-arguments] - overridden by migration sources
         self,
         subscriptions: Sequence[BarSubscription],
         *,
@@ -145,6 +149,7 @@ class ReplayBarSource:
         end_ts_ns: int,
         read: StoreRead,
         batch_size: int,
+        cancellation: ReplayScanCancellation | None = None,
     ) -> Iterator[list[Bar]]:
         """Yield the same ordered Bars batch by batch from the fixed Snapshot.
 
@@ -152,13 +157,26 @@ class ReplayBarSource:
         to `Bar` values and handed to the caller immediately. The query (close
         window, Revision choice, duplicate-subscription resolution and five-key
         order) is identical to `read()`; only the materialization is removed.
+
+        Realtime passes a per-generation `cancellation` handle so a seek can
+        interrupt this exact query while the Session's Snapshot and lease stay
+        alive for the next generation.
         """
         queries = replay_read_queries(
             subscriptions,
             start_ts_ns=start_ts_ns,
             end_ts_ns=end_ts_ns,
         )
-        for batch in read.iter_replay_batches(queries, batch_size=batch_size):
+        batches = (
+            read.iter_replay_batches(queries, batch_size=batch_size)
+            if cancellation is None
+            else read.iter_replay_batches(
+                queries,
+                batch_size=batch_size,
+                cancellation=cancellation,
+            )
+        )
+        for batch in batches:
             yield [Bar(**row) for row in batch.to_pylist()]
 
     def _read_legacy(

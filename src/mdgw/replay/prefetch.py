@@ -9,10 +9,13 @@ turning a large Replay into unbounded process memory.
 The producer may block in two places: putting into a full queue, or waiting on
 the underlying read (DuckDB's Arrow Reader). `close()` unblocks both: it sets
 the cancel flag (the put loop polls it), discards pending items and invokes the
-`on_close` callback, which must interrupt the blocking read. A producer failure
-is enqueued in stream order and re-raised by the consumer; it is never
-translated into end-of-stream. Cancelled iteration likewise never reports
-exhaustion, so the Session can distinguish `stopped` from `exhausted`.
+`on_close` callback, which must interrupt the blocking read. `should_stop` is
+an optional external predicate checked while the consumer waits on an empty
+queue; Realtime uses it so `stop` or a seek is observed even when the blocked
+read produces nothing. A producer failure is enqueued in stream order and
+re-raised by the consumer; it is never translated into end-of-stream.
+Cancelled iteration likewise never reports exhaustion, so the Session can
+distinguish `stopped` from `exhausted`.
 
 The abstraction is generic over the item type; tickets 14/15 reuse it for the
 realtime and step push loops.
@@ -64,6 +67,7 @@ class BoundedPrefetcher[T]:
         *,
         max_pending: int,
         on_close: Callable[[], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> None:
         if max_pending < 1:
             msg = "max_pending must be at least 1"
@@ -71,6 +75,7 @@ class BoundedPrefetcher[T]:
         self._produce = produce
         self._max_pending = max_pending
         self._on_close = on_close
+        self._should_stop = should_stop
         self._queue: queue.Queue[object] = queue.Queue(maxsize=max_pending)
         self._cancel = threading.Event()
         self._closed = False
@@ -133,7 +138,7 @@ class BoundedPrefetcher[T]:
             try:
                 item = self._queue.get(timeout=_POLL_S)
             except queue.Empty:
-                if self._cancel.is_set():
+                if self._cancelled():
                     return
                 continue
             if item is _END:
@@ -141,9 +146,14 @@ class BoundedPrefetcher[T]:
                 return
             if isinstance(item, _Failure):
                 raise item.error
-            if self._cancel.is_set():
+            if self._cancelled():
                 return
             yield item  # type: ignore[misc] - queue only holds T, markers above
+
+    def _cancelled(self) -> bool:
+        return self._cancel.is_set() or (
+            self._should_stop is not None and self._should_stop()
+        )
 
     # -- producer ----------------------------------------------------------
 

@@ -565,6 +565,56 @@ class ManifestSnapshotRaceError(RuntimeError):
     """The Manifest kept changing while a read snapshot was being acquired."""
 
 
+class ReplayScanCancellation:
+    """Cancellation handle for one Replay query generation.
+
+    A Realtime seek or stop replaces the current query without releasing the
+    Session's fixed Manifest Snapshot or Dataset Read Lease. `cancel()` closes
+    the active DuckDB scanner (which interrupts a blocked `read_next_batch()`
+    and releases its Reader and connection) and makes a scan that has not
+    started yet do nothing. A later generation can therefore start a new scan
+    on the same `StoreRead`.
+
+    `StoreRead.close()` still owns the lease and remains the final cleanup
+    path; this handle only ends one query generation.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._scanner: DuckDBArrowScanner | None = None
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def cancel(self) -> None:
+        """Cancel the generation; idempotent and safe from any thread."""
+        with self._lock:
+            if self._cancelled:
+                return
+            self._cancelled = True
+            scanner, self._scanner = self._scanner, None
+        if scanner is not None:
+            scanner.close()
+
+    # -- StoreRead internals ----------------------------------------------
+
+    def _attach(self, scanner: DuckDBArrowScanner) -> bool:
+        """Register the active scanner; False when already cancelled."""
+        with self._lock:
+            if self._cancelled:
+                return False
+            self._scanner = scanner
+            return True
+
+    def _detach(self, scanner: DuckDBArrowScanner) -> None:
+        with self._lock:
+            if self._scanner is scanner:
+                self._scanner = None
+
+
 class StoreRead:
     """One Manifest Snapshot and one Dataset Read Lease.
 
@@ -814,6 +864,7 @@ class StoreRead:
         queries: Sequence[ReplayReadQuery],
         *,
         batch_size: int | None = None,
+        cancellation: ReplayScanCancellation | None = None,
     ) -> Iterator[pa.RecordBatch]:
         """Yield the ordered Replay Bars as a stream of contract RecordBatches.
 
@@ -828,7 +879,14 @@ class StoreRead:
         single scanner); closing it, or closing this `StoreRead` from another
         thread, interrupts an in-flight DuckDB read and releases its Reader and
         connection. The Read Lease stays held until `StoreRead.close()`.
+
+        A `cancellation` handle ends only one query generation: cancelling it
+        interrupts this scan and makes a scan that has not started yet return
+        without querying, while the Snapshot and Lease stay usable for the
+        next generation (Realtime seek).
         """
+        if cancellation is not None and cancellation.cancelled:
+            return
         if batch_size is None:
             batch_size = self._store.duckdb.arrow_batch_size
         if batch_size < 1:
@@ -844,6 +902,11 @@ class StoreRead:
             if self._closed:
                 msg = "StoreRead is closed"
                 raise RuntimeError(msg)
+            if cancellation is not None and not cancellation._attach(scanner):
+                # Cancelled between the check above and attaching: never start
+                # the query for a generation that is already replaced.
+                scanner.close()
+                return
             self._active_scanner = scanner
         try:
             for physical in scanner.iter_replay_batches(
@@ -853,6 +916,8 @@ class StoreRead:
                 yield physical.select(BAR_SCHEMA.names).cast(BAR_SCHEMA)
         finally:
             scanner.close()
+            if cancellation is not None:
+                cancellation._detach(scanner)
             with self._close_lock:
                 if self._active_scanner is scanner:
                     self._active_scanner = None

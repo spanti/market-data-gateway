@@ -3,8 +3,9 @@
 Seams under test:
 - `ReplayService` + real Parquet/DuckDB: asap publishes the ordered query in
   configured batches and never materializes the whole result first.
-- `ReplaySession` with an explicit read: the streaming path is selected only
-  for asap, and a stopped/failed read never looks like a normal exhaustion.
+- `ReplaySession` with an explicit read: asap and realtime use the streaming
+  path (realtime has its own suite), step stays materialized, and a
+  stopped/failed read never looks like a normal exhaustion.
 - Prefetch: the read runs ahead of the publisher by a bounded number of
   batches only.
 """
@@ -691,18 +692,22 @@ def test_a_globally_sorted_replay_spills_to_the_configured_temp_directory(
     assert temp_peak[0] > 0
 
 
-def test_realtime_and_step_keep_the_materialized_read_path() -> None:
-    """The streaming seam is asap-only until its own tickets land."""
+def test_step_keeps_the_materialized_read_path() -> None:
+    """Step stays materialized until ticket 15 moves it onto the stream."""
 
     class _MaterializedOnlyRead:
         def __init__(self) -> None:
             self.bars = [_bar(0), _bar(1)]
             self.stream_calls = 0
+            self.materialized_calls = 0
 
         def read_replay_bars(self, queries):
+            self.materialized_calls += 1
             return bars_to_logical_table(self.bars)
 
-        def iter_replay_batches(self, queries, *, batch_size=None):
+        def iter_replay_batches(
+            self, queries, *, batch_size=None, cancellation=None
+        ):
             self.stream_calls += 1
             yield _batch(self.bars)
 
@@ -710,36 +715,33 @@ def test_realtime_and_step_keep_the_materialized_read_path() -> None:
             pass
 
     read = _MaterializedOnlyRead()
-    for mode, controls in (
-        ("step", lambda session: session.step(10)),
-        ("realtime", lambda session: None),
-    ):
-        recorder = _Recorder()
-        session = ReplaySession(
-            f"{mode}-materialized",
-            ReplaySessionSpec(
-                subscriptions=(BarSubscription(INSTRUMENT, "1m"),),
-                start_ts_ns=datetime_to_ns(BASE),
-                end_ts_ns=datetime_to_ns(BASE + timedelta(minutes=10)),
-                replay_mode=mode,
-                speed=1_000_000.0,
-            ),
-            _FakeStore(read),
-            recorder.publish_bar,
-            recorder.publish_event,
-            heartbeat_s=0.05,
-        )
-        session.start()
-        controls(session)
-        try:
-            assert session.wait(timeout=15)
-        finally:
-            session.stop()
-            assert session.wait(timeout=15)
-        published, events = recorder.snapshot()
-        assert len(published) == 2
-        assert events[-1]["reason"] == "exhausted"
+    recorder = _Recorder()
+    session = ReplaySession(
+        "step-materialized",
+        ReplaySessionSpec(
+            subscriptions=(BarSubscription(INSTRUMENT, "1m"),),
+            start_ts_ns=datetime_to_ns(BASE),
+            end_ts_ns=datetime_to_ns(BASE + timedelta(minutes=10)),
+            replay_mode="step",
+            speed=1_000_000.0,
+        ),
+        _FakeStore(read),
+        recorder.publish_bar,
+        recorder.publish_event,
+        heartbeat_s=0.05,
+    )
+    session.start()
+    session.step(10)
+    try:
+        assert session.wait(timeout=15)
+    finally:
+        session.stop()
+        assert session.wait(timeout=15)
+    published, events = recorder.snapshot()
+    assert len(published) == 2
+    assert events[-1]["reason"] == "exhausted"
     assert read.stream_calls == 0
+    assert read.materialized_calls == 1
 
 
 def test_asap_without_files_still_sends_exhausted(tmp_path: Path) -> None:
