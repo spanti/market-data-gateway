@@ -44,8 +44,8 @@
 - 命令：`D:/Anaconda3/envs/nautilus/python.exe -m pytest -q`
 - 结果（合并 integration tip 后）：**1001 passed, 5 failed, 1 skipped, 1 deselected**。5 个失败是已知的 Typer/Click 既有问题，本 ticket 未修改。首次全量运行时 `tests/unit/test_ccxt_feed_handler.py::test_malformed_live_row_stops_the_source_when_quarantine_write_fails` 曾偶发失败，单跑与第二次全量运行均通过（既有临时目录清理类 flake）。
 
-**Performance (20k Bars, 同一机器, 5 次; `benchmarks/bench_replay.py --rows 20000 --repeat 5`):**
+**Performance (20k Bars, 同一机器, 两次运行各 5 次; `benchmarks/bench_replay.py --rows 20000 --repeat 5`):**
 - 基线（ticket 01）：query prep 1.0565 s，asap 端到端 3.7617 s。
-- DuckDB query prep（Snapshot/Lease + 扫描 + 去重排序 + 物化）：best 0.913 s，median 0.988 s。
-- 旧 PyArrow query prep（同次对比）：best 0.925 s，median 0.999 s。
-- asap 端到端发布：best 3.815 s（+1.4%），median 3.880 s（+3.1%），均在 10% 门槛内；query prep median 比基线快约 6.5%。
+- DuckDB query prep（Snapshot/Lease + 扫描 + 去重排序 + 物化）：best 0.913–0.919 s，median 0.940–0.988 s。
+- 旧 PyArrow query prep（同次对比）：best 0.916–0.925 s，median 0.984–0.999 s。
+- asap 端到端发布：best 3.788–3.815 s（较基线 +0.7%–+1.4%），median 3.880–3.902 s（+3.1%–+3.7%），均在 10% 门槛内。
