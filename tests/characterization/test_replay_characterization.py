@@ -193,8 +193,35 @@ def _revision_dataset(root: Path):
     return builder.build()
 
 
+class _GatedRead:
+    """StoreRead proxy whose first query waits behind a test-controlled gate."""
+
+    def __init__(self, inner: Any, gate: threading.Event) -> None:
+        self._inner = inner
+        self._gate = gate
+
+    def _wait(self) -> None:
+        assert self._gate.wait(10), "test never released the read gate"
+
+    def iter_replay_batches(self, queries, *, batch_size=None):
+        self._wait()
+        yield from self._inner.iter_replay_batches(
+            queries, batch_size=batch_size
+        )
+
+    def read_replay_bars(self, queries):
+        self._wait()
+        return self._inner.read_replay_bars(queries)
+
+    def close(self) -> None:
+        self._inner.close()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class _BlockingStore:
-    """Store proxy whose first read waits behind a test-controlled gate."""
+    """Store proxy whose first Replay read waits behind a test-controlled gate."""
 
     def __init__(self, inner: ParquetBarStore, gate: threading.Event) -> None:
         self._inner = inner
@@ -205,8 +232,7 @@ class _BlockingStore:
         return self._inner.dataset_root
 
     def open_read(self, **kwargs: Any):
-        assert self._gate.wait(10), "test never released the read gate"
-        return self._inner.open_read(**kwargs)
+        return _GatedRead(self._inner.open_read(**kwargs), self._gate)
 
     def iter_batches(self, **kwargs: Any):
         assert self._gate.wait(10), "test never released the read gate"

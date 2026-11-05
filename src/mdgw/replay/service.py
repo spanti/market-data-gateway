@@ -20,7 +20,12 @@ from mdgw.core.errors import (
     SessionNotFoundError,
     UnknownInstrumentError,
 )
-from mdgw.replay.session import ReplaySession, ReplaySessionSpec
+from mdgw.replay.session import (
+    DEFAULT_REPLAY_BATCH_SIZE,
+    DEFAULT_REPLAY_PREFETCH_BATCHES,
+    ReplaySession,
+    ReplaySessionSpec,
+)
 
 if TYPE_CHECKING:
     from mdgw.reference import InstrumentStore
@@ -63,6 +68,8 @@ class ReplayService:
         publish_event: PublishEvent | None = None,
         session_id_factory: Callable[[], str] | None = None,
         instrument_store: InstrumentStore | None = None,
+        batch_size: int = DEFAULT_REPLAY_BATCH_SIZE,
+        prefetch_batches: int = DEFAULT_REPLAY_PREFETCH_BATCHES,
     ) -> None:
         if max_sessions < 1:
             msg = "max_sessions must be at least 1"
@@ -70,9 +77,17 @@ class ReplayService:
         if heartbeat_s <= 0:
             msg = "heartbeat_s must be positive"
             raise ValueError(msg)
+        if batch_size < 1:
+            msg = "batch_size must be positive"
+            raise ValueError(msg)
+        if prefetch_batches < 1:
+            msg = "prefetch_batches must be at least 1"
+            raise ValueError(msg)
         self._store = store
         self._max_sessions = max_sessions
         self._heartbeat_s = heartbeat_s
+        self._batch_size = batch_size
+        self._prefetch_batches = prefetch_batches
         self._publish_bar: PublishBar = publish_bar or _null_publish_bar
         self._publish_event: PublishEvent = publish_event or _null_publish_event
         self._session_id_factory = session_id_factory or default_session_id_factory
@@ -125,6 +140,8 @@ class ReplayService:
                 partial(self._send_bar, session_id),
                 partial(self._send_event, session_id),
                 heartbeat_s=self._heartbeat_s,
+                batch_size=self._batch_size,
+                prefetch_batches=self._prefetch_batches,
             )
             self._sessions[session_id] = session
             session.start()
