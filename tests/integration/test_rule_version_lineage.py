@@ -1,9 +1,10 @@
 """Rule Version lineage through the real Collector and Backfill paths.
 
 Quarantine records and Bars Manifest entries must name the Normalization
-rules that actually ran: live Polars batches and the scalar Backfill/archive
-rules have separate audit identities. Rule Version stays audit metadata; the
-Data Contract Version remains the Schema authority.
+rules that actually ran. Live ingest, Backfill and archive import all use the
+one Polars batch implementation, so they share one audit identity. Rule
+Version stays audit metadata; the Data Contract Version remains the Schema
+authority.
 """
 
 from __future__ import annotations
@@ -19,10 +20,7 @@ from mdgw.core.bar import RawBar
 from mdgw.core.time import utc_now
 from mdgw.ingest.fake import BarInput, FakeFeedHandler
 from mdgw.normalize.batch import BatchNormalizationError
-from mdgw.normalize.version import (
-    NORMALIZATION_RULE_VERSION,
-    SCALAR_NORMALIZATION_RULE_VERSION,
-)
+from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
 from mdgw.quarantine import QUARANTINE_SCHEMA_VERSION
 from mdgw.runtime import GatewayRuntime
 from mdgw.service.collector_core import CollectorCore
@@ -161,7 +159,7 @@ def test_configured_live_rule_version_reaches_quarantine_and_manifest(
         core.close_state()
 
 
-def test_backfill_stamps_the_scalar_rule_version(tmp_path: Path) -> None:
+def test_backfill_stamps_the_polars_rule_version(tmp_path: Path) -> None:
     now = utc_now().replace(second=0, microsecond=0)
     history = [
         BarInput(
@@ -186,8 +184,9 @@ def test_backfill_stamps_the_scalar_rule_version(tmp_path: Path) -> None:
         runtime.start()
         entries = active_manifest_entries(runtime.store.dataset_root)
         assert entries
-        # Backfill uses the scalar reference rules, not the live Polars rules.
+        # Backfill normalizes through the same Polars batch rules as live
+        # ingest, so its Manifest lineage names that single rule source.
         assert {
             tuple(entry["rule_versions"]) for entry in entries
-        } == {(SCALAR_NORMALIZATION_RULE_VERSION,)}
+        } == {(NORMALIZATION_RULE_VERSION,)}
         assert runtime.store.count_bars(interval="1m") == 3

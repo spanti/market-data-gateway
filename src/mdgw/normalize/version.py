@@ -12,18 +12,12 @@ from __future__ import annotations
 
 from typing import Any
 
-# Live Polars batch Normalization rules (``mdgw.normalize.batch``).
+# The single Polars batch Normalization rule source
+# (``mdgw.normalize.batch``), used by live ingest, Backfill and archive import.
 NORMALIZATION_RULE_VERSION = "polars-1"
-# Scalar reference rules used by Backfill and archive import. Field-equivalent
-# to the live rules today, but a separate implementation and therefore a
-# separate audit identity. It is a current version, never a historical guess.
-SCALAR_NORMALIZATION_RULE_VERSION = "scalar-1"
 
 NORMALIZATION_RULE_VERSIONS: frozenset[str] = frozenset(
     {NORMALIZATION_RULE_VERSION}
-)
-SCALAR_NORMALIZATION_RULE_VERSIONS: frozenset[str] = frozenset(
-    {SCALAR_NORMALIZATION_RULE_VERSION}
 )
 
 
@@ -53,7 +47,5 @@ def normalize_rule_versions(value: Any) -> tuple[str, ...]:
 __all__ = [
     "NORMALIZATION_RULE_VERSION",
     "NORMALIZATION_RULE_VERSIONS",
-    "SCALAR_NORMALIZATION_RULE_VERSION",
-    "SCALAR_NORMALIZATION_RULE_VERSIONS",
     "normalize_rule_versions",
 ]

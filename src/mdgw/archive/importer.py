@@ -5,7 +5,7 @@ The import is deliberately offline and idempotent:
 * each archive ZIP is verified with its `.CHECKSUM` before any Bar is written;
 * a missing archive (404 or absent locally) is a `missing_file`, not a failure;
   a missing/mismatched CHECKSUM or a malformed file is a `failure`;
-* 1m Bars are normalized through the same `normalize_bar` used by live ingest,
+* 1m Bars are normalized through the same `normalize_batch` used by live ingest,
   then fed in chronological order to `BarAggregator` so 5m/15m/1h/1d parents
   only exist when their whole period is present;
 * the shared `merge_bar_batch` helper skips identical stored Bars and re-appends
@@ -50,11 +50,8 @@ from mdgw.backfill_common import (
     merge_bar_batch,
 )
 from mdgw.core.time import datetime_to_ns, to_utc, utc_now
-from mdgw.normalize.bar import normalize_bar
-from mdgw.normalize.version import (
-    SCALAR_NORMALIZATION_RULE_VERSION,
-    SCALAR_NORMALIZATION_RULE_VERSIONS,
-)
+from mdgw.normalize.batch import normalize_batch
+from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
 from mdgw.quarantine import (
     REASON_ARCHIVE_CHECKSUM_MISMATCH,
     REASON_ARCHIVE_FIELD_ERROR,
@@ -68,7 +65,7 @@ from mdgw.quarantine import (
 
 if TYPE_CHECKING:
     from mdgw.aggregate import BarAggregator
-    from mdgw.core.bar import RawBar
+    from mdgw.core.bar import Bar, RawBar
     from mdgw.state.high_water_mark import HighWaterMarkStore
     from mdgw.store.parquet_dataset import ParquetBarStore
 
@@ -148,7 +145,7 @@ def import_archive(  # ruff: ignore[too-many-arguments]
     ingest_ts: datetime | None = None,
     today: date | None = None,
     quarantine: QuarantineStore | None = None,
-    rule_version: str = SCALAR_NORMALIZATION_RULE_VERSION,
+    rule_version: str = NORMALIZATION_RULE_VERSION,
 ) -> ArchiveReport:
     """Import all archive files covering `[start, end]` for every Instrument.
 
@@ -270,11 +267,8 @@ def _import_period(
         return
 
     try:
-        bars = [
-            normalize_bar(raw, feed=context.feed, ingest_ts=context.ingest_ts)
-            for raw in selected
-        ]
-    except ValueError as exc:
+        bars = _normalize_bars(context, selected)
+    except ArchiveFieldError as exc:
         _failure(
             report,
             instrument,
@@ -312,8 +306,6 @@ def _import_period(
     context.store.write_bars(
         result.written,
         asset_class=instrument.asset_class,
-        # Archive import normalizes with the scalar reference rules.
-        rule_versions=SCALAR_NORMALIZATION_RULE_VERSIONS,
     )
     report.bars_written += len(result.written)
 
@@ -415,6 +407,30 @@ def _select_bars(
             },
         )
     return selected
+
+
+def _normalize_bars(
+    context: _ImportContext, raw_bars: list[RawBar]
+) -> list[Bar]:
+    """Normalize one whole archive file with the shared Polars rules.
+
+    Any rejection fails the whole file, preserving the previous archive
+    atomicity. The message deliberately carries only the stable Reason Codes,
+    never rejected values or engine details; the Quarantine Record keeps the
+    structured diagnostics.
+    """
+    batch = normalize_batch(
+        raw_bars, feed=context.feed, ingest_ts=context.ingest_ts
+    )
+    if batch.rejections:
+        reasons = ", ".join(
+            sorted({rejection.reason_code for rejection in batch.rejections})
+        )
+        msg = (
+            f"Normalization rejected {len(batch.rejections)} row(s): {reasons}"
+        )
+        raise ArchiveFieldError(msg)
+    return batch.bars
 
 
 def _load_verified_bars(

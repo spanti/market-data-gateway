@@ -1,9 +1,9 @@
-"""Batch Normalization is field-equivalent to the scalar implementation.
+"""Polars batch Normalization: the single production rule source.
 
-The scalar ``normalize_bar`` remains the reference used by Backfill and by the
-differential tests. The live Collector boundary uses ``normalize_batch``,
-which validates and stamps the same fields through typed Arrow columns and
-Polars. Rejections are classified with the stable Quarantine vocabulary.
+Live Collector batches, Backfill and archive import all use
+``normalize_batch``, which validates and stamps fields through typed Arrow
+columns and Polars. Rejections are classified with the stable Quarantine
+vocabulary.
 """
 
 from __future__ import annotations
@@ -13,8 +13,7 @@ from decimal import Decimal
 
 import pytest
 
-from mdgw.core.bar import RawBar
-from mdgw.normalize.bar import normalize_bar
+from mdgw.core.bar import Bar, RawBar
 from mdgw.normalize.batch import BatchNormalizationError, normalize_batch
 from mdgw.quarantine import (
     REASON_DECIMAL_SCALE_EXCEEDED,
@@ -69,7 +68,7 @@ def _assert_same_bars(actual: list, expected: list) -> None:
 
 
 @pytest.mark.parametrize("count", [0, 1, 25])
-def test_valid_batches_match_scalar_normalization(count: int) -> None:
+def test_valid_batches_are_normalized_with_the_full_envelope(count: int) -> None:
     raws = [
         _raw(
             index % 7,
@@ -84,12 +83,41 @@ def test_valid_batches_match_scalar_normalization(count: int) -> None:
 
     batch = normalize_batch(raws, feed="fake", ingest_ts=INGEST)
 
-    expected = [normalize_bar(raw, feed="fake", ingest_ts=INGEST) for raw in raws]
+    expected = []
+    for index in range(count):
+        open_ts = START + timedelta(minutes=index % 7)
+        close_ts = open_ts + timedelta(minutes=1)
+        expected.append(
+            Bar(
+                schema_version=1,
+                data_type="bar",
+                instrument_id=(
+                    "binance:BTC/USDT"
+                    if index % 2 == 0
+                    else "binance:ETH/USDT"
+                ),
+                interval="1m",
+                open_ts=open_ts,
+                close_ts=close_ts,
+                event_ts=close_ts,
+                ingest_ts=INGEST,
+                feed="fake",
+                seq=None,
+                aggregation_source="external",
+                open=Decimal("100.5"),
+                high=Decimal("101.25"),
+                low=Decimal("99.75"),
+                close=Decimal("100.125"),
+                volume=Decimal("12.5"),
+                trade_count=None if index % 3 == 0 else index,
+                revision=index % 2,
+            )
+        )
     assert batch.rejections == ()
     _assert_same_bars(batch.bars, expected)
 
 
-def test_timezone_conversion_and_envelope_match_scalar() -> None:
+def test_timezone_conversion_and_envelope() -> None:
     shanghai = timezone(timedelta(hours=8))
     open_ts = datetime(2024, 1, 1, 8, 0, tzinfo=shanghai)
     raw = _raw(open_ts=open_ts)
@@ -97,8 +125,6 @@ def test_timezone_conversion_and_envelope_match_scalar() -> None:
     batch = normalize_batch([raw], feed="binance_spot", ingest_ts=INGEST)
 
     (normalized,) = batch.bars
-    expected = normalize_bar(raw, feed="binance_spot", ingest_ts=INGEST)
-    assert normalized == expected
     assert normalized.open_ts == datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
     assert normalized.close_ts == datetime(2024, 1, 1, 0, 1, tzinfo=UTC)
     assert normalized.event_ts == normalized.close_ts
@@ -125,8 +151,6 @@ def test_decimal_precision_is_not_rounded_through_polars() -> None:
     batch = normalize_batch([raw], feed="fake", ingest_ts=INGEST)
 
     (bar,) = batch.bars
-    expected = normalize_bar(raw, feed="fake", ingest_ts=INGEST)
-    assert bar == expected
     assert bar.open == exact
     assert str(bar.open) == str(exact)
     assert bar.high == Decimal("-99999999999999999999.999999999999999999")

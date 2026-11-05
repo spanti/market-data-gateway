@@ -997,6 +997,44 @@ def test_key_field_failure_quarantines_the_whole_file(
     )
 
 
+def test_normalization_rejection_quarantines_with_a_sanitized_message(
+    tmp_path: Path,
+) -> None:
+    archive_dir = tmp_path / "archive"
+    day = date(2024, 1, 1)
+    period = ArchivePeriod("daily", day, day)
+    # `parse_kline_csv` accepts the exact Decimal; Normalization rejects a
+    # scale it cannot store without rounding. The whole file must still be
+    # quarantined through the archive failure path.
+    over_scale = "1.1234567890123456789"
+    _write_archive(
+        archive_dir,
+        period,
+        csv_text=_csv_text(
+            [datetime(2024, 1, 1, 12, 0, tzinfo=UTC)],
+            unit=timestamp_unit_for_date(day),
+            price=over_scale,
+        ),
+    )
+
+    store, report, _ = _run_import(
+        tmp_path / "data", archive_dir, start=day, end=day
+    )
+
+    assert report.failures == 1
+    assert report.bars_written == 0
+    assert _rows(store, "1m") == []
+    records = _quarantine_of(tmp_path / "data").read_records().to_pylist()
+    assert len(records) == 1
+    record = records[0]
+    assert record["source_stage"] == SOURCE_STAGE_ARCHIVE_FILE
+    assert record["reason_code"] == REASON_ARCHIVE_FIELD_ERROR
+    details = json.loads(record["details"])
+    assert details["error_type"] == "ArchiveFieldError"
+    # Diagnostics name the stable Reason Code, never the rejected values.
+    assert over_scale not in details["message"]
+
+
 def test_a_valid_archive_leaves_no_quarantine_records(tmp_path: Path) -> None:
     archive_dir = tmp_path / "archive"
     day = date(2024, 1, 1)
