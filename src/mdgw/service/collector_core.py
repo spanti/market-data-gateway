@@ -76,6 +76,7 @@ class CollectorCore:
             row_group_size=config.storage.row_group_size,
             format_version=config.storage.format_version,
             schema_version=config.storage.schema_version,
+            duckdb=config.storage.duckdb.to_options(),
         )
         self.aggregator = aggregator or BarAggregator(
             intervals=config.aggregation.intervals,

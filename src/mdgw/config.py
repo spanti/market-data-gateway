@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import (
     BaseModel,
@@ -15,6 +17,9 @@ from pydantic import (
 )
 
 from mdgw.core.schema import INTERVALS
+
+if TYPE_CHECKING:
+    from mdgw.store.duckdb_reader import DuckDBOptions
 
 # `bus.transport` only selects the single-process `GatewayRuntime` internal
 # transport. Multi-process Service Roles always use the explicit `tcp://`
@@ -139,6 +144,50 @@ class RateLimitConfig(_ConfigModel):
 
 
 
+_BYTE_SIZE_RE = re.compile(r"^\d+(?:\.\d+)?\s*(?:B|KB|MB|GB|TB)$", re.IGNORECASE)
+
+
+def _byte_size(value: str) -> str:
+    value = value.strip()
+    if _BYTE_SIZE_RE.match(value) is None:
+        msg = f"invalid byte size (expected e.g. '512MB'): {value!r}"
+        raise ValueError(msg)
+    return value
+
+
+class DuckDBConfig(_ConfigModel):
+    """Explicit resources for the DuckDB Arrow history read path.
+
+    This is not an engine switch: DuckDB is always a formal runtime
+    dependency. These settings only bound the per-read connection.
+    """
+
+    memory_limit: str = "1GB"
+    threads: int = Field(default=4, ge=1)
+    # None keeps DuckDB's own default temporary directory.
+    temp_directory: Path | None = None
+    max_temp_directory_size: str = "10GB"
+    arrow_batch_size: int = Field(default=65_536, ge=1)
+
+    @field_validator("memory_limit", "max_temp_directory_size")
+    @classmethod
+    def _valid_byte_size(cls, value: str) -> str:
+        return _byte_size(value)
+
+    def to_options(self) -> DuckDBOptions:
+        """Build the plain Store-level options without importing at module load."""
+        # Storage imports stay lazy so `mdgw.config` remains dependency-light.
+        from mdgw.store.duckdb_reader import DuckDBOptions  # ruff: ignore[import-outside-top-level]
+
+        return DuckDBOptions(
+            memory_limit=self.memory_limit,
+            threads=self.threads,
+            temp_directory=self.temp_directory,
+            max_temp_directory_size=self.max_temp_directory_size,
+            arrow_batch_size=self.arrow_batch_size,
+        )
+
+
 class StorageConfig(_ConfigModel):
     root: Path = Path("./data")
     schema_version: int = 1
@@ -147,6 +196,7 @@ class StorageConfig(_ConfigModel):
     row_group_size: int = 1_000_000
     flush_max_bytes: int = 67_108_864
     flush_max_age_s: int = 3_600
+    duckdb: DuckDBConfig = Field(default_factory=DuckDBConfig)
 
 
 class RetentionConfig(_ConfigModel):
