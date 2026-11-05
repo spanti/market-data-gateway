@@ -79,6 +79,51 @@ def test_aggregation_rejects_unknown_interval() -> None:
         )
 
 
+def test_quarantine_config_defaults_to_storage_subdirectory() -> None:
+    quarantine = GatewayConfig().storage.quarantine
+    assert quarantine.root is None
+    assert quarantine.schema_version == 1
+    assert quarantine.rule_version == "1"
+    assert quarantine.resolved_root(Path("data")) == Path("data/quarantine")
+
+
+def test_quarantine_config_accepts_an_independent_root_and_version() -> None:
+    config = GatewayConfig.model_validate(
+        {
+            "storage": {
+                "quarantine": {
+                    "root": "audit/quarantine",
+                    "schema_version": 2,
+                    "rule_version": "rules-2",
+                }
+            }
+        }
+    )
+    quarantine = config.storage.quarantine
+    assert quarantine.resolved_root(Path("ignored")) == Path("audit/quarantine")
+    assert quarantine.schema_version == 2
+    assert quarantine.rule_version == "rules-2"
+
+
+def test_quarantine_rejects_an_empty_rule_version() -> None:
+    with pytest.raises(ValidationError, match="rule_version"):
+        GatewayConfig.model_validate(
+            {"storage": {"quarantine": {"rule_version": "  "}}}
+        )
+
+
+def test_quarantine_root_must_not_be_inside_the_bars_dataset() -> None:
+    with pytest.raises(ValidationError, match="must not be inside"):
+        GatewayConfig.model_validate(
+            {
+                "storage": {
+                    "root": "data",
+                    "quarantine": {"root": "data/bars/quarantine"},
+                }
+            }
+        )
+
+
 def test_aggregation_rejects_duplicate_intervals() -> None:
     with pytest.raises(ValidationError, match="duplicates"):
         GatewayConfig.model_validate(

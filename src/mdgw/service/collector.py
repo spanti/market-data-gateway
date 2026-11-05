@@ -62,6 +62,11 @@ class CollectorService:
         # buffered writer flushes), so the process metric is advanced by delta.
         self._last_written_metric = 0.0
         self._written_metric_lock = threading.Lock()
+        # Quarantine counters advance by delta from `QuarantineStore.stats()`;
+        # CollectorCore never depends on the MetricsRegistry.
+        self._last_quarantine_counts: dict[tuple[str, str], int] = {}
+        self._last_quarantine_failures = 0
+        self._quarantine_metric_lock = threading.Lock()
 
         self._streaming: StreamingInterface | None = None
         self._health_server: ServiceHealthServer | None = None
@@ -331,6 +336,7 @@ class CollectorService:
             "write_last_flush_ts": sink.get("last_flush_ts"),
             "write_last_flush_duration_s": sink.get("last_flush_duration_s"),
             "write_sink": sink,
+            "quarantine": self.core.quarantine.stats(),
             "health": health,
         }
 
@@ -395,8 +401,40 @@ class CollectorService:
             sink.get("last_flush_duration_s") or 0.0,
             help="Duration of the last successful write-buffer flush",
         )
+        self._update_quarantine_metrics()
         update_dataset_metrics(self.metrics, self.core.store)
         return self.metrics.render()
+
+    def _update_quarantine_metrics(self) -> None:
+        """Expose Quarantine records and write failures by stable labels."""
+        stats = self.core.quarantine.stats()
+        with self._quarantine_metric_lock:
+            for entry in stats["records_by_stage_and_reason"]:
+                key = (entry["source_stage"], entry["reason_code"])
+                previous = self._last_quarantine_counts.get(key, 0)
+                delta = int(entry["count"]) - previous
+                if delta > 0:
+                    self.metrics.inc(
+                        "mdgw_collector_quarantine_records_total",
+                        labels={
+                            "source_stage": key[0],
+                            "reason_code": key[1],
+                        },
+                        amount=delta,
+                        help="Rejected inputs written to the Quarantine Dataset",
+                    )
+                self._last_quarantine_counts[key] = int(entry["count"])
+
+            failures = int(stats["write_failures"])
+            self.metrics.inc(
+                "mdgw_collector_quarantine_write_failures_total",
+                amount=max(0, failures - self._last_quarantine_failures),
+                help=(
+                    "Quarantine writes that failed; the corresponding input "
+                    "was not acknowledged (fail-closed)"
+                ),
+            )
+            self._last_quarantine_failures = failures
 
     def _uptime_s(self) -> float:
         if self._started_at is None:

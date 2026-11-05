@@ -93,6 +93,8 @@ class GatewayRuntime:
             health=self._health,
             asset_class_for=self._asset_class_for,
         )
+        # Independent Quarantine Dataset; never part of the Bars Dataset.
+        self.quarantine = self._core.quarantine
 
         self._streaming: StreamingInterface | None = None
         self._hub: WebSocketHub | None = None
