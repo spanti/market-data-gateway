@@ -1,4 +1,5 @@
-"""Operator CLI: `run --service`, `up`, `compact`, `gc`, and `backfill`.
+"""Operator CLI: `run --service`, `up`, `compact`, `gc`, `quarantine-gc`, and
+`backfill`.
 
 `run` starts exactly one Service Role and blocks until SIGINT/SIGTERM; `up` is
 a small supervisor that starts collector -> ready -> api and restarts unexpected
@@ -23,6 +24,7 @@ import typer
 from mdgw.config import GatewayConfig, load_config
 from mdgw.core.time import utc_now
 from mdgw.logging import configure_json_logging
+from mdgw.quarantine import QuarantineStore
 from mdgw.store.maintenance import parse_duration
 from mdgw.store.parquet_dataset import ParquetBarStore
 
@@ -171,6 +173,89 @@ def gc(
         f"{len(report.skipped_locked)} locked and "
         f"{len(report.skipped_current_month)} current month"
     )
+    for failure in report.failures:
+        typer.echo(f"error: {failure}", err=True)
+    if report.failures:
+        raise typer.Exit(code=1)
+    return 0
+
+
+@app.command(name="quarantine-gc")
+def quarantine_gc(  # ruff: ignore[too-many-arguments, too-many-positional-arguments] - Typer command surface
+    ctx: typer.Context,
+    retention_days: Optional[int] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional] - Typer 0.9 lacks PEP 604 support
+        None,
+        "--retention-days",
+        metavar="DAYS",
+        help=(
+            "override [storage.quarantine].retention_days "
+            "(0 = keep forever)"
+        ),
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="report what would be deleted (default)",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="actually delete expired Quarantine Data Files",
+    ),
+    config: Optional[Path] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional, function-call-in-default-argument] - Typer 0.9 lacks PEP 604 support
+        None, "--config", metavar="PATH", help="path to gateway.toml"
+    ),
+    root: Optional[Path] = typer.Option(  # ruff: ignore[non-pep604-annotation-optional, function-call-in-default-argument] - Typer 0.9 lacks PEP 604 support
+        None,
+        "--root",
+        metavar="PATH",
+        help="override the Dataset parent directory",
+    ),
+) -> int:
+    """Delete whole expired UTC months from the Quarantine Dataset."""
+    if dry_run and apply:
+        msg = "--dry-run and --apply are mutually exclusive"
+        raise typer.BadParameter(msg, param_hint="--apply")
+
+    config_path, root_path = _common_options(ctx, config, root)
+    gateway_config = _load_config(config_path)
+    storage_root = (
+        root_path if root_path is not None else gateway_config.storage.root
+    )
+    quarantine_config = gateway_config.storage.quarantine
+    store = QuarantineStore(
+        quarantine_config.resolved_root(storage_root),
+        schema_version=quarantine_config.schema_version,
+        retention_days=quarantine_config.retention_days,
+    )
+    requested = (
+        store.retention_days
+        if retention_days is None
+        else int(retention_days)
+    )
+    if requested < 0:
+        msg = "retention days must be 0 (keep forever) or positive"
+        raise typer.BadParameter(msg, param_hint="--retention-days")
+    if requested == 0:
+        print("quarantine-gc: retention is 0 (keep forever); nothing to delete")
+        return 0
+
+    report = store.gc(requested, apply=apply)
+    mode = "apply" if apply else "dry-run"
+    print(
+        f"quarantine-gc ({mode}): "
+        f"{len(report.removed_partitions)} month partition(s), "
+        f"{len(report.removed_files)} file(s), "
+        f"{report.removed_bytes} byte(s), skipped "
+        f"{len(report.skipped_current_month)} current month"
+    )
+    if report.removed_partitions:
+        print("months: " + ", ".join(report.removed_partitions))
+    if report.skipped_current_month:
+        print(
+            "skipped current month: "
+            + ", ".join(report.skipped_current_month)
+        )
     for failure in report.failures:
         typer.echo(f"error: {failure}", err=True)
     if report.failures:
@@ -669,7 +754,7 @@ def _select_archive_instruments(
     return selected
 
 
-def _run_archive_backfill(  # ruff: ignore[too-many-arguments] - keyword-only import pipeline knobs
+def _run_archive_backfill(  # ruff: ignore[too-many-arguments, too-many-statements] - keyword-only import pipeline knobs
     *,
     archive: bool,
     config_path: Path | None,
@@ -712,6 +797,11 @@ def _run_archive_backfill(  # ruff: ignore[too-many-arguments] - keyword-only im
     level = log_level or config.service.log_level
     configure_json_logging(level, service="backfill")
     store = _build_store(root, config)
+    quarantine = QuarantineStore(
+        config.storage.quarantine.resolved_root(store.root),
+        schema_version=config.storage.quarantine.schema_version,
+        retention_days=config.storage.quarantine.retention_days,
+    )
 
     end = end or (utc_now().date() - timedelta(days=1))
     if end < start:
@@ -779,6 +869,8 @@ def _run_archive_backfill(  # ruff: ignore[too-many-arguments] - keyword-only im
             interval=interval,
             granularity=granularity,
             retention_bars_days=retention_bars_days,
+            quarantine=quarantine,
+            rule_version=config.storage.quarantine.rule_version,
         )
     finally:
         hwm.close()

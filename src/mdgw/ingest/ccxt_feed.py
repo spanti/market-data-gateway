@@ -31,6 +31,14 @@ from mdgw.core.bar import RawBar
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import UTC, datetime_to_ns, to_utc, utc_now
+from mdgw.quarantine import (
+    REASON_MALFORMED_ROW,
+    SOURCE_STAGE_CCXT_HISTORY_ROW,
+    SOURCE_STAGE_CCXT_LIVE_ROW,
+    QuarantineRecord,
+    QuarantineStore,
+    QuarantineWriteError,
+)
 
 if TYPE_CHECKING:
     from mdgw.config import FeedConfig
@@ -245,6 +253,26 @@ def _coerce_bool(value) -> bool | None:
     return None
 
 
+def _raw_row_record(row) -> dict:
+    """A JSON-safe-ish representation of one rejected ccxt row.
+
+    The Quarantine Store sanitizes and truncates this mapping; it is never
+    used as a program branch or a metric label.
+    """
+    if isinstance(row, Mapping):
+        return dict(row)
+    if isinstance(row, Sequence) and not isinstance(row, (str, bytes)):
+        return {"row": list(row)}
+    return {"row": row}
+
+
+def _row_open_ts_or_none(row) -> datetime | None:
+    try:
+        return _ms_to_datetime(_row_timestamp_ms(row))
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
 def _interval_ns(interval: str) -> int:
     delta = INTERVALS[interval]
     return (
@@ -364,6 +392,8 @@ class CcxtFeedHandler:
         queue_maxsize: int = DEFAULT_QUEUE_MAXSIZE,
         reconnect_backoff_s: float = DEFAULT_RECONNECT_BACKOFF_S,
         reconnect_backoff_max_s: float = DEFAULT_RECONNECT_BACKOFF_MAX_S,
+        quarantine: QuarantineStore | None = None,
+        rule_version: str = "1",
     ) -> None:
         self.config = config
         self.name = config.name
@@ -377,6 +407,13 @@ class CcxtFeedHandler:
         self._queue: queue.Queue[RawBar] = queue.Queue(maxsize=queue_maxsize)
         self._reconnect_backoff_s = reconnect_backoff_s
         self._reconnect_backoff_max_s = reconnect_backoff_max_s
+        # Malformed rows may be skipped ONLY after their record is durably
+        # written. Without a Store (or after a write failure) the source is
+        # stopped instead of silently advancing past the row.
+        self.quarantine = quarantine
+        self.rule_version = rule_version
+        self._fatal_error: BaseException | None = None
+        self._fatal_lock = threading.Lock()
 
         rate_limit_ms = getattr(exchange, "rateLimit", None)
         self._rate_limiter = rate_limiter or _venue_token_bucket(
@@ -417,6 +454,7 @@ class CcxtFeedHandler:
 
     def iter_bars(self) -> Iterator[RawBar]:
         """Drain the currently queued closed Bars, waiting briefly for one."""
+        self._raise_if_fatal()
         if self._closed:
             return iter(())
         self._ensure_worker()
@@ -440,6 +478,7 @@ class CcxtFeedHandler:
         end: datetime,
     ) -> Iterable[RawBar]:
         """Return closed Bars with `start <= open_ts < end` from REST history."""
+        self._raise_if_fatal()
         parsed = InstrumentId.parse(instrument_id).value
         if parsed not in self._instrument_to_symbol or interval != BASE_INTERVAL:
             return ()
@@ -461,6 +500,40 @@ class CcxtFeedHandler:
             loop,
         )
         return tuple(future.result(timeout=FETCH_TIMEOUT_S))
+
+    def attach_quarantine(
+        self,
+        quarantine: QuarantineStore,
+        *,
+        rule_version: str | None = None,
+    ) -> None:
+        """Use the Collector-owned Quarantine Store for malformed rows.
+
+        A Store explicitly passed to the constructor wins; this only fills the
+        gap for handlers an embedder/test constructed before the Collector.
+        """
+        if self.quarantine is None:
+            self.quarantine = quarantine
+        if rule_version is not None:
+            self.rule_version = rule_version
+
+    def _raise_if_fatal(self) -> None:
+        error = self._fatal_error
+        if error is not None:
+            raise error
+
+    def _fail_closed(self, error: BaseException) -> None:
+        with self._fatal_lock:
+            if self._fatal_error is None:
+                self._fatal_error = error
+        logger.error(
+            "ccxt Feed Handler stopped: a malformed row could not be "
+            "quarantined, so the source must not advance past it",
+            extra={
+                "event": "ccxt.quarantine_write_failed",
+                "feed": self.name,
+            },
+        )
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -557,6 +630,11 @@ class CcxtFeedHandler:
             try:
                 await self._watch_once()
                 backoff = self._reconnect_backoff_s
+            except QuarantineWriteError as exc:
+                # Fail closed: reconnecting would advance past the row whose
+                # rejection could not be recorded.
+                self._fail_closed(exc)
+                return
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # ruff: ignore[blind-except] - keep reconnecting
@@ -572,6 +650,9 @@ class CcxtFeedHandler:
                 backoff = min(backoff * 2, self._reconnect_backoff_max_s)
                 try:
                     await self._backfill_gap()
+                except QuarantineWriteError as exc:
+                    self._fail_closed(exc)
+                    return
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -622,21 +703,62 @@ class CcxtFeedHandler:
     def _handle_rows(self, symbol: str, rows) -> None:
         if symbol not in self._symbol_to_instrument:
             return
-        for row in _iter_raw_rows(rows):
+        for row_index, row in enumerate(_iter_raw_rows(rows)):
             try:
                 parsed = _RawRow.from_row(row)
             except _MALFORMED_ROW_ERRORS as exc:
-                logger.warning(
-                    "discarding malformed ccxt Bar for %s:%s: %s",
-                    self.venue,
-                    symbol,
-                    exc,
+                self._quarantine_malformed_row(
+                    source_stage=SOURCE_STAGE_CCXT_LIVE_ROW,
+                    stream="live",
+                    symbol=symbol,
+                    row_index=row_index,
+                    row=row,
+                    error=exc,
                 )
                 continue
 
             closed = self._closed_bar_rule.accept(symbol, parsed)
             if closed is not None:
                 self._enqueue(self._raw_bar(symbol, closed))
+
+    def _quarantine_malformed_row(  # ruff: ignore[too-many-arguments] - record fields
+        self,
+        *,
+        source_stage: str,
+        stream: str,
+        symbol: str,
+        row_index: int,
+        row,
+        error: BaseException,
+    ) -> None:
+        """Durably record one malformed row before it may be skipped.
+
+        ``QuarantineWriteError`` propagates when the record cannot be written;
+        ``_watch_forever`` turns that into a fatal handler state so the source
+        neither reconnects past nor acknowledges the row.
+        """
+        if self.quarantine is None:
+            msg = (
+                "cannot skip malformed ccxt row without a Quarantine Store "
+                f"({self.venue}:{symbol})"
+            )
+            raise QuarantineWriteError(msg)
+        record = QuarantineRecord(
+            source_stage=source_stage,
+            reason_code=REASON_MALFORMED_ROW,
+            rule_version=self.rule_version,
+            source_location=f"ccxt:{symbol}:{stream}:row={row_index}",
+            details={
+                "error_type": type(error).__name__,
+                "message": str(error),
+            },
+            raw_record=_raw_row_record(row),
+            feed=self.name,
+            instrument_id=self._symbol_to_instrument.get(symbol),
+            interval=BASE_INTERVAL,
+            open_ts=_row_open_ts_or_none(row),
+        )
+        self.quarantine.write_records([record])
 
     def _raw_bar(self, symbol: str, row: _RawRow) -> RawBar:
         values = row.values
@@ -708,15 +830,19 @@ class CcxtFeedHandler:
     ) -> list[int]:
         """Add closed rows to `bars`; return every readable row timestamp."""
         timestamps_ms: list[int] = []
-        for row in rows:
+        for row_index, row in enumerate(rows):
             try:
                 parsed = _RawRow.from_row(row)
             except _MALFORMED_ROW_ERRORS as exc:
-                logger.warning(
-                    "discarding malformed ccxt history Bar for %s:%s: %s",
-                    self.venue,
-                    symbol,
-                    exc,
+                # A bad value may be skipped only after the record is durable.
+                # A failed write propagates and stops history consumption.
+                self._quarantine_malformed_row(
+                    source_stage=SOURCE_STAGE_CCXT_HISTORY_ROW,
+                    stream="history",
+                    symbol=symbol,
+                    row_index=row_index,
+                    row=row,
+                    error=exc,
                 )
                 # A bad value must not stall pagination when the timestamp is
                 # still readable.
@@ -774,12 +900,15 @@ def build_feed_handler(
     feed_config: FeedConfig,
     *,
     exchange=None,
+    quarantine: QuarantineStore | None = None,
+    rule_version: str = "1",
 ) -> FeedHandler:
     """Build the Feed Handler for one `[[feeds]]` entry.
 
     `kind = "fake"` selects the deterministic, network-free generator used by
     development and the multi-process tests. `exchange` is injectable so tests
-    can supply a preconfigured ccxt.pro client.
+    can supply a preconfigured ccxt.pro client. `quarantine` is the
+    Collector-owned Quarantine Store used for malformed ccxt rows.
     """
     if feed_config.kind == "fake":
         # Imported lazily: the fake factory itself imports the composite
@@ -794,7 +923,12 @@ def build_feed_handler(
         raise ValueError(msg)
     if exchange is None:
         exchange = _create_exchange(feed_config)
-    return CcxtFeedHandler(config=feed_config, exchange=exchange)
+    return CcxtFeedHandler(
+        config=feed_config,
+        exchange=exchange,
+        quarantine=quarantine,
+        rule_version=rule_version,
+    )
 
 
 def _create_exchange(feed_config: FeedConfig):

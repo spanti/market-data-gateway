@@ -411,6 +411,9 @@ def test_collector_service_exposes_quarantine_metrics_and_status(
             '{reason_code="float_value",source_stage="live_normalize"} 1'
         ) in metrics
         assert "mdgw_collector_quarantine_write_failures_total 0" in metrics
+        assert "mdgw_collector_quarantine_active_files 1" in metrics
+        assert "mdgw_collector_quarantine_retention_days 30" in metrics
+        assert "mdgw_collector_quarantine_active_bytes" in metrics
 
         status = service.status_payload()
         quarantine = status["quarantine"]
@@ -420,6 +423,8 @@ def test_collector_service_exposes_quarantine_metrics_and_status(
         assert quarantine["records_by_source_stage"] == {"live_normalize": 1}
         assert quarantine["records_by_reason_code"] == {"float_value": 1}
         assert quarantine["active_file_count"] == 1
+        assert quarantine["active_bytes"] > 0
+        assert quarantine["retention_days"] == 30
         assert quarantine["last_write_ts"] is not None
     finally:
         service.core.close_state()
