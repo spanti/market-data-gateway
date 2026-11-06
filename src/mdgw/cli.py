@@ -25,6 +25,7 @@ from mdgw.config import GatewayConfig, load_config
 from mdgw.core.time import utc_now
 from mdgw.logging import configure_json_logging
 from mdgw.quarantine import QuarantineStore
+from mdgw.store.composition import StorageComposition
 from mdgw.store.maintenance import parse_duration
 from mdgw.store.parquet_dataset import ParquetBarStore
 
@@ -104,14 +105,14 @@ def compact(
     """Merge small Data Files per partition."""
     config_path, root_path = _common_options(ctx, config, root)
     gateway_config = _load_config(config_path)
-    store = _build_store(root_path, gateway_config)
-
     try:
         duration = parse_duration(older_than)
     except ValueError as exc:
         raise typer.BadParameter(
             str(exc), param_hint="--older-than"
         ) from exc
+
+    store = StorageComposition(gateway_config, root=root_path).bars()
 
     report = store.compact(older_than=duration)
     print(
@@ -156,7 +157,7 @@ def gc(
 
     config_path, root_path = _common_options(ctx, config, root)
     gateway_config = _load_config(config_path)
-    store = _build_store(root_path, gateway_config)
+    store = StorageComposition(gateway_config, root=root_path).bars()
 
     if not gateway_config.retention.enabled:
         print("gc: retention is disabled; nothing to do")
@@ -219,23 +220,19 @@ def quarantine_gc(  # ruff: ignore[too-many-arguments, too-many-positional-argum
 
     config_path, root_path = _common_options(ctx, config, root)
     gateway_config = _load_config(config_path)
-    storage_root = (
-        root_path if root_path is not None else gateway_config.storage.root
-    )
     quarantine_config = gateway_config.storage.quarantine
-    store = QuarantineStore(
-        quarantine_config.resolved_root(storage_root),
-        schema_version=quarantine_config.schema_version,
-        retention_days=quarantine_config.retention_days,
-    )
     requested = (
-        store.retention_days
+        quarantine_config.retention_days
         if retention_days is None
         else int(retention_days)
     )
     if requested < 0:
         msg = "retention days must be 0 (keep forever) or positive"
         raise typer.BadParameter(msg, param_hint="--retention-days")
+
+    # Quarantine-only composition: this command must not construct a
+    # ParquetBarStore, create a DuckDB temp directory or touch Bars state.
+    store = StorageComposition(gateway_config, root=root_path).quarantine()
     if requested == 0:
         print("quarantine-gc: retention is 0 (keep forever); nothing to delete")
         return 0
