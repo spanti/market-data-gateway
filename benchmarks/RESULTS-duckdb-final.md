@@ -575,6 +575,16 @@ test selection were rerun against Aliyun's PyPI mirror; only the package
 source differs. Log:
 `benchmarks/.acceptance-logs/review-fixes-linux-lease.log`.
 
+**Post-fix full Linux suite.** The complete offline suite was rerun in the same
+`python:3.13-slim` image against the final integration code
+(`integration/duckdb-polars-storage`, merge `3f94a28`):
+**1089 passed, 6 failed, 3 skipped, 1 deselected in 207.75 s**. The 6 are the
+same five pre-existing Typer/Click failures plus the known CCXT Quarantine
+timing flake (which passes in isolation); the POSIX unlink-of-open-file case
+executed, the Windows-only file-sharing case skipped, and the two optional
+Nautilus examples skipped because `nautilus_trader` is not installed in the
+slim image.
+
 **Same-corpus rerun:** §5.4 reproduces the acceptance matrix on the saved
 `C:/Users/10107/AppData/Local/Temp/mdgw-duckdb-baseline` copy without
 `--rebuild` (marker reused; active bytes ~2.4% above the M0 table). Only the
