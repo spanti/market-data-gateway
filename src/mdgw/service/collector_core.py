@@ -43,12 +43,13 @@ from mdgw.reference import (
 from mdgw.service.bar_sink import BarSink, ImmediateBarSink
 from mdgw.state.health import GapEvent, HealthTracker
 from mdgw.state.high_water_mark import HighWaterMarkStore
-from mdgw.store.parquet_dataset import ParquetBarStore
+from mdgw.store.composition import StorageComposition
 
 if TYPE_CHECKING:
     from mdgw.config import GatewayConfig
     from mdgw.core.bar import Bar, RawBar
     from mdgw.ingest.feed_handler import FeedHandler
+    from mdgw.store.parquet_dataset import ParquetBarStore
 
 logger = logging.getLogger(__name__)
 
@@ -82,15 +83,30 @@ class CollectorCore:
     ) -> None:
         self.feed_handler = feed_handler
         self.config = config
-        self.store = store or ParquetBarStore(
-            data_root if data_root is not None else config.storage.root,
-            compression=config.storage.compression,
-            row_group_size=config.storage.row_group_size,
-            format_version=config.storage.format_version,
-            schema_version=config.storage.schema_version,
-            duckdb=config.storage.duckdb.to_options(),
-            rule_versions={config.storage.quarantine.rule_version},
-        )
+        # Defaults come from Storage Composition. Injected objects win; only
+        # the missing half is composed. A default Quarantine still anchors on
+        # the injected Store root, and its configured explicit root still wins.
+        composition = StorageComposition(config, root=data_root)
+        if store is None:
+            if quarantine is None:
+                bundle = composition.bars_and_quarantine()
+                self.store = bundle.bars
+                self.quarantine = bundle.quarantine
+            else:
+                self.store = composition.bars()
+                self.quarantine = quarantine
+        else:
+            self.store = store
+            self.quarantine = (
+                quarantine
+                if quarantine is not None
+                else StorageComposition(
+                    config, root=self.store.root
+                ).quarantine()
+            )
+        # One effective Normalization Rule Version for everything this core
+        # writes, owned by the same composition that built the defaults.
+        self.rule_version = composition.rule_version
         self.aggregator = aggregator or BarAggregator(
             intervals=config.aggregation.intervals,
             base_interval=config.aggregation.base_interval,
@@ -114,11 +130,6 @@ class CollectorCore:
         )
         # The Quarantine Dataset is independent of the Bars Dataset and is
         # never registered, scanned or exported by the Store/REST/Replay.
-        self.quarantine = quarantine or QuarantineStore(
-            config.storage.quarantine.resolved_root(self.store.root),
-            schema_version=config.storage.quarantine.schema_version,
-            retention_days=config.storage.quarantine.retention_days,
-        )
         # `GatewayRuntime` passes its own resolver because tests replace the
         # runtime's Instrument Store after start.
         self._asset_class_for_callback = asset_class_for
@@ -307,7 +318,7 @@ class CollectorCore:
         return QuarantineRecord(
             source_stage=source_stage,
             reason_code=reason_code,
-            rule_version=self.config.storage.quarantine.rule_version,
+            rule_version=self.rule_version,
             source_location=live_batch_source_location(ingest_ts, row_index),
             details=details,
             raw_record=self._raw_record(raw),

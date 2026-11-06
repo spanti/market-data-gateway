@@ -12,11 +12,11 @@ from mdgw.ingest.composite import (
     build_configured_feed_handler,
 )
 from mdgw.metrics import MetricsRegistry
-from mdgw.quarantine import QuarantineStore
 from mdgw.service.bar_sink import BufferedBarSink
 from mdgw.service.collector_core import CollectorCore
 from mdgw.service.common import iso_to_seconds, ns_iso, update_dataset_metrics
 from mdgw.service.health_server import ServiceHealthServer
+from mdgw.store.composition import StorageComposition
 from mdgw.streaming import StreamingInterface
 
 if TYPE_CHECKING:
@@ -47,31 +47,28 @@ class CollectorService:
         wait_for_api: bool | None = None,
     ) -> None:
         self.config = config
-        # The Collector owns the Quarantine Dataset; the same Store instance
-        # is used by the pipeline and by every ccxt Feed Handler it builds (or
-        # receives injected), so counters and the physical Dataset agree.
-        storage_root = (
-            data_root if data_root is not None else config.storage.root
-        )
-        quarantine = QuarantineStore(
-            config.storage.quarantine.resolved_root(storage_root),
-            schema_version=config.storage.quarantine.schema_version,
-            retention_days=config.storage.quarantine.retention_days,
-        )
+        # One joint composition owns both Store mappings and the effective
+        # Normalization Rule Version. The Collector owns the Quarantine
+        # Dataset; the pipeline and every ccxt Feed Handler it builds share
+        # this exact instance, so counters and the physical Dataset agree.
+        composition = StorageComposition(config, root=data_root)
+        bundle = composition.bars_and_quarantine()
+        quarantine = bundle.quarantine
         self._feed_handler = feed_handler or build_configured_feed_handler(
             config.feeds,
             quarantine=quarantine,
-            rule_version=config.storage.quarantine.rule_version,
+            rule_version=composition.rule_version,
         )
         attach_quarantine(
             self._feed_handler,
             quarantine,
-            rule_version=config.storage.quarantine.rule_version,
+            rule_version=composition.rule_version,
         )
         self.core = CollectorCore(
             feed_handler=self._feed_handler,
             config=config,
             data_root=data_root,
+            store=bundle.bars,
             sink_factory=lambda store: BufferedBarSink(
                 store,
                 queue_size=config.collector.write_queue_size,
