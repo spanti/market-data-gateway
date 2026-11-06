@@ -149,7 +149,8 @@ class _RowIssues:
     interval: tuple[str, dict[str, Any]] | None = None
     timestamp: tuple[str, dict[str, Any]] | None = None
     decimal: tuple[str, dict[str, Any]] | None = None
-    other: tuple[str, dict[str, Any]] | None = None
+    # `trade_count` and `revision` share the optional-integer rule.
+    optional_integer: tuple[str, dict[str, Any]] | None = None
 
 
 def _supplied_text(value: object) -> str | None:
@@ -296,11 +297,11 @@ def _classify_row(raw: RawBar) -> tuple[dict[str, Any], _RowIssues]:
 
     trade_count, trade_issue = _optional_integer(raw.trade_count, "trade_count")
     revision, revision_issue = _optional_integer(raw.revision, "revision")
-    if issues.other is None:
+    if issues.optional_integer is None:
         if trade_issue is not None:
-            issues.other = trade_issue
+            issues.optional_integer = trade_issue
         elif revision_issue is not None:
-            issues.other = revision_issue
+            issues.optional_integer = revision_issue
 
     row = {
         "instrument_id": instrument_value,
@@ -452,8 +453,8 @@ def normalize_batch(  # ruff: ignore[too-many-locals] - one explicit pass
             )
         elif issues.decimal is not None:
             reason_code, details = issues.decimal
-        elif issues.other is not None:
-            reason_code, details = issues.other
+        elif issues.optional_integer is not None:
+            reason_code, details = issues.optional_integer
 
         if reason_code is not None:
             rejections.append(

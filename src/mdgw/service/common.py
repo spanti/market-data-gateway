@@ -39,6 +39,23 @@ def update_dataset_metrics(
             labels={"interval": interval},
             help="Last flushed timestamp per Bar Interval",
         )
+    # DuckDB spill disk is observable because a global sort/aggregation can
+    # consume it; it is not part of the authoritative Dataset. Kept defensive
+    # so a metrics scrape never fails the service.
+    try:
+        duckdb_stats = store.duckdb_stats()
+    except Exception:  # ruff: ignore[blind-except]  # pragma: no cover - defensive metrics path
+        duckdb_stats = {}
+    metrics.set(
+        "mdgw_duckdb_temp_bytes",
+        duckdb_stats.get("temp_bytes", 0),
+        help="Bytes currently held in the DuckDB temporary directory",
+    )
+    metrics.set(
+        "mdgw_duckdb_active_connections",
+        duckdb_stats.get("active_connections", 0),
+        help="DuckDB connections currently checked out by Readers",
+    )
 
 
 def ns_iso(value: datetime | None) -> str | None:

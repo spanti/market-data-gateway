@@ -58,6 +58,10 @@ SUPPORTED_REPLAY_MODES = frozenset({"asap", "realtime", "step"})
 DEFAULT_REPLAY_BATCH_SIZE = 4_096
 #: Bounded prefetch depth: batches the reader may run ahead of the publisher.
 DEFAULT_REPLAY_PREFETCH_BATCHES = 2
+#: Upper bound a seek/stop waits for an in-flight Bar publish. A healthy sink
+#: returns immediately after that publish; the bound only keeps a wedged
+#: transport from blocking the control call forever.
+PUBLISH_BARRIER_TIMEOUT_S = 3.0
 #: Sanitized public messages for `reason="error"`. They never contain SQL,
 #: Data File paths, stack traces or raw DuckDB/Polars exception text; the real
 #: cause stays on `session.failure` and in the server log.
@@ -292,6 +296,13 @@ class ReplaySession:
         # the Bars or their close times: they live only in the bounded
         # prefetch and in the Bar currently being published.
         self._cond = threading.Condition()
+        # Publish barrier: the worker holds this while re-checking its
+        # generation under `_cond` and publishing one Bar. seek()/stop() take
+        # it after updating the state, so a publish already in flight completes
+        # before the control call returns and no stale-generation Bar can start
+        # afterwards. It is separate from `_cond` so `step()` stays responsive
+        # behind a slow sink.
+        self._publish_lock = threading.Lock()
         self._credits = 0
         self._speed = spec.speed
         self._bars_sent = 0
@@ -350,10 +361,16 @@ class ReplaySession:
             self._thread.start()
 
     def stop(self) -> bool:
-        """Ask the worker to stop; safe to call on an already finished Session."""
+        """Ask the worker to stop; safe to call on an already finished Session.
+
+        Waits for the publish barrier so that no Bar can be published after
+        this returns: a publish already in flight completes first, and every
+        later publish attempt observes the cancellation under `_cond`.
+        """
         with self._cond:
             self._cancel.set()
             self._cond.notify_all()
+        self._await_publish_barrier("stop")
         return True
 
     def wait(self, timeout: float | None = None) -> bool:
@@ -432,6 +449,9 @@ class ReplaySession:
                 raise InvalidRangeError(msg)
             self._apply_seek_locked(ts_ns)
             self._cond.notify_all()
+        # Barrier: a publish already in flight finishes before this response,
+        # and no publish of the superseded generation can start after it.
+        self._await_publish_barrier("seek")
         return True
 
     def info(self) -> dict[str, Any]:
@@ -460,6 +480,25 @@ class ReplaySession:
         if state.terminal:
             msg = f"{op} is not allowed on a {state.value} Replay Session"
             raise InvalidParameterError(msg)
+
+    def _await_publish_barrier(self, op: str) -> None:
+        """Wait, bounded, until any Bar publish already in flight completes.
+
+        `_publish_if_current` holds `_publish_lock` across its generation
+        re-check and the sink call. Taking the same lock after a seek/stop
+        therefore orders the control response after that publish. A transport
+        that never returns must not wedge the control surface, so the wait is
+        bounded and only logs when it expires.
+        """
+        if self._publish_lock.acquire(timeout=PUBLISH_BARRIER_TIMEOUT_S):
+            self._publish_lock.release()
+            return
+        logger.warning(
+            "Replay Session %s: %s waited %.1fs for an in-flight Bar publish",
+            self.session_id,
+            op,
+            PUBLISH_BARRIER_TIMEOUT_S,
+        )
 
     def _require_mode(self, op: str, modes: set[str]) -> None:
         mode = self.spec.replay_mode
@@ -657,12 +696,7 @@ class ReplaySession:
 
     def _publish_streamed_batch(self, bars: list[Bar]) -> bool:
         """Publish one prefetched batch; True when stop was observed."""
-        for bar in bars:
-            with self._cond:
-                if self._cancel.is_set():
-                    return True
-            self._publish_and_count(bar)
-        return False
+        return any(self._publish_if_current(bar) is not None for bar in bars)
 
     def _run_generation_streaming(
         self,
@@ -778,13 +812,12 @@ class ReplaySession:
                                 self._cond.wait(remaining)
                                 continue
                             break
-                        # Narrow the stale-generation window to this final
-                        # check before the publish happens outside `_cond`.
-                        if self._cancel.is_set():
-                            return "stopped"
-                        if self._generation != generation:
-                            return "superseded"
-                    self._publish_and_count(bar)
+                    # The publish barrier re-checks cancel/generation under
+                    # `_cond` while holding `_publish_lock`, so a seek/stop
+                    # cannot slip between that check and the publish.
+                    outcome = self._publish_if_current(bar, generation)
+                    if outcome is not None:
+                        return outcome
         except BaseException:
             # An interrupted read is the expected consequence of stop or of a
             # replaced generation; any other producer failure stays explicit.
@@ -842,7 +875,11 @@ class ReplaySession:
                     outcome = self._await_step_credit(generation)
                     if outcome is not None:
                         return outcome
-                    self._publish_and_count(bar)
+                    # A seek cannot slip in here: the barrier re-checks the
+                    # generation that granted the credit before publishing.
+                    outcome = self._publish_if_current(bar, generation)
+                    if outcome is not None:
+                        return outcome
         except BaseException:
             # An interrupted read is the expected consequence of stop or of a
             # replaced generation; any other producer failure stays explicit.
@@ -874,10 +911,27 @@ class ReplaySession:
                 # a seek; a temporary shortage is never exhaustion.
                 self._cond.wait()
 
-    def _publish_and_count(self, bar: Bar) -> None:
-        self._publish_bar(bar)
-        with self._cond:
-            self._bars_sent += 1
+    def _publish_if_current(
+        self, bar: Bar, generation: int | None = None
+    ) -> str | None:
+        """Publish one Bar unless it was stopped or superseded.
+
+        Holds `_publish_lock` across the re-check and the publish so `seek()`
+        and `stop()` can order their response after any publish already in
+        flight and prevent a later stale publish. `_cond` is not held during
+        the sink call, and `step()` never takes `_publish_lock`, so a slow
+        transport cannot block Step Credits.
+        """
+        with self._publish_lock:
+            with self._cond:
+                if self._cancel.is_set():
+                    return "stopped"
+                if generation is not None and self._generation != generation:
+                    return "superseded"
+            self._publish_bar(bar)
+            with self._cond:
+                self._bars_sent += 1
+        return None
 
     # -- wire format -------------------------------------------------------
 

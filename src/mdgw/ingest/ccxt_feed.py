@@ -31,6 +31,7 @@ from mdgw.core.bar import RawBar
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import UTC, datetime_to_ns, to_utc, utc_now
+from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
 from mdgw.quarantine import (
     REASON_MALFORMED_ROW,
     SOURCE_STAGE_CCXT_HISTORY_ROW,
@@ -393,7 +394,7 @@ class CcxtFeedHandler:
         reconnect_backoff_s: float = DEFAULT_RECONNECT_BACKOFF_S,
         reconnect_backoff_max_s: float = DEFAULT_RECONNECT_BACKOFF_MAX_S,
         quarantine: QuarantineStore | None = None,
-        rule_version: str = "1",
+        rule_version: str = NORMALIZATION_RULE_VERSION,
     ) -> None:
         self.config = config
         self.name = config.name
@@ -901,7 +902,7 @@ def build_feed_handler(
     *,
     exchange=None,
     quarantine: QuarantineStore | None = None,
-    rule_version: str = "1",
+    rule_version: str = NORMALIZATION_RULE_VERSION,
 ) -> FeedHandler:
     """Build the Feed Handler for one `[[feeds]]` entry.
 

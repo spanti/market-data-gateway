@@ -7,11 +7,12 @@ touching old files. Data Files themselves are immutable.
 
 from __future__ import annotations
 
+import logging
 import statistics
 import threading
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 from uuid import uuid4
@@ -62,8 +63,15 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
     from mdgw.core.bar import Bar
 
+logger = logging.getLogger(__name__)
+
 DATASET_SCHEMA_VERSION = 1
+DUCKDB_TEMP_DIR_NAME = ".duckdb_tmp"
 FILE_NAMING = "data-<start_ns>-<end_ns>-<uuid>.parquet"
+# Bound on waiting for a cancelled DuckDB scan to close its Reader/connection
+# before the Dataset Read Lease is dropped. The interrupt normally makes the
+# worker release immediately; this only guards a wedged engine call.
+SCANNER_RELEASE_TIMEOUT_S = 5.0
 # One Manifest refresh is enough for the Compaction/GC race: the switching
 # process has already written the new Manifest before it unlinks the old files.
 MANIFEST_REFRESH_ATTEMPTS = 2
@@ -100,9 +108,20 @@ class ParquetBarStore:
         # not an optional engine: fail at Store/app startup, never at request
         # time and never with a 1.x fallback.
         ensure_supported_duckdb()
-        self.duckdb = duckdb if duckdb is not None else DuckDBOptions()
-        self.duckdb_connections = DuckDBConnectionCache(self.duckdb)
         self.root = Path(root)
+        options = duckdb if duckdb is not None else DuckDBOptions()
+        temp_directory = (
+            self.root / DUCKDB_TEMP_DIR_NAME
+            if options.temp_directory is None
+            else Path(options.temp_directory)
+        )
+        # Explicit, deterministic spill location: global sorts and
+        # aggregations must not silently use DuckDB's process/OS default. An
+        # explicitly configured path always wins.
+        options = replace(options, temp_directory=temp_directory)
+        temp_directory.mkdir(parents=True, exist_ok=True)
+        self.duckdb = options
+        self.duckdb_connections = DuckDBConnectionCache(self.duckdb)
         self.dataset_root = self.root / DATASET_NAME
         self.compression = compression
         self.row_group_size = row_group_size
@@ -478,6 +497,32 @@ class ParquetBarStore:
             "active_file_count": len(entries),
             "median_file_size_bytes": _median_file_size(entries),
             "intervals": intervals,
+        }
+
+    def close(self) -> None:
+        """Release the idle DuckDB connection cache; idempotent.
+
+        Later connection acquisitions (new reads) are refused. This does not
+        delete data or close the Store for writes; service shutdown calls it
+        after its own state has been closed.
+        """
+        self.duckdb_connections.close()
+
+    def duckdb_stats(self) -> dict[str, object]:
+        """Observability snapshot for the DuckDB read resources.
+
+        `temp_bytes` is a best-effort sum of the configured temporary
+        directory (global-sort/aggregation spill, not an authoritative data
+        copy); `active_connections` is the number of connections currently
+        checked out by Readers. This is deliberately separate from `status()`
+        so the `/api/v1/status` JSON shape stays unchanged.
+        """
+        return {
+            "temp_directory": str(self.duckdb.temp_directory)
+            if self.duckdb.temp_directory is not None
+            else None,
+            "temp_bytes": self.duckdb_connections.temp_bytes(),
+            "active_connections": self.duckdb_connections.active_connections,
         }
 
     # -- maintenance -------------------------------------------------------
@@ -957,6 +1002,16 @@ class StoreRead:
             self._active_scanner = None
         if scanner is not None:
             scanner.close()
+            # A blocked read releases its Reader and connection after the
+            # interrupt returns. The lease must outlive that release: dropping
+            # it first would let Compaction/GC delete files the Reader still
+            # has open.
+            if not scanner.wait_released(SCANNER_RELEASE_TIMEOUT_S):
+                logger.warning(
+                    "DuckDB scan did not release within %.1fs; "
+                    "releasing the read lease anyway",
+                    SCANNER_RELEASE_TIMEOUT_S,
+                )
         if lease is not None:
             lease.close()
 
@@ -1071,18 +1126,40 @@ class StoreRead:
         return ()
 
     def _reacquire(self) -> None:
-        lease = self.lease
-        self.lease = None
-        if lease is not None:
-            lease.close()
+        """Replace the Snapshot and Lease after a missing Data File.
+
+        The whole transition is guarded by `_close_lock`: `close()` uses the
+        same lock, so a concurrent close either sees the previous lease or the
+        replacement, never neither. If it wins the race while the replacement
+        is being acquired, the new lease is closed here instead of being
+        installed after `close()` has already returned (a heartbeat would
+        otherwise keep the lock alive forever and block Compaction/GC).
+        """
+        with self._close_lock:
+            if self._closed:
+                msg = "StoreRead is closed"
+                raise RuntimeError(msg)
+            old_lease = self.lease
+            self.lease = None
+        if old_lease is not None:
+            old_lease.close()
+
         snapshot, new_lease = self._store._acquire_snapshot(
             self._acquisition_queries,
             lease_id=self._lease_id,
             subscriptions=self._subscriptions,
             heartbeat_s=self._heartbeat_s,
         )
-        self.snapshot = snapshot
-        self.lease = new_lease
+        with self._close_lock:
+            closed = self._closed
+            if not closed:
+                self.snapshot = snapshot
+                self.lease = new_lease
+        if closed:
+            if new_lease is not None:
+                new_lease.close()
+            msg = "StoreRead is closed"
+            raise RuntimeError(msg)
 
 
 def _group_scan_files(

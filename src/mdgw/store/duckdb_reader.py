@@ -96,7 +96,7 @@ class DuckDBOptions:
 
     memory_limit: str = "1GB"
     threads: int = 4
-    # None keeps DuckDB's own default temporary directory.
+    # None is resolved by ParquetBarStore to `<store.root>/.duckdb_tmp`.
     temp_directory: Path | None = None
     max_temp_directory_size: str = "10GB"
     arrow_batch_size: int = 65_536
@@ -147,27 +147,69 @@ class DuckDBConnectionCache:
         self._options = options
         self._lock = threading.Lock()
         self._idle: Any = None
+        self._active = 0
         self._closed = False
+
+    @property
+    def active_connections(self) -> int:
+        """Connections currently checked out by a Reader."""
+        with self._lock:
+            return self._active
+
+    def temp_bytes(self) -> int:
+        """Best-effort bytes currently held in the configured temp directory.
+
+        DuckDB spills global sorts and aggregations here; the files are not an
+        authoritative data copy. Missing directories and files that disappear
+        during the walk are ignored.
+        """
+        temp_directory = self._options.temp_directory
+        if temp_directory is None:
+            return 0
+        total = 0
+        try:
+            for path in temp_directory.rglob("*"):
+                try:
+                    if path.is_file():
+                        total += path.stat().st_size
+                except OSError:  # pragma: no cover - transient spill cleanup
+                    continue
+        except OSError:  # pragma: no cover - defensive filesystem path
+            return total
+        return total
 
     def acquire(self) -> Any:
         with self._lock:
             connection, self._idle = self._idle, None
             closed = self._closed
+            if connection is not None:
+                self._active += 1
         if connection is not None:
             return connection
         if closed:
-            raise _ScannerClosedError
+            msg = "DuckDB connection cache is closed"
+            raise _ScannerClosedError(msg)
         import duckdb  # ruff: ignore[import-outside-top-level] - optional-heavy dependency
 
-        return duckdb.connect(
+        connection = duckdb.connect(
             ":memory:", config=self._options.connection_config()
         )
+        with self._lock:
+            self._active += 1
+        return connection
 
     def release(self, connection: Any) -> None:
         with self._lock:
+            self._active = max(0, self._active - 1)
             if not self._closed and self._idle is None:
                 self._idle = connection
                 return
+        _close_connection(connection)
+
+    def discard(self, connection: Any) -> None:
+        """Close a checked-out connection that must not be reused."""
+        with self._lock:
+            self._active = max(0, self._active - 1)
         _close_connection(connection)
 
     def close(self) -> None:
@@ -197,6 +239,8 @@ class DuckDBArrowScanner:
         self._in_flight = 0
         self._exhausted = False
         self._failed = False
+        self._release_done = False
+        self._released = threading.Event()
         self._connection: Any = None
         self._reader: Any = None
 
@@ -360,6 +404,16 @@ class DuckDBArrowScanner:
         if release_now:
             self._release()
 
+    def wait_released(self, timeout: float | None = None) -> bool:
+        """Wait until the Reader and connection are actually released.
+
+        `close()` may only interrupt a blocking DuckDB call; the worker thread
+        that owns it performs the release after that call returns. Callers that
+        must keep a Dataset Read Lease until the Reader is closed use this to
+        observe the real release, including the no-resource path.
+        """
+        return self._released.wait(timeout)
+
     # -- internals ---------------------------------------------------------
 
     def _connect(self) -> None:
@@ -436,21 +490,28 @@ class DuckDBArrowScanner:
                 reader.close()
 
     def _release(self) -> None:
+        """Close the Reader/connection once and signal actual release."""
         with self._lock:
+            if self._release_done:
+                return
+            self._release_done = True
             reader, connection = self._reader, self._connection
             reusable = self._exhausted and not self._failed
             self._reader = None
             self._connection = None
-        if reader is not None:
-            with suppress(Exception):  # pragma: no cover - defensive close path
-                reader.close()
-        if connection is not None:
-            if reusable:
-                # Returns it to the one-idle cache; the connection stays
-                # exclusive because it is no longer checked out.
-                self._cache.release(connection)
-            else:
-                _close_connection(connection)
+        try:
+            if reader is not None:
+                with suppress(Exception):  # pragma: no cover - defensive close path
+                    reader.close()
+            if connection is not None:
+                if reusable:
+                    # Returns it to the one-idle cache; the connection stays
+                    # exclusive because it is no longer checked out.
+                    self._cache.release(connection)
+                else:
+                    self._cache.discard(connection)
+        finally:
+            self._released.set()
 
 
 def _close_connection(connection: Any) -> None:

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from mdgw.core.instrument import InstrumentId
 from mdgw.ingest.ccxt_feed import build_feed_handler
+from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
@@ -90,7 +91,7 @@ def build_configured_feed_handler(
     feeds: Sequence,
     *,
     quarantine=None,
-    rule_version: str = "1",
+    rule_version: str = NORMALIZATION_RULE_VERSION,
 ) -> object:
     """Build one Feed Handler for every `[[feeds]]` entry.
 

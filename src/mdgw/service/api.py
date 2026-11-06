@@ -127,6 +127,8 @@ class ApiService:
         self._started_at = None
         if streaming is not None:
             streaming.stop()
+        # ApiService owns its Store; stop() is idempotent.
+        self.store.close()
 
     # -- properties --------------------------------------------------------
 

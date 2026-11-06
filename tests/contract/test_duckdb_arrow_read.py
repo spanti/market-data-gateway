@@ -28,7 +28,7 @@ from mdgw.config import GatewayConfig
 from mdgw.core.bar import Bar
 from mdgw.core.schema import BAR_SCHEMA
 from mdgw.core.time import datetime_to_ns
-from mdgw.store.duckdb_reader import DuckDBUnavailableError
+from mdgw.store.duckdb_reader import DuckDBOptions, DuckDBUnavailableError
 from mdgw.store.parquet_dataset import ParquetBarStore
 from mdgw.store.session_locks import active_session_locks
 
@@ -377,6 +377,77 @@ def test_duckdb_storage_config_has_explicit_resource_defaults() -> None:
     assert config["threads"] == 4
     assert config["max_temp_directory_size"] == "10GB"
     assert "temp_directory" not in config
+
+
+def test_store_uses_a_deterministic_temp_directory_under_its_root(
+    tmp_path: Path,
+) -> None:
+    store = ParquetBarStore(tmp_path)
+
+    expected = tmp_path / ".duckdb_tmp"
+    assert store.duckdb.temp_directory == expected
+    assert expected.is_dir()
+    assert store.duckdb.connection_config()["temp_directory"] == str(expected)
+
+
+def test_store_keeps_an_explicitly_configured_temp_directory(
+    tmp_path: Path,
+) -> None:
+    explicit = tmp_path / "duckdb-spill"
+    store = ParquetBarStore(
+        tmp_path, duckdb=DuckDBOptions(temp_directory=explicit)
+    )
+
+    assert store.duckdb.temp_directory == explicit
+    assert explicit.is_dir()
+    assert store.duckdb.connection_config()["temp_directory"] == str(explicit)
+
+
+def test_duckdb_temp_bytes_sums_files_in_the_configured_temp_directory(
+    tmp_path: Path,
+) -> None:
+    store = ParquetBarStore(tmp_path)
+    temp_directory = store.duckdb.temp_directory
+    assert temp_directory is not None
+    (temp_directory / "duckdb_temp_block-0").write_bytes(b"x" * 17)
+    nested = temp_directory / "nested"
+    nested.mkdir()
+    (nested / "duckdb_temp_block-1").write_bytes(b"y" * 3)
+
+    stats = store.duckdb_stats()
+
+    assert stats["temp_directory"] == str(temp_directory)
+    assert stats["temp_bytes"] == 20
+    assert stats["active_connections"] == 0
+
+
+def test_duckdb_active_connections_tracks_one_live_scan(tmp_path: Path) -> None:
+    store = ParquetBarStore(tmp_path)
+    store.write_bars([_bar(0), _bar(1)], asset_class="crypto")
+
+    read = store.open_read(interval="1m")
+    batches = read.iter_arrow_batches(batch_size=1)
+    try:
+        assert next(batches).num_rows == 1
+        assert store.duckdb_connections.active_connections == 1
+    finally:
+        batches.close()
+        read.close()
+
+    assert store.duckdb_connections.active_connections == 0
+
+
+def test_store_close_is_idempotent_and_refuses_new_connections(
+    tmp_path: Path,
+) -> None:
+    store = ParquetBarStore(tmp_path)
+    store.write_bars([_bar(0)], asset_class="crypto")
+
+    store.close()
+    store.close()
+
+    with pytest.raises(Exception, match="cache is closed"):
+        store.duckdb_connections.acquire()
 
 
 def test_duckdb_storage_config_rejects_invalid_resources() -> None:
