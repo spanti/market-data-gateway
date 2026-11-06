@@ -141,7 +141,7 @@ defaults are:
 [storage.duckdb]
 memory_limit = "1GB"
 threads = 4
-# temp_directory unset = DuckDB's own default temporary directory
+# temp_directory unset = <effective storage root>/.duckdb_tmp (not DuckDB's own default)
 max_temp_directory_size = "10GB"
 arrow_batch_size = 65536
 
@@ -152,7 +152,8 @@ batch_size = 4096          # Bars per DuckDB Arrow batch
 prefetch_batches = 2       # bounded queue depth
 
 [storage.quarantine]
-# root unset = <storage.root>/quarantine (must not be inside the Bars Dataset)
+# root unset = <effective storage root>/quarantine (must not be inside the Bars Dataset);
+# an explicit root is used as written and does not follow a --root override
 schema_version = 1
 rule_version = "polars-1"
 retention_days = 30        # 0 = keep forever
@@ -160,10 +161,31 @@ retention_days = 30        # 0 = keep forever
 
 The DuckDB settings are resource limits, not an engine switch. Replay keeps
 about `batch_size * (prefetch_batches + 2)` Bars in flight instead of the whole
-range, but a global full-range sort can still use DuckDB temporary disk, so
-`temp_directory` and `max_temp_directory_size` should be set for the deployment.
-Quarantine records are independent of the Bars Dataset; its retention defaults
-to 30 days and is enforced only by an explicit command.
+range, but a global full-range sort can still use DuckDB temporary disk
+(default `<effective storage root>/.duckdb_tmp`), so `temp_directory` and
+`max_temp_directory_size` should be set for the deployment. Quarantine records
+are independent of the Bars Dataset; its retention defaults to 30 days and is
+enforced only by an explicit command.
+
+All production Service Roles (`collector`, `api`, `replay`, `GatewayRuntime`)
+and operator commands derive their Store objects from one validated
+`GatewayConfig` plus the effective storage root; there is no second
+config-to-Store mapping. The effective root is `--root` when given, otherwise
+`[storage].root`. Bars, Instrument Snapshots, the High-Water Mark database and
+the default DuckDB temp directory stay anchored under it. An unset Quarantine
+root follows it (`<effective root>/quarantine`); an explicit
+`[storage.quarantine].root` is used as written (a relative value stays relative
+to the process working directory) and does not follow the override. The actual
+Bars Dataset and Quarantine roots are re-checked against each other before any
+Store is constructed — including before the Bars DuckDB temp directory is
+created — so a nested Quarantine layout fails with zero filesystem writes.
+
+Commands compose only the Stores they need: `api`, `replay`, `compact` and
+`gc` use Bars only; `quarantine-gc` uses Quarantine only; `collector`,
+`GatewayRuntime` and `backfill --archive` use both. Direct callers of
+`mdgw.archive.import_archive` that omit `quarantine` still get
+`<store.root>/quarantine` without constructing a `GatewayConfig`. Explicitly
+injected Stores, Quarantine objects and Feed Handlers are never rewritten.
 
 Operator commands:
 

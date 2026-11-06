@@ -262,8 +262,11 @@ Schema authority:
 
 The Quarantine Dataset records the same audit identity per rejection in its
 `rule_version` field, alongside its independent
-`quarantine_schema_version`. Those two versions and the Bar Data Contract
-Version are separate values with separate meanings.
+`quarantine_schema_version`. For one production run, one effective
+Normalization Rule Version applies: the configured value (or the default)
+reaches new Bars Manifest entries, Quarantine records and the default-built
+Feed Handler alike. Those two versions and the Bar Data Contract Version are
+separate values with separate meanings.
 
 ### Manifest Snapshot and Dataset Read Lease
 
@@ -311,8 +314,18 @@ Manifest authority matters.
 
 Quarantine is an independent, versioned Dataset, not part of the Bar Dataset.
 It is never registered, scanned, exported or read by the Bars Store, REST or
-Replay. Its default root is `<data_root>/quarantine`; configuration rejects a
-Quarantine root inside the Bars Dataset. It is partitioned as
+Replay. Its default root follows the effective storage root
+(`<data_root>/quarantine`), where `<data_root>` is the `--root` override when
+given and `[storage].root` otherwise. An explicit
+`[storage.quarantine].root` is used as written — a relative value stays
+relative to the process working directory — and is not re-anchored under a
+`--root` override. Configuration rejects a Quarantine root inside the static
+Bars Dataset, and the actual Bars Dataset and Quarantine roots are re-checked
+before any Store is constructed, so an override or a programmatically built
+config cannot create a nested layout; that check runs before any filesystem
+write. Direct callers of `import_archive` that omit a Quarantine Store still
+get the `<store.root>/quarantine` default and need no `GatewayConfig`. It is
+partitioned as
 `year=YYYY/month=MM` and writes
 `quarantine-<start_ns>-<end_ns>-<uuid>.parquet` files plus the two metadata
 files `_quarantine_dataset.json` and `_quarantine_manifest.json`. The latter is

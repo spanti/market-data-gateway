@@ -320,9 +320,18 @@ GET /metrics
 - Collector 每次 `ingest()` 排空 Feed Handler 后得到一个 RawBar 批次；`normalize_batch`（Polars）为整批计算 Instrument、Interval 与 closed-Bar 规则，不为每条消息构造单行 DataFrame。Decimal 在进入 Arrow/Polars 前用 Python `Decimal` 精确校验并拒绝 float 与超 scale 值；时间、`uint32` 与 nullable 字段按 `BAR_SCHEMA` 检查。
 - 该批量规则是唯一规则来源：Live ingest、Backfill 与 archive import 共用它。Feed Handler 继续负责 Venue 协议与闭合状态，archive 继续负责 checksum/ZIP/CSV 与来源时间单位。
 - 实时批次任一 Normalization 或 Instrument Validation 失败时整批拒绝：Aggregation、HWM 与 freshness 不推进，可修复参考数据后重试。Archive 保持整文件原子性；CCXT 单行解析失败只有先成功写入 Quarantine 才能跳过并继续。
-- Quarantine 是独立、版本化的 Dataset（默认 `<storage.root>/quarantine`，禁止放进 Bars Dataset）；Bars Store、REST、export、Compaction 与 Replay 永不读取它。Reason Code、Source Stage、Rule Version、来源定位与结构化详情见 [ADR-0014](docs/adr/0014-polars-batch-normalization-with-quarantine.md) 与 `docs/data-contract.md`。
+- Quarantine 是独立、版本化的 Dataset（默认跟随有效 storage root：`<有效 root>/quarantine`，禁止放进 Bars Dataset）；Bars Store、REST、export、Compaction 与 Replay 永不读取它。Reason Code、Source Stage、Rule Version、来源定位与结构化详情见 [ADR-0014](docs/adr/0014-polars-batch-normalization-with-quarantine.md) 与 `docs/data-contract.md`。
 - Quarantine 写入 fail-closed：写入失败时对应输入不得确认、跳过或发布，Collector 暴露写入失败与按 stage/reason 的记录指标。默认保留 30 天，`0` 永久；`mdgw quarantine-gc` 默认 dry-run，只清理过期完整 UTC 月份并跳过当前月，`--apply` 才删除。没有后台自动 GC。
 - 新 Data File 的 Manifest 条目记录 `rule_versions`；它是审计元数据，Data Contract Version 仍是读取兼容性的唯一权威。
+
+### 5.9 Storage Composition 与有效 Storage Root
+
+- 全部生产 Service Role（`collector`、`api`、`replay`、`GatewayRuntime`）与运维命令（`compact`、`gc`、`quarantine-gc`、`backfill --archive`）不再各自把 `GatewayConfig` 映射为 Store；内部 Storage Composition 模块是唯一生产组合点，按需提供 Bars-only、Quarantine-only 与 Bars + Quarantine 三种操作。每次组合返回新对象，不缓存、不注册全局对象、不拥有启停或关闭生命周期，也不构建 Feed Handler。
+- 有效 storage root 的优先级固定为：显式 `--root` override，其次 `[storage].root`。Bars Dataset、Instrument Snapshot、High-Water Mark 数据库与默认 DuckDB 临时目录都锚定该有效 root（`bars/`、`instruments/`、state db、`.duckdb_tmp`）。
+- 未配置 `[storage.quarantine].root` 时，Quarantine root 跟随有效 root（`<有效 root>/quarantine`）。显式配置的 Quarantine root 按原值使用：相对路径保持相对进程当前工作目录，不跟随 root override，也不被重新锚定或改写。
+- 组合时会把实际生效的 Bars Dataset root 与 Quarantine root 规范化，并复核 ADR-0014 的单向包含关系（Quarantine 不得等于或位于 Bars Dataset 内；不增加反向禁令）。Bars Store 构造会立即创建 DuckDB 临时目录，因此校验先于任何 Store 构造；失败时不会创建 root、descriptor、Manifest、临时目录或 Quarantine 状态。
+- 同一次组合创建的写入对象使用同一个有效 Normalization Rule Version（默认 `polars-1`，可由 `[storage.quarantine].rule_version` 覆盖）。默认与自定义值同时到达 Bars Manifest 条目、Quarantine Record 和默认构建的 Feed Handler；它始终只是审计元数据，不参与 Data Contract 兼容性判断。
+- 组合模块只决定它创建的对象与默认构建路径；显式注入的 Store、Quarantine 与 Feed Handler 不被重写。archive 直接调用 `import_archive` 时若省略 Quarantine，仍使用 `<store.root>/quarantine`，不要求调用方构造 `GatewayConfig`。Quarantine 的 Schema Version、Retention 与物理格式默认值保持独立，不继承 Bars 的 compression、row group size 或 format version。
 
 ## 6. 配置
 
@@ -364,12 +373,12 @@ schema_version = 1
 [storage.duckdb]
 memory_limit = "1GB"
 threads = 4
-# temp_directory 未设置时使用 DuckDB 自己的默认临时目录
+# temp_directory 未设置时为 <有效 storage root>/.duckdb_tmp，而不是 DuckDB 自己的默认临时目录
 max_temp_directory_size = "10GB"
 arrow_batch_size = 65536
 
 [storage.quarantine]
-# root 未设置时为 <storage.root>/quarantine，且不得位于 Bars Dataset 内
+# root 未设置时为 <有效 storage root>/quarantine；显式值按原值使用（相对路径相对进程 CWD），且不得位于 Bars Dataset 内
 schema_version = 1             # 独立于 Bar Data Contract
 rule_version = "polars-1"      # 审计元数据，不是 Schema 权威
 retention_days = 30            # 0 = 永久保留
@@ -450,7 +459,7 @@ src/
     ingest/        # FeedHandler Protocol、注册表、ccxt Feed Handler
     normalize/
     aggregate/     # 1m 接收与 Bar Aggregation
-    store/         # Parquet 写入、Manifest Snapshot/Read Lease、DuckDB 读取、GC、compaction
+    store/         # Parquet 写入、Manifest Snapshot/Read Lease、DuckDB 读取、GC、compaction、Storage Composition
     quarantine.py  # 独立、版本化的 Quarantine Dataset 与 Retention/GC
     streaming.py   # Streaming Interface：Bar topic 语法、Arrow IPC、PUB/SUB、READY、status/control
     replay/        # 有界 Replay 查询、Clock、Step Credit、失败终止
