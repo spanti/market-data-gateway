@@ -35,6 +35,21 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BTC = "binance:BTC/USDT"
 BASE_TS = datetime(2026, 1, 1, tzinfo=UTC)
 
+INSTRUMENT_YAML = """\
+- instrument_id: "binance:BTC/USDT"
+  venue: binance
+  symbol: "BTC/USDT"
+  asset_class: crypto
+  instrument_type: spot
+  base: BTC
+  quote: USDT
+  tick_size: "0.01"
+  lot_size: "0.00001"
+  multiplier: "1"
+  timezone: UTC
+  listing_ts: "2017-08-17T04:00:00Z"
+"""
+
 BAR = Bar(
     schema_version=1,
     data_type="bar",
@@ -61,12 +76,16 @@ def _config(
     root: Path,
     *,
     quarantine: dict | None = None,
+    instruments: dict | None = None,
     **storage: object,
 ) -> GatewayConfig:
     storage_payload: dict[str, object] = {"root": str(root), **storage}
     if quarantine is not None:
         storage_payload["quarantine"] = quarantine
-    return GatewayConfig.model_validate({"storage": storage_payload})
+    payload: dict[str, object] = {"storage": storage_payload}
+    if instruments is not None:
+        payload["instruments"] = instruments
+    return GatewayConfig.model_validate(payload)
 
 
 def _copied_config_with_quarantine_root(
@@ -694,6 +713,44 @@ def test_collector_core_keeps_both_injected_objects(
         assert core.quarantine is injected
     finally:
         store.close()
+
+
+def test_collector_core_anchors_snapshot_and_hwm_on_the_effective_root(
+    tmp_path: Path,
+) -> None:
+    configured_root = tmp_path / "configured"
+    override_root = tmp_path / "override"
+    reference_dir = tmp_path / "reference"
+    reference_dir.mkdir()
+    (reference_dir / "instruments.yaml").write_text(
+        INSTRUMENT_YAML, encoding="utf-8"
+    )
+    config = _config(
+        configured_root, instruments={"path": str(reference_dir)}
+    )
+    bundle = StorageComposition(
+        config, root=override_root
+    ).bars_and_quarantine()
+    core = CollectorCore(
+        feed_handler=_AttachableFeed(),
+        config=config,
+        store=bundle.bars,
+        quarantine=bundle.quarantine,
+    )
+    core.open_state()
+    try:
+        assert core.instrument_store is not None
+        assert core.hwm is not None
+        # Both derived paths stay under the actual (override) root even though
+        # the Stores were composed outside CollectorCore.
+        assert core.instrument_store.snapshot_path.is_relative_to(
+            override_root / "instruments"
+        )
+        assert core.hwm.path == override_root / config.collector.state_db_name
+        assert not configured_root.exists()
+    finally:
+        core.close_state()
+        bundle.bars.close()
 
 
 def test_collector_core_rejects_a_quarantine_inside_an_injected_store(

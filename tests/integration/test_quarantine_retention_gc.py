@@ -41,20 +41,23 @@ def _record(recorded_ts: datetime) -> QuarantineRecord:
     )
 
 
-def _write_config(tmp_path: Path, root: Path, *, retention_days: int = 30) -> Path:
+def _write_config(
+    tmp_path: Path,
+    root: Path,
+    *,
+    quarantine_root: Path | None = None,
+    retention_days: int = 30,
+) -> Path:
     config_path = tmp_path / "gateway.toml"
-    config_path.write_text(
-        "\n".join(
-            [
-                "[storage]",
-                f'root = "{root.as_posix()}"',
-                "[storage.quarantine]",
-                f"retention_days = {retention_days}",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    lines = [
+        "[storage]",
+        f'root = "{root.as_posix()}"',
+        "[storage.quarantine]",
+    ]
+    if quarantine_root is not None:
+        lines.append(f'root = "{quarantine_root.as_posix()}"')
+    lines.append(f"retention_days = {retention_days}")
+    config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return config_path
 
 
@@ -179,18 +182,8 @@ def test_cli_quarantine_gc_explicit_root_does_not_follow_the_root_override(
     quarantine.write_records(
         [_record(datetime(2020, 1, 5, tzinfo=UTC)), _record(utc_now())]
     )
-    config_path = tmp_path / "gateway.toml"
-    config_path.write_text(
-        "\n".join(
-            [
-                "[storage]",
-                f'root = "{configured_root.as_posix()}"',
-                "[storage.quarantine]",
-                f'root = "{explicit_root.as_posix()}"',
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
+    config_path = _write_config(
+        tmp_path, configured_root, quarantine_root=explicit_root
     )
 
     result = main(
@@ -218,18 +211,8 @@ def test_cli_quarantine_gc_rejects_a_layout_nested_under_the_root_override(
     override_root = tmp_path / "override"
     # Valid against the configured root, nested only once the override wins.
     nested_quarantine = override_root / "bars" / "quarantine"
-    config_path = tmp_path / "gateway.toml"
-    config_path.write_text(
-        "\n".join(
-            [
-                "[storage]",
-                f'root = "{configured_root.as_posix()}"',
-                "[storage.quarantine]",
-                f'root = "{nested_quarantine.as_posix()}"',
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
+    config_path = _write_config(
+        tmp_path, configured_root, quarantine_root=nested_quarantine
     )
 
     with pytest.raises(ValueError, match="must not be inside the Bars Dataset"):
@@ -255,18 +238,8 @@ def test_cli_quarantine_gc_validates_retention_before_composing_storage(
     # This layout only becomes invalid once the override is applied; the
     # invalid --retention-days must still win before composition runs.
     nested_quarantine = override_root / "bars" / "quarantine"
-    config_path = tmp_path / "gateway.toml"
-    config_path.write_text(
-        "\n".join(
-            [
-                "[storage]",
-                f'root = "{configured_root.as_posix()}"',
-                "[storage.quarantine]",
-                f'root = "{nested_quarantine.as_posix()}"',
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
+    config_path = _write_config(
+        tmp_path, configured_root, quarantine_root=nested_quarantine
     )
 
     # A parameter error (not the composition ValueError the nested layout

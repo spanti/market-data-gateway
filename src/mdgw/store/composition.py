@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mdgw.config import ensure_quarantine_is_independent
 from mdgw.quarantine import QuarantineStore
 from mdgw.store.parquet_dataset import ParquetBarStore
 
@@ -68,17 +69,11 @@ class StorageComposition:
 
         The config model validates the static storage root only; a root
         override, a ``..`` path fragment or a programmatically copied config
-        can all change the effective layout. Normalized comparison does not
-        require the paths to exist.
+        can all change the effective layout.
         """
-        bars_root = self.bars_dataset_root.resolve()
-        quarantine_root = self.quarantine_root.resolve()
-        if quarantine_root == bars_root or bars_root in quarantine_root.parents:
-            msg = (
-                "storage.quarantine.root must not be inside the Bars Dataset "
-                f"({bars_root})"
-            )
-            raise ValueError(msg)
+        ensure_quarantine_is_independent(
+            self.bars_dataset_root, self.quarantine_root
+        )
 
     def _create_bars(self) -> ParquetBarStore:
         storage = self._config.storage

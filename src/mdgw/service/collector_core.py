@@ -64,6 +64,30 @@ _OPEN_BEFORE_BACKFILL_MESSAGE = (
 )
 
 
+def _resolve_default_stores(
+    composition: StorageComposition,
+    config: GatewayConfig,
+    store: ParquetBarStore | None,
+    quarantine: QuarantineStore | None,
+) -> tuple[ParquetBarStore, QuarantineStore, str]:
+    """Use injected Stores untouched and compose only the missing half.
+
+    A default Quarantine anchors on the injected Store root; a configured
+    explicit Quarantine root still wins. The Rule Version comes from the
+    composition that built the default Stores, or from the primary
+    config-derived composition when both Stores were injected.
+    """
+    if store is None:
+        if quarantine is None:
+            bundle = composition.bars_and_quarantine()
+            return bundle.bars, bundle.quarantine, composition.rule_version
+        return composition.bars(), quarantine, composition.rule_version
+    if quarantine is not None:
+        return store, quarantine, composition.rule_version
+    anchored = StorageComposition(config, root=store.root)
+    return store, anchored.quarantine(), anchored.rule_version
+
+
 class CollectorCore:
     """One collector pipeline over a single (possibly composite) Feed Handler."""
 
@@ -83,30 +107,16 @@ class CollectorCore:
     ) -> None:
         self.feed_handler = feed_handler
         self.config = config
-        # Defaults come from Storage Composition. Injected objects win; only
-        # the missing half is composed. A default Quarantine still anchors on
-        # the injected Store root, and its configured explicit root still wins.
-        composition = StorageComposition(config, root=data_root)
-        if store is None:
-            if quarantine is None:
-                bundle = composition.bars_and_quarantine()
-                self.store = bundle.bars
-                self.quarantine = bundle.quarantine
-            else:
-                self.store = composition.bars()
-                self.quarantine = quarantine
-        else:
-            self.store = store
-            self.quarantine = (
-                quarantine
-                if quarantine is not None
-                else StorageComposition(
-                    config, root=self.store.root
-                ).quarantine()
-            )
         # One effective Normalization Rule Version for everything this core
         # writes, owned by the same composition that built the defaults.
-        self.rule_version = composition.rule_version
+        self.store, self.quarantine, self.rule_version = (
+            _resolve_default_stores(
+                StorageComposition(config, root=data_root),
+                config,
+                store,
+                quarantine,
+            )
+        )
         self.aggregator = aggregator or BarAggregator(
             intervals=config.aggregation.intervals,
             base_interval=config.aggregation.base_interval,
