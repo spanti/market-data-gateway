@@ -467,7 +467,7 @@ def _run_service(
     config = _load_config(config_path)
     level = log_level or config.service.log_level
     configure_json_logging(level, service=service)
-    data_root = root or config.storage.root
+    data_root = StorageComposition(config, root=root).effective_root
 
     try:
         role = _build_service(
@@ -560,7 +560,7 @@ def _run_up(
     config = _load_config(config_path)
     level = log_level or config.service.log_level
     configure_json_logging(level, service="supervisor")
-    data_root = root or config.storage.root
+    data_root = StorageComposition(config, root=root).effective_root
 
     from mdgw.service.supervisor import Supervisor  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
 
