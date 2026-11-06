@@ -26,7 +26,7 @@ from mdgw.backfill_common import (
 )
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.time import datetime_to_ns, ns_to_datetime, to_utc
-from mdgw.normalize.bar import normalize_bar
+from mdgw.normalize.batch import BatchNormalizationError, normalize_batch
 from mdgw.state.health import (
     GAP_BACKFILL_LIMIT,
     GAP_HISTORY_UNSUPPORTED,
@@ -147,7 +147,10 @@ def run_backfill(  # ruff: ignore[too-many-arguments] -- public entry point; par
         if not bars_to_write:
             continue
 
-        store.write_bars(bars_to_write, asset_class=asset_class_for(instrument_id))
+        store.write_bars(
+            bars_to_write,
+            asset_class=asset_class_for(instrument_id),
+        )
         report.written_bars += len(bars_to_write)
 
         # The HWM advances only after the Data Files and Manifest are durable.
@@ -215,9 +218,15 @@ def _normalize_history(
     start_ns: int,
     now_ns: int,
 ) -> list[Bar]:
-    """Normalize, filter to the closed window, sort, and dedupe by `open_ts`."""
+    """Filter to the closed window, Normalize the batch, sort and dedupe.
+
+    Values are filtered and de-duplicated by `open_ts` exactly as before, but
+    the rules themselves now come from the one Polars batch implementation.
+    A rejected row fails the whole Backfill pass (the previous scalar rule
+    also raised); nothing is written for a failed batch.
+    """
     width_ns = interval_ns(BASE_INTERVAL)
-    by_open_ts: dict[int, Bar] = {}
+    selected: list[RawBar] = []
     for raw in raw_bars:
         if raw.interval != BASE_INTERVAL:
             continue
@@ -227,6 +236,14 @@ def _normalize_history(
         if open_ns + width_ns > now_ns:
             # The caller/reference layer rejects forming Bars.
             continue
-        bar = normalize_bar(raw, feed=feed, ingest_ts=ingest_ts)
-        by_open_ts[open_ns] = bar
+        selected.append(raw)
+    if not selected:
+        return []
+
+    batch = normalize_batch(selected, feed=feed, ingest_ts=ingest_ts)
+    if batch.rejections:
+        raise BatchNormalizationError(batch.rejections)
+    by_open_ts: dict[int, Bar] = {}
+    for bar in batch.bars:
+        by_open_ts[datetime_to_ns(bar.open_ts)] = bar
     return [by_open_ts[key] for key in sorted(by_open_ts)]

@@ -33,11 +33,10 @@ from mdgw.core.envelope import table_to_messages
 from mdgw.core.schema import BAR_SCHEMA
 from mdgw.ingest.fake import BarInput, FakeFeedHandler
 from mdgw.runtime import GatewayRuntime
+from mdgw.store.parquet_dataset import ParquetBarStore
 
 if TYPE_CHECKING:
     from collections.abc import Generator
-
-    from mdgw.store.parquet_dataset import ParquetBarStore
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 HOST = "127.0.0.1"
@@ -114,7 +113,10 @@ def _seed(tmp_path: Path, bars: list[BarInput]) -> ParquetBarStore:
         runtime.ingest()
     finally:
         runtime.stop()
-    return runtime.store
+    # `GatewayRuntime.stop()` closes the Store it owns (including its DuckDB
+    # connection cache). The REST surface under test reads the same Dataset
+    # through its own read-side Store, exactly like the API service role.
+    return ParquetBarStore(tmp_path)
 
 
 @contextmanager
@@ -259,13 +261,18 @@ def test_json_bars_envelope_decimals_and_nanosecond_timestamps(
     assert set(payload) == {"bars"}
     messages = payload["bars"]
     assert len(messages) == 2
-    for index, message in enumerate(messages):
-        _assert_message_envelope(message, minute=index)
+    # Non-paginated JSON has no ordering contract: validate each message from
+    # its own open_ts instead of relying on physical scan order.
+    for message in messages:
+        minute_index = int(message["payload"]["open_ts"][14:16])
+        _assert_message_envelope(message, minute=minute_index)
 
-    assert messages[0]["payload"]["open"] == precise
-    assert messages[0]["payload"]["high"] == "65010.0"
-    assert messages[0]["payload"]["volume"] == "12.34"
-    assert messages[1]["payload"]["open"] == "65000.1"
+    by_open = {message["payload"]["open"]: message for message in messages}
+    assert by_open[precise]["payload"]["high"] == "65010.0"
+    assert by_open[precise]["payload"]["volume"] == "12.34"
+    assert by_open["65000.1"]["payload"]["open_ts"].endswith(
+        "T00:01:00.000000000Z"
+    )
 
 
 def test_json_limit_caps_rows_and_empty_result_is_an_empty_array(
@@ -317,11 +324,18 @@ def test_arrow_stream_is_table_semantically_equal_to_json(
     table = pa.ipc.open_stream(pa.BufferReader(body)).read_all()
     assert table.schema == BAR_SCHEMA
     assert table.num_rows == 2
-    assert table.column("open").to_pylist() == [
-        Decimal(precise),
-        Decimal("65000.1"),
-    ]
-    assert table_to_messages(table) == json.loads(json_body)["bars"]
+    assert sorted(table.column("open").to_pylist()) == sorted(
+        [Decimal(precise), Decimal("65000.1")]
+    )
+    # Non-paginated responses have no ordering contract; compare exact message
+    # content and multiplicity, not physical scan order.
+    assert sorted(
+        json.dumps(message, sort_keys=True)
+        for message in table_to_messages(table)
+    ) == sorted(
+        json.dumps(message, sort_keys=True)
+        for message in json.loads(json_body)["bars"]
+    )
 
 
 def test_empty_arrow_stream_is_a_valid_stream_with_the_canonical_schema(
@@ -370,10 +384,16 @@ def test_csv_text_header_and_exact_decimal_rendering(tmp_path: Path) -> None:
         ",".join(_csv_row(message))
         for message in json.loads(json_body)["bars"]
     ]
-    assert lines[1:] == expected
+    # Non-paginated output has no ordering contract; compare exact content and
+    # multiplicity instead of physical scan order.
+    assert sorted(lines[1:]) == sorted(expected)
     open_index = BAR_SCHEMA.names.index("open")
-    assert expected[0].split(",")[open_index] == precise
-    assert "e-" not in expected[0].lower()
+    precise_row = next(
+        line
+        for line in lines[1:]
+        if line.split(",")[open_index] == precise
+    )
+    assert "e-" not in precise_row.lower()
 
 
 def test_empty_csv_is_header_only(tmp_path: Path) -> None:
@@ -409,7 +429,17 @@ def test_export_formats_preserve_headers_length_and_table_semantics(
             "?interval=1m&format=arrow"
         )
 
-    messages = json.loads(json_body)["bars"]
+    # Non-paginated exports have no ordering contract; compare exact content
+    # and multiplicity, not physical scan order.
+    messages = sorted(
+        json.dumps(message, sort_keys=True)
+        for message in json.loads(json_body)["bars"]
+    )
+
+    def canonical(messages_: list[dict]) -> list[str]:
+        return sorted(
+            json.dumps(message, sort_keys=True) for message in messages_
+        )
 
     assert parquet_status == 200
     assert _header(parquet_headers, "Content-Type") == PARQUET
@@ -423,7 +453,7 @@ def test_export_formats_preserve_headers_length_and_table_semantics(
     parquet_table = pq.read_table(pa.BufferReader(parquet_body))
     assert parquet_table.schema == BAR_SCHEMA
     assert parquet_table.num_rows == 2
-    assert table_to_messages(parquet_table) == messages
+    assert canonical(table_to_messages(parquet_table)) == messages
 
     assert arrow_status == 200
     assert _header(arrow_headers, "Content-Type") == ARROW_FILE
@@ -437,7 +467,7 @@ def test_export_formats_preserve_headers_length_and_table_semantics(
     arrow_table = pa.ipc.open_file(pa.BufferReader(arrow_body)).read_all()
     assert arrow_table.schema == BAR_SCHEMA
     assert arrow_table.num_rows == 2
-    assert table_to_messages(arrow_table) == messages
+    assert canonical(table_to_messages(arrow_table)) == messages
 
 
 def test_empty_exports_are_valid_files_with_the_canonical_schema(

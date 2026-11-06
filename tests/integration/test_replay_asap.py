@@ -223,8 +223,35 @@ class _BlockingPublisher:
         )
 
 
+class _GatedRead:
+    """StoreRead proxy whose first query waits for a test-controlled gate."""
+
+    def __init__(self, inner, gate: threading.Event) -> None:
+        self._inner = inner
+        self._gate = gate
+
+    def _wait(self) -> None:
+        assert self._gate.wait(5), "test never released the read gate"
+
+    def iter_replay_batches(
+        self, queries, *, batch_size=None, cancellation=None
+    ):
+        # Every Replay Mode consumes this seam; it must block before DuckDB
+        # starts.
+        self._wait()
+        yield from self._inner.iter_replay_batches(
+            queries, batch_size=batch_size, cancellation=cancellation
+        )
+
+    def close(self) -> None:
+        self._inner.close()
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 class _BlockingReadStore:
-    """Proxy whose Parquet read waits for a test-controlled gate."""
+    """Proxy whose Replay read waits for a test-controlled gate."""
 
     def __init__(self, inner: ParquetBarStore, gate: threading.Event) -> None:
         self._inner = inner
@@ -234,9 +261,8 @@ class _BlockingReadStore:
     def dataset_root(self) -> Path:
         return self._inner.dataset_root
 
-    def iter_batches(self, **kwargs):
-        assert self._gate.wait(5), "test never released the read gate"
-        yield from self._inner.iter_batches(**kwargs)
+    def open_read(self, **kwargs):
+        return _GatedRead(self._inner.open_read(**kwargs), self._gate)
 
 
 def _end_of_session(messages: list[tuple[str, bytes]]) -> dict[str, Any]:

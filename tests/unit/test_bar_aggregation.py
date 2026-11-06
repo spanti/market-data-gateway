@@ -8,7 +8,7 @@ import pytest
 from mdgw.aggregate import BarAggregator
 from mdgw.core.bar import Bar, RawBar
 from mdgw.core.schema import INTERVALS
-from mdgw.normalize.bar import normalize_bar
+from mdgw.normalize.batch import normalize_batch
 
 UTC = timezone.utc
 DAY = datetime(2024, 1, 1, tzinfo=UTC)
@@ -30,22 +30,25 @@ def _bar_at(
     interval: str = "1m",
 ) -> Bar:
     closed_at = open_ts + INTERVALS[interval]
-    return normalize_bar(
-        RawBar(
-            instrument_id=instrument_id,
-            interval=interval,
-            open_ts=open_ts,
-            open=Decimal(open),
-            high=Decimal(high),
-            low=Decimal(low),
-            close=Decimal(close),
-            volume=Decimal(volume),
-            trade_count=trade_count,
-            revision=revision,
-        ),
+    (bar,) = normalize_batch(
+        [
+            RawBar(
+                instrument_id=instrument_id,
+                interval=interval,
+                open_ts=open_ts,
+                open=Decimal(open),
+                high=Decimal(high),
+                low=Decimal(low),
+                close=Decimal(close),
+                volume=Decimal(volume),
+                trade_count=trade_count,
+                revision=revision,
+            )
+        ],
         feed=feed,
         ingest_ts=ingest_ts or closed_at + timedelta(seconds=1),
-    )
+    ).bars
+    return bar
 
 
 def _minute(index: int, *, day: datetime = DAY, **overrides) -> Bar:

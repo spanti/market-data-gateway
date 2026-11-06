@@ -47,6 +47,7 @@ class ApiService:
             row_group_size=config.storage.row_group_size,
             format_version=config.storage.format_version,
             schema_version=config.storage.schema_version,
+            duckdb=config.storage.duckdb.to_options(),
         )
         self.instrument_store = load_instrument_store(self.store.root)
         self.metrics = MetricsRegistry()
@@ -126,6 +127,8 @@ class ApiService:
         self._started_at = None
         if streaming is not None:
             streaming.stop()
+        # ApiService owns its Store; stop() is idempotent.
+        self.store.close()
 
     # -- properties --------------------------------------------------------
 

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from mdgw.core.instrument import InstrumentId
 from mdgw.ingest.ccxt_feed import build_feed_handler
+from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
@@ -65,17 +66,49 @@ class CompositeFeedHandler:
                 close()
 
 
-def build_configured_feed_handler(feeds: Sequence) -> object:
+def attach_quarantine(
+    handler,
+    quarantine,
+    *,
+    rule_version: str | None = None,
+) -> None:
+    """Attach the Collector-owned Quarantine Store to a built Feed Handler.
+
+    An injected (test or embedding) handler is constructed before the
+    Collector exists, so the Collector attaches its Store afterward. Composite
+    handlers recurse into their children; handlers without the seam are left
+    untouched.
+    """
+    attach = getattr(handler, "attach_quarantine", None)
+    if callable(attach):
+        attach(quarantine, rule_version=rule_version)
+        return
+    for child in getattr(handler, "_handlers", ()):
+        attach_quarantine(child, quarantine, rule_version=rule_version)
+
+
+def build_configured_feed_handler(
+    feeds: Sequence,
+    *,
+    quarantine=None,
+    rule_version: str = NORMALIZATION_RULE_VERSION,
+) -> object:
     """Build one Feed Handler for every `[[feeds]]` entry.
 
     A single entry returns that handler unchanged; several entries are joined
-    by the thin `CompositeFeedHandler`.
+    by the thin `CompositeFeedHandler`. Every ccxt handler receives the same
+    Collector-owned Quarantine Store.
     """
     if not feeds:
         msg = "at least one [[feeds]] entry is required"
         raise ValueError(msg)
 
-    handlers = [build_feed_handler(feed) for feed in feeds]
+    handlers = [
+        build_feed_handler(
+            feed, quarantine=quarantine, rule_version=rule_version
+        )
+        for feed in feeds
+    ]
     if len(handlers) == 1:
         return handlers[0]
     return CompositeFeedHandler(handlers)
@@ -83,5 +116,6 @@ def build_configured_feed_handler(feeds: Sequence) -> object:
 
 __all__ = [
     "CompositeFeedHandler",
+    "attach_quarantine",
     "build_configured_feed_handler",
 ]

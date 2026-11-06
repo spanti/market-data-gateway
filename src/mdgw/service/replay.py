@@ -39,6 +39,7 @@ class ReplayServiceRole:
             row_group_size=config.storage.row_group_size,
             format_version=config.storage.format_version,
             schema_version=config.storage.schema_version,
+            duckdb=config.storage.duckdb.to_options(),
         )
         self.metrics = MetricsRegistry()
         self.instrument_store: InstrumentStore | None = None
@@ -90,6 +91,8 @@ class ReplayServiceRole:
             max_sessions=self.config.replay.max_sessions,
             heartbeat_s=self.config.replay.heartbeat_s,
             instrument_store=self.instrument_store,
+            batch_size=self.config.replay.batch_size,
+            prefetch_batches=self.config.replay.prefetch_batches,
         )
         self.server = ReplayServer(
             self.service,

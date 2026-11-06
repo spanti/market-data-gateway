@@ -9,6 +9,11 @@ description = "Market Data Gateway: framework-neutral market data contract and s
 requires-python = ">=3.13"
 dependencies = [
     "pyarrow>=18",
+    # DuckDB 2.x is the supported storage-read baseline; 1.x is forbidden.
+    # 2.0 added TIMESTAMPTZ_NS, which preserves Parquet UTC nanoseconds.
+    "duckdb>=2.0,<3",
+    # Pinned to the version proven by the M1 type/lifecycle spike.
+    "polars==2.1.0",
     "pyzmq>=26",
     "PyYAML>=6",
     "pydantic>=2.9",

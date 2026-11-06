@@ -1,13 +1,15 @@
 """Read the Bars a Replay Session needs from the Parquet Dataset.
 
-The Parquet read path can only push the time filter down to `open_ts` (the
-partition/column actually stored), while the Replay Protocol's range is defined
-on `close_ts`. `ReplayBarSource` therefore widens the physical scan by one Bar
-Interval, then filters on `close_ts` in Python: `start_ts` is inclusive and
-`end_ts` is exclusive.
+The stored physical column is `open_ts`, while the Replay Protocol's range is
+defined on `close_ts`. `ReplayBarSource` therefore widens the physical scan by
+one Bar Interval: `start_ts` is inclusive and `end_ts` is exclusive.
 
-v1 reads every matching Bar before the first message is published. Streaming
-pages are a ticket-14 performance concern, not a correctness one.
+A Replay Session queries its fixed Manifest Snapshot through DuckDB. One
+query does the close-time filter, the highest-Revision choice (latest
+`ingest_ts` on a tie), duplicate-subscription resolution and the five-key
+total order. `iter_bars()` exposes that query as a bounded batch stream,
+consumed by all three Replay Modes (realtime and step once per query
+generation). There is no full materialization and no second read path.
 """
 
 from __future__ import annotations
@@ -16,13 +18,13 @@ from typing import TYPE_CHECKING
 
 from mdgw.core.bar import Bar
 from mdgw.core.schema import INTERVALS
-from mdgw.core.time import datetime_to_ns
+from mdgw.store.parquet_dataset import ReplayReadQuery
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids an import cycle
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
     from mdgw.replay.session import BarSubscription
-    from mdgw.store.parquet_dataset import ParquetBarStore
+    from mdgw.store.parquet_dataset import ReplayScanCancellation, StoreRead
 
 
 def interval_ns(interval: str) -> int:
@@ -34,75 +36,76 @@ def interval_ns(interval: str) -> int:
     )
 
 
-def bar_order_key(bar: Bar) -> tuple[int, str, bool, int, str, int]:
-    """Replay ordering key (deterministic across reads and processes).
+def replay_read_queries(
+    subscriptions: Sequence[BarSubscription],
+    *,
+    start_ts_ns: int,
+    end_ts_ns: int,
+) -> tuple[ReplayReadQuery, ...]:
+    """Distinct `(instrument_id, interval)` scan windows for one Snapshot.
 
-    DESIGN §3.4 defines `(close_ts, instrument_id, seq)`. `seq is None` sorts
-    after numeric `seq`, which the boolean flag expresses. `interval` and
-    `open_ts_ns` are necessary supplements for the DESIGN key: with the same
-    `close_ts` and no `seq`, Bars for the same Instrument at different
-    Intervals (e.g. a 1m and a 5m Bar closing together) still need a total,
-    file-read-order-independent tie-break.
+    Identical subscriptions are collapsed before the query is built, so the
+    number of `UNION ALL` branches never depends on client duplication. The
+    physical `open_ts` start is widened by one Bar Interval; the `close_ts`
+    window itself stays exactly `[start_ts, end_ts)`.
     """
-    seq = bar.seq
-    return (
-        datetime_to_ns(bar.close_ts),
-        bar.instrument_id,
-        seq is None,
-        0 if seq is None else seq,
-        bar.interval,
-        datetime_to_ns(bar.open_ts),
-    )
-
-
-def _revision_key(bar: Bar) -> tuple[int, int]:
-    """Highest `revision` wins; `ingest_ts` breaks equal revisions."""
-    return (bar.revision, datetime_to_ns(bar.ingest_ts))
+    seen: set[tuple[str, str]] = set()
+    queries: list[ReplayReadQuery] = []
+    for subscription in subscriptions:
+        key = (subscription.instrument_id, subscription.interval)
+        if key in seen:
+            continue
+        seen.add(key)
+        queries.append(
+            ReplayReadQuery(
+                instrument_id=subscription.instrument_id,
+                interval=subscription.interval,
+                open_start_ns=start_ts_ns - interval_ns(subscription.interval),
+                close_start_ns=start_ts_ns,
+                close_end_ns=end_ts_ns,
+            )
+        )
+    return tuple(queries)
 
 
 class ReplayBarSource:
-    """Reads and total-orders the Bars for a Replay Session."""
+    """Turns one StoreRead's DuckDB Replay query into ordered Bar batches."""
 
-    def __init__(self, store: ParquetBarStore) -> None:
-        self._store = store
-
-    def read(
+    def iter_bars(  # ruff: ignore[no-self-use,too-many-arguments] - explicit query seam
         self,
         subscriptions: Sequence[BarSubscription],
         *,
         start_ts_ns: int,
         end_ts_ns: int,
-    ) -> list[Bar]:
-        """Return the deduplicated, ordered Bars within the `close_ts` range."""
-        kept: dict[tuple[str, str, int], Bar] = {}
+        read: StoreRead,
+        batch_size: int,
+        cancellation: ReplayScanCancellation | None = None,
+    ) -> Iterator[list[Bar]]:
+        """Yield the ordered Bars batch by batch from the fixed Snapshot.
 
-        for subscription in subscriptions:
-            interval = subscription.interval
-            # `close_ts >= start_ts` is equivalent to
-            # `open_ts >= start_ts - interval`; the store can push that down.
-            physical_start_ns = start_ts_ns - interval_ns(interval)
-            for batch in self._store.iter_batches(
-                instrument_id=subscription.instrument_id,
-                interval=interval,
-                start_ns=physical_start_ns,
-                end_ns=end_ts_ns,
-            ):
-                for row in batch.to_pylist():
-                    close_ns = datetime_to_ns(row["close_ts"])
-                    if close_ns < start_ts_ns or close_ns >= end_ts_ns:
-                        continue
-                    bar = Bar(**row)
-                    # `(instrument_id, interval, open_ts)` is the Bar identity;
-                    # only its newest revision may be replayed.
-                    identity = (
-                        bar.instrument_id,
-                        bar.interval,
-                        datetime_to_ns(bar.open_ts),
-                    )
-                    current = kept.get(identity)
-                    if current is None or _revision_key(bar) > _revision_key(current):
-                        kept[identity] = bar
+        This is the only Replay read: each DuckDB Arrow RecordBatch is
+        converted to `Bar` values and handed to the caller immediately. The
+        query does the close-window filter, Revision choice,
+        duplicate-subscription resolution and five-key order; the caller never
+        holds the complete result.
 
-        bars = list(kept.values())
-        bars.sort(key=bar_order_key)
-        return bars
+        Realtime passes a per-generation `cancellation` handle so a seek can
+        interrupt this exact query while the Session's Snapshot and lease stay
+        alive for the next generation.
+        """
+        queries = replay_read_queries(
+            subscriptions,
+            start_ts_ns=start_ts_ns,
+            end_ts_ns=end_ts_ns,
+        )
+        batches = (
+            read.iter_replay_batches(queries, batch_size=batch_size)
+            if cancellation is None
+            else read.iter_replay_batches(
+                queries,
+                batch_size=batch_size,
+                cancellation=cancellation,
+            )
+        )
+        for batch in batches:
+            yield [Bar(**row) for row in batch.to_pylist()]

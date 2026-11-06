@@ -53,13 +53,14 @@ aggregation output. The parent rows are the extra 14,200 Bars (5m/15m/1h/1d).
 | `read_bars` | 0.010 s | 0.011 s | ~4,800,000 rows/s |
 | `iter_batches` | 0.009 s | 0.009 s | ~5,580,000 rows/s |
 
-These were re-measured after the Manifest read-safety change: reads now
-pre-open every selected Data File and filter rows after Manifest-level
-partition/range pruning, instead of using `pyarrow.dataset` pushdown. Direct
-throughput is therefore lower than the earlier ~7M rows/s result (~4.8M rows/s
-for `read_bars`), while a concurrent Compaction/GC Manifest switch no longer
-produces a missing-file read. The REST numbers below predate this change and
-may need a demo rerun.
+These numbers were re-measured after the Manifest read-safety change and
+predate the final DuckDB read-path migration. At that point reads still used a
+PyArrow scan over the selected Data Files with Manifest-level partition/range
+pruning; the final Store now streams those explicit file lists through DuckDB
+2.x (`StoreRead.iter_arrow_batches`). Treat this section as historical
+baseline: the current performance acceptance is recorded by the migration's
+final performance ticket, not by these PyArrow-era rows. The REST numbers
+below likewise predate both changes and may need a demo rerun.
 
 At this size the scan is dominated by fixed per-call overhead; the result
 demonstrates that a 50k-row slice is sub-10 ms, not a sustained streaming

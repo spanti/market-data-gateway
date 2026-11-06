@@ -31,7 +31,17 @@ from mdgw.aggregate import BarAggregator
 from mdgw.cli import main
 from mdgw.core.schema import BAR_SCHEMA
 from mdgw.core.time import datetime_to_ns
+from mdgw.quarantine import (
+    REASON_ARCHIVE_CHECKSUM_MISMATCH,
+    REASON_ARCHIVE_FIELD_ERROR,
+    REASON_ARCHIVE_FORMAT_ERROR,
+    REASON_ARCHIVE_TIME_UNIT_UNSUPPORTED,
+    SOURCE_STAGE_ARCHIVE_FILE,
+    QuarantineStore,
+)
+from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
 from mdgw.state.high_water_mark import HighWaterMarkStore
+from mdgw.store.manifest import active_manifest_entries
 from mdgw.store.parquet_dataset import ParquetBarStore
 
 UTC = timezone.utc
@@ -110,15 +120,19 @@ def _write_archive(
     checksum: bool = True,
     corrupt_checksum: bool = False,
     csv_name: str | None = None,
+    raw_bytes: bytes | None = None,
 ) -> Path:
     unit = unit or timestamp_unit_for_date(period.start)
-    if csv_text is None:
-        csv_text = _csv_text(times or [], unit=unit)
-    name = csv_name or archive_csv_filename(symbol, interval, period)
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(name, csv_text)
-    data = buffer.getvalue()
+    if raw_bytes is not None:
+        data = raw_bytes
+    else:
+        if csv_text is None:
+            csv_text = _csv_text(times or [], unit=unit)
+        name = csv_name or archive_csv_filename(symbol, interval, period)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(name, csv_text)
+        data = buffer.getvalue()
 
     filename = archive_filename(symbol, interval, period)
     directory = (
@@ -153,6 +167,7 @@ def _run_import(
     now: datetime | None = None,
     today: date | None = None,
     feed: str = "binance_archive",
+    quarantine: QuarantineStore | None = None,
 ):
     store = ParquetBarStore(root)
     hwm = HighWaterMarkStore(root / "state.db")
@@ -177,6 +192,7 @@ def _run_import(
         retention_bars_days=retention_bars_days,
         now=now,
         today=today,
+        quarantine=quarantine,
     )
     hwm_map = hwm.all()
     hwm.close()
@@ -189,7 +205,9 @@ def _rows(store: ParquetBarStore, interval: str) -> list[dict]:
     ).to_pylist()
 
 
-def _write_cli_fixture(tmp_path: Path) -> tuple[Path, Path]:
+def _write_cli_fixture(
+    tmp_path: Path, *, rule_version: str | None = None
+) -> tuple[Path, Path]:
     """Write a minimal config + Instrument Reference Data for CLI tests."""
     data_root = tmp_path / "data"
     instruments_dir = tmp_path / "instruments"
@@ -214,21 +232,25 @@ def _write_cli_fixture(tmp_path: Path) -> tuple[Path, Path]:
         + "\n",
         encoding="utf-8",
     )
-    config_path = tmp_path / "gateway.toml"
-    config_path.write_text(
-        "\n".join(
+    config_lines = [
+        "[storage]",
+        f'root = "{data_root.as_posix()}"',
+        "[retention]",
+        "enabled = false",
+        "bars_days = 0",
+        "[instruments]",
+        f'path = "{instruments_dir.as_posix()}"',
+    ]
+    if rule_version is not None:
+        config_lines.extend(
             [
-                "[storage]",
-                f'root = "{data_root.as_posix()}"',
-                "[retention]",
-                "enabled = false",
-                "bars_days = 0",
-                "[instruments]",
-                f'path = "{instruments_dir.as_posix()}"',
+                "[storage.quarantine]",
+                f'rule_version = "{rule_version}"',
             ]
         )
-        + "\n",
-        encoding="utf-8",
+    config_path = tmp_path / "gateway.toml"
+    config_path.write_text(
+        "\n".join(config_lines) + "\n", encoding="utf-8"
     )
     return config_path, data_root
 
@@ -578,8 +600,12 @@ def test_imported_data_can_be_compacted(tmp_path: Path) -> None:
     )
     _run_import(tmp_path / "data", archive_dir, start=day, end=day)
 
+    # Non-paginated reads have no physical-order contract: compare the same
+    # rows in a deterministic content order (revisions share `open_ts`).
     before = {
-        interval: store.read_bars(interval=interval).sort_by("open_ts")
+        interval: store.read_bars(interval=interval).sort_by(
+            [("open_ts", "ascending"), ("revision", "ascending")]
+        )
         for interval in ("1m", "5m")
     }
     report = store.compact(
@@ -590,7 +616,9 @@ def test_imported_data_can_be_compacted(tmp_path: Path) -> None:
     assert report.failures == ()
     assert report.new_files
     for interval, table in before.items():
-        after = store.read_bars(interval=interval).sort_by("open_ts")
+        after = store.read_bars(interval=interval).sort_by(
+            [("open_ts", "ascending"), ("revision", "ascending")]
+        )
         assert after.equals(table)
 
 
@@ -845,3 +873,341 @@ def test_auto_does_not_fall_back_when_monthly_checksum_is_bad(
     assert report.files == 0
     assert report.bars_written == 0
     assert _rows(store, "1m") == []
+
+
+# -- Archive validation Quarantine ------------------------------------------
+
+
+def _quarantine_of(root: Path) -> QuarantineStore:
+    return QuarantineStore(root / "quarantine")
+
+
+def _assert_whole_file_quarantined(
+    report,
+    store: ParquetBarStore,
+    quarantine: QuarantineStore,
+    *,
+    reason_code: str,
+) -> dict:
+    assert report.files == 0
+    assert report.bars_written == 0
+    assert _rows(store, "1m") == []
+    records = quarantine.read_records().to_pylist()
+    assert len(records) == 1
+    record = records[0]
+    assert record["source_stage"] == SOURCE_STAGE_ARCHIVE_FILE
+    assert record["reason_code"] == reason_code
+    assert record["instrument_id"] == INSTRUMENT
+    assert record["interval"] == "1m"
+    assert record["feed"] == "binance_archive"
+    assert "BTCUSDT-1m-" in record["source_location"]
+    details = json.loads(record["details"])
+    assert details["filename"].startswith("BTCUSDT-1m-")
+    return record
+
+
+def test_checksum_failure_quarantines_the_whole_archive_file(
+    tmp_path: Path,
+) -> None:
+    archive_dir = tmp_path / "archive"
+    day = date(2024, 1, 1)
+    _write_archive(
+        archive_dir,
+        ArchivePeriod("daily", day, day),
+        times=[datetime(2024, 1, 1, 12, 0, tzinfo=UTC)],
+        corrupt_checksum=True,
+    )
+
+    store, report, _ = _run_import(
+        tmp_path / "data", archive_dir, start=day, end=day
+    )
+
+    assert report.failures == 1
+    record = _assert_whole_file_quarantined(
+        report,
+        store,
+        _quarantine_of(tmp_path / "data"),
+        reason_code=REASON_ARCHIVE_CHECKSUM_MISMATCH,
+    )
+    assert "BTCUSDT-1m-2024-01-01.zip" in record["source_location"]
+
+
+def test_zip_structure_failure_quarantines_the_whole_file(
+    tmp_path: Path,
+) -> None:
+    archive_dir = tmp_path / "archive"
+    day = date(2024, 1, 1)
+    _write_archive(
+        archive_dir,
+        ArchivePeriod("daily", day, day),
+        raw_bytes=b"this is not a zip archive",
+    )
+
+    store, report, _ = _run_import(
+        tmp_path / "data", archive_dir, start=day, end=day
+    )
+
+    assert report.failures == 1
+    _assert_whole_file_quarantined(
+        report,
+        store,
+        _quarantine_of(tmp_path / "data"),
+        reason_code=REASON_ARCHIVE_FORMAT_ERROR,
+    )
+
+
+def test_source_time_unit_failure_quarantines_with_the_time_unit_reason(
+    tmp_path: Path,
+) -> None:
+    archive_dir = tmp_path / "archive"
+    day = date(2025, 1, 1)
+    # A 2025 archive (microseconds) carrying millisecond timestamps.
+    _write_archive(
+        archive_dir,
+        ArchivePeriod("daily", day, day),
+        times=[datetime(2025, 1, 1, 12, 0, tzinfo=UTC)],
+        unit=UNIT_MS,
+    )
+
+    store, report, _ = _run_import(
+        tmp_path / "data", archive_dir, start=day, end=day
+    )
+
+    assert report.failures == 1
+    _assert_whole_file_quarantined(
+        report,
+        store,
+        _quarantine_of(tmp_path / "data"),
+        reason_code=REASON_ARCHIVE_TIME_UNIT_UNSUPPORTED,
+    )
+
+
+def test_key_field_failure_quarantines_the_whole_file(
+    tmp_path: Path,
+) -> None:
+    archive_dir = tmp_path / "archive"
+    day = date(2024, 1, 1)
+    period = ArchivePeriod("daily", day, day)
+    row = _csv_row(
+        datetime(2024, 1, 1, 12, 0, tzinfo=UTC), unit=UNIT_MS
+    ).split(",")
+    row[1] = "not-a-number"
+    _write_archive(
+        archive_dir,
+        period,
+        csv_text=",".join(row) + "\n",
+    )
+
+    store, report, _ = _run_import(
+        tmp_path / "data", archive_dir, start=day, end=day
+    )
+
+    assert report.failures == 1
+    _assert_whole_file_quarantined(
+        report,
+        store,
+        _quarantine_of(tmp_path / "data"),
+        reason_code=REASON_ARCHIVE_FIELD_ERROR,
+    )
+
+
+def test_normalization_rejection_quarantines_with_a_sanitized_message(
+    tmp_path: Path,
+) -> None:
+    archive_dir = tmp_path / "archive"
+    day = date(2024, 1, 1)
+    period = ArchivePeriod("daily", day, day)
+    # `parse_kline_csv` accepts the exact Decimal; Normalization rejects a
+    # scale it cannot store without rounding. The whole file must still be
+    # quarantined through the archive failure path.
+    over_scale = "1.1234567890123456789"
+    _write_archive(
+        archive_dir,
+        period,
+        csv_text=_csv_text(
+            [datetime(2024, 1, 1, 12, 0, tzinfo=UTC)],
+            unit=timestamp_unit_for_date(day),
+            price=over_scale,
+        ),
+    )
+
+    store, report, _ = _run_import(
+        tmp_path / "data", archive_dir, start=day, end=day
+    )
+
+    assert report.failures == 1
+    assert report.bars_written == 0
+    assert _rows(store, "1m") == []
+    records = _quarantine_of(tmp_path / "data").read_records().to_pylist()
+    assert len(records) == 1
+    record = records[0]
+    assert record["source_stage"] == SOURCE_STAGE_ARCHIVE_FILE
+    assert record["reason_code"] == REASON_ARCHIVE_FIELD_ERROR
+    details = json.loads(record["details"])
+    assert details["error_type"] == "ArchiveFieldError"
+    # Diagnostics name the stable Reason Code, never the rejected values.
+    assert over_scale not in details["message"]
+
+
+def test_a_valid_archive_leaves_no_quarantine_records(tmp_path: Path) -> None:
+    archive_dir = tmp_path / "archive"
+    day = date(2024, 1, 1)
+    _write_archive(
+        archive_dir,
+        ArchivePeriod("daily", day, day),
+        times=[datetime(2024, 1, 1, 12, 0, tzinfo=UTC)],
+    )
+
+    store, report, _ = _run_import(
+        tmp_path / "data", archive_dir, start=day, end=day
+    )
+
+    assert report.failures == 0
+    assert len(_rows(store, "1m")) == 1
+    assert _quarantine_of(tmp_path / "data").read_records().num_rows == 0
+
+
+def test_archive_quarantine_write_failure_is_a_reported_failure(
+    tmp_path: Path,
+) -> None:
+    archive_dir = tmp_path / "archive"
+    day = date(2024, 1, 1)
+    _write_archive(
+        archive_dir,
+        ArchivePeriod("daily", day, day),
+        times=[datetime(2024, 1, 1, 12, 0, tzinfo=UTC)],
+        corrupt_checksum=True,
+    )
+    broken_root = tmp_path / "broken-quarantine"
+    broken_root.mkdir(parents=True)
+    (broken_root / "_quarantine_manifest.json").mkdir()
+    broken = QuarantineStore(broken_root)
+
+    store, report, hwm = _run_import(
+        tmp_path / "data",
+        archive_dir,
+        start=day,
+        end=day,
+        quarantine=broken,
+    )
+
+    # The archive failure and the failed Quarantine write are both reported;
+    # neither is a silent skip.
+    assert report.failures == 2
+    assert report.files == 0
+    assert store.count_bars() == 0
+    assert hwm == {}
+    assert broken.stats()["write_failures"] == 1
+    assert broken.stats()["records_written"] == 0
+    assert list(broken.root.glob("year=*/month=*/*.parquet")) == []
+
+
+def test_cli_archive_backfill_quarantines_a_corrupt_file(
+    tmp_path: Path, capsys
+) -> None:
+    config_path, data_root = _write_cli_fixture(tmp_path)
+    archive_dir = tmp_path / "archive"
+    day = date(2024, 1, 1)
+    _write_archive(
+        archive_dir,
+        ArchivePeriod("daily", day, day),
+        times=[datetime(2024, 1, 1, 12, 0, tzinfo=UTC)],
+        corrupt_checksum=True,
+    )
+
+    result = main(
+        [
+            "backfill",
+            "--archive",
+            "--config",
+            str(config_path),
+            "--instrument",
+            INSTRUMENT,
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-01",
+            "--archive-dir",
+            str(archive_dir),
+        ]
+    )
+
+    assert result == 1
+    assert "failures=1" in capsys.readouterr().out
+    store = ParquetBarStore(data_root)
+    assert store.count_bars() == 0
+    quarantine = QuarantineStore(data_root / "quarantine")
+    (record,) = quarantine.read_records().to_pylist()
+    assert record["source_stage"] == SOURCE_STAGE_ARCHIVE_FILE
+    assert record["reason_code"] == REASON_ARCHIVE_CHECKSUM_MISMATCH
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (None, NORMALIZATION_RULE_VERSION),
+        ("custom-2", "custom-2"),
+    ],
+)
+def test_cli_archive_backfill_uses_the_configured_rule_version(
+    tmp_path: Path, capsys, configured: str | None, expected: str
+) -> None:
+    """Archive Manifest and Quarantine lineage must honor the config value.
+
+    The CLI Store and the archive importer must share the same audit rule
+    identity. A non-default ``[storage.quarantine].rule_version`` has to reach
+    both the Bars Manifest entry and the Quarantine record; the default case
+    proves the previous behaviour is unchanged.
+    """
+    config_path, data_root = _write_cli_fixture(
+        tmp_path, rule_version=configured
+    )
+    archive_dir = tmp_path / "archive"
+    good_day = date(2024, 1, 1)
+    _write_archive(
+        archive_dir,
+        ArchivePeriod("daily", good_day, good_day),
+        times=[
+            datetime(2024, 1, 1, 12, minute, tzinfo=UTC)
+            for minute in range(2)
+        ],
+    )
+    bad_day = date(2024, 1, 2)
+    _write_archive(
+        archive_dir,
+        ArchivePeriod("daily", bad_day, bad_day),
+        times=[datetime(2024, 1, 2, 12, 0, tzinfo=UTC)],
+        corrupt_checksum=True,
+    )
+
+    result = main(
+        [
+            "backfill",
+            "--archive",
+            "--config",
+            str(config_path),
+            "--instrument",
+            INSTRUMENT,
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-02",
+            "--archive-dir",
+            str(archive_dir),
+        ]
+    )
+
+    # The corrupt file is quarantined and reported as a failure.
+    assert result == 1
+    assert "failures=1" in capsys.readouterr().out
+
+    store = ParquetBarStore(data_root)
+    entries = active_manifest_entries(store.dataset_root)
+    assert entries
+    assert {tuple(entry["rule_versions"]) for entry in entries} == {
+        (expected,)
+    }
+
+    quarantine = QuarantineStore(data_root / "quarantine")
+    (record,) = quarantine.read_records().to_pylist()
+    assert record["rule_version"] == expected

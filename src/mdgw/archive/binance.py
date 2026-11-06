@@ -49,6 +49,22 @@ class ArchiveFormatError(ValueError):
     """An archive file or its CHECKSUM does not match the expected format."""
 
 
+class ArchiveChecksumError(ArchiveFormatError):
+    """The `.CHECKSUM` is missing, unparseable or does not match the ZIP."""
+
+
+class ArchiveStructureError(ArchiveFormatError):
+    """The ZIP/CSV container structure is invalid."""
+
+
+class ArchiveTimestampUnitError(ArchiveFormatError):
+    """The archive timestamp unit is unsupported or disagrees with its date."""
+
+
+class ArchiveFieldError(ArchiveFormatError):
+    """A key CSV field has an invalid value."""
+
+
 @dataclass(frozen=True, slots=True)
 class ArchivePeriod:
     """One requested archive file: a single day or a complete calendar month."""
@@ -104,7 +120,7 @@ def infer_timestamp_unit(value: int) -> str:
         f"unrecognized archive timestamp magnitude: {value!r} "
         "(expected milliseconds ~1e12 or microseconds ~1e15)"
     )
-    raise ArchiveFormatError(msg)
+    raise ArchiveTimestampUnitError(msg)
 
 
 def raw_timestamp_to_ns(value: int, unit: str) -> int:
@@ -113,7 +129,7 @@ def raw_timestamp_to_ns(value: int, unit: str) -> int:
     if unit == UNIT_US:
         return value * 1_000
     msg = f"unsupported archive timestamp unit: {unit!r}"
-    raise ArchiveFormatError(msg)
+    raise ArchiveTimestampUnitError(msg)
 
 
 def timestamp_to_datetime(value: int, unit: str):
@@ -225,11 +241,11 @@ def parse_checksum(text: str) -> str:
     stripped = text.strip()
     if not stripped:
         msg = "empty CHECKSUM file"
-        raise ArchiveFormatError(msg)
+        raise ArchiveChecksumError(msg)
     token = stripped.split()[0].lstrip("*")
     if not _CHECKSUM_TOKEN_RE.match(token):
         msg = f"invalid CHECKSUM digest: {stripped.split()[0]!r}"
-        raise ArchiveFormatError(msg)
+        raise ArchiveChecksumError(msg)
     return token.lower()
 
 
@@ -243,7 +259,7 @@ def read_zip_csv(data: bytes, *, expected_name: str) -> bytes:
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:
         msg = f"not a valid ZIP archive: {exc}"
-        raise ArchiveFormatError(msg) from exc
+        raise ArchiveStructureError(msg) from exc
 
     with archive:
         csv_names = [
@@ -253,19 +269,19 @@ def read_zip_csv(data: bytes, *, expected_name: str) -> bytes:
         ]
         if len(csv_names) != 1:
             msg = f"ZIP must contain exactly one .csv file, found {len(csv_names)}"
-            raise ArchiveFormatError(msg)
+            raise ArchiveStructureError(msg)
         name = csv_names[0]
         if Path(name).name != expected_name:
             msg = (
                 f"unexpected CSV file name {Path(name).name!r}; "
                 f"expected {expected_name!r}"
             )
-            raise ArchiveFormatError(msg)
+            raise ArchiveStructureError(msg)
         try:
             return archive.read(name)
         except (KeyError, OSError, RuntimeError) as exc:
             msg = f"cannot read {name!r} from ZIP: {exc}"
-            raise ArchiveFormatError(msg) from exc
+            raise ArchiveStructureError(msg) from exc
 
 
 def parse_kline_csv(
@@ -285,7 +301,7 @@ def parse_kline_csv(
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         msg = f"CSV is not valid UTF-8: {exc}"
-        raise ArchiveFormatError(msg) from exc
+        raise ArchiveStructureError(msg) from exc
 
     interval_units = _interval_units(interval, unit)
     bars: list[RawBar] = []
@@ -299,7 +315,7 @@ def parse_kline_csv(
                 continue
         if len(row) < 9:
             msg = f"K-line row has {len(row)} column(s), expected at least 9"
-            raise ArchiveFormatError(msg)
+            raise ArchiveStructureError(msg)
 
         open_raw = _parse_int(row[0], "open_time")
         close_raw = _parse_int(row[6], "close_time")
@@ -309,14 +325,14 @@ def parse_kline_csv(
                 f"open_time {open_raw!r} looks like {inferred} but the archive "
                 f"date requires {unit}"
             )
-            raise ArchiveFormatError(msg)
+            raise ArchiveTimestampUnitError(msg)
         expected_close = open_raw + interval_units - 1
         if abs(close_raw - expected_close) > 1:
             msg = (
                 f"close_time {close_raw!r} does not match open_time + "
                 f"interval - 1 ({expected_close!r})"
             )
-            raise ArchiveFormatError(msg)
+            raise ArchiveStructureError(msg)
 
         bars.append(
             RawBar(
@@ -338,7 +354,7 @@ def parse_kline_csv(
 def _interval_units(interval: str, unit: str) -> int:
     if interval not in INTERVALS:
         msg = f"unsupported archive interval: {interval!r}"
-        raise ArchiveFormatError(msg)
+        raise ArchiveStructureError(msg)
     seconds = int(INTERVALS[interval].total_seconds())
     return seconds * (1_000 if unit == UNIT_MS else 1_000_000)
 
@@ -347,27 +363,27 @@ def _parse_int(value: str, field: str) -> int:
     text = value.strip()
     if not text:
         msg = f"empty {field} column"
-        raise ArchiveFormatError(msg)
+        raise ArchiveFieldError(msg)
     try:
         return int(text)
     except ValueError as exc:
         msg = f"invalid {field}: {value!r}"
-        raise ArchiveFormatError(msg) from exc
+        raise ArchiveFieldError(msg) from exc
 
 
 def _parse_decimal(value: str, field: str) -> Decimal:
     text = value.strip()
     if not text:
         msg = f"empty {field} column"
-        raise ArchiveFormatError(msg)
+        raise ArchiveFieldError(msg)
     try:
         number = Decimal(text)
     except InvalidOperation as exc:
         msg = f"invalid {field}: {value!r}"
-        raise ArchiveFormatError(msg) from exc
+        raise ArchiveFieldError(msg) from exc
     if not number.is_finite():
         msg = f"{field} must be finite: {value!r}"
-        raise ArchiveFormatError(msg)
+        raise ArchiveFieldError(msg)
     return number
 
 
@@ -379,10 +395,10 @@ def _parse_trade_count(value: str) -> int | None:
         count = int(text)
     except ValueError as exc:
         msg = f"invalid number_of_trades: {value!r}"
-        raise ArchiveFormatError(msg) from exc
+        raise ArchiveFieldError(msg) from exc
     if not 0 <= count <= 0xFFFFFFFF:
         msg = f"number_of_trades does not fit uint32: {count!r}"
-        raise ArchiveFormatError(msg)
+        raise ArchiveFieldError(msg)
     return count
 
 
@@ -392,8 +408,12 @@ __all__ = [
     "SUPPORTED_GRANULARITIES",
     "UNIT_MS",
     "UNIT_US",
+    "ArchiveChecksumError",
+    "ArchiveFieldError",
     "ArchiveFormatError",
     "ArchivePeriod",
+    "ArchiveStructureError",
+    "ArchiveTimestampUnitError",
     "archive_csv_filename",
     "archive_filename",
     "archive_url",

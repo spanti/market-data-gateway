@@ -15,6 +15,9 @@ htmlcov/
 data/
 data-demo/
 
+# Local acceptance logs (large; summarized in benchmarks/RESULTS-duckdb-final.md)
+benchmarks/.acceptance-logs/
+
 # Editor
 .vscode/
 .claude/

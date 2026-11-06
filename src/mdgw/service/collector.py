@@ -7,8 +7,12 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from mdgw.ingest.composite import build_configured_feed_handler
+from mdgw.ingest.composite import (
+    attach_quarantine,
+    build_configured_feed_handler,
+)
 from mdgw.metrics import MetricsRegistry
+from mdgw.quarantine import QuarantineStore
 from mdgw.service.bar_sink import BufferedBarSink
 from mdgw.service.collector_core import CollectorCore
 from mdgw.service.common import iso_to_seconds, ns_iso, update_dataset_metrics
@@ -43,8 +47,26 @@ class CollectorService:
         wait_for_api: bool | None = None,
     ) -> None:
         self.config = config
+        # The Collector owns the Quarantine Dataset; the same Store instance
+        # is used by the pipeline and by every ccxt Feed Handler it builds (or
+        # receives injected), so counters and the physical Dataset agree.
+        storage_root = (
+            data_root if data_root is not None else config.storage.root
+        )
+        quarantine = QuarantineStore(
+            config.storage.quarantine.resolved_root(storage_root),
+            schema_version=config.storage.quarantine.schema_version,
+            retention_days=config.storage.quarantine.retention_days,
+        )
         self._feed_handler = feed_handler or build_configured_feed_handler(
-            config.feeds
+            config.feeds,
+            quarantine=quarantine,
+            rule_version=config.storage.quarantine.rule_version,
+        )
+        attach_quarantine(
+            self._feed_handler,
+            quarantine,
+            rule_version=config.storage.quarantine.rule_version,
         )
         self.core = CollectorCore(
             feed_handler=self._feed_handler,
@@ -56,12 +78,18 @@ class CollectorService:
                 flush_max_bytes=config.storage.flush_max_bytes,
                 flush_max_age_s=config.storage.flush_max_age_s,
             ),
+            quarantine=quarantine,
         )
         self.metrics = MetricsRegistry()
         # `bars_written` now counts Bars that actually reached disk (including
         # buffered writer flushes), so the process metric is advanced by delta.
         self._last_written_metric = 0.0
         self._written_metric_lock = threading.Lock()
+        # Quarantine counters advance by delta from `QuarantineStore.stats()`;
+        # CollectorCore never depends on the MetricsRegistry.
+        self._last_quarantine_counts: dict[tuple[str, str], int] = {}
+        self._last_quarantine_failures = 0
+        self._quarantine_metric_lock = threading.Lock()
 
         self._streaming: StreamingInterface | None = None
         self._health_server: ServiceHealthServer | None = None
@@ -184,6 +212,8 @@ class CollectorService:
             self._health_server.stop()
             self._health_server = None
         self.core.close_state()
+        # The CollectorService owns this Store (CollectorCore created it).
+        self.core.store.close()
         self._started = False
         self._started_at = None
 
@@ -331,6 +361,7 @@ class CollectorService:
             "write_last_flush_ts": sink.get("last_flush_ts"),
             "write_last_flush_duration_s": sink.get("last_flush_duration_s"),
             "write_sink": sink,
+            "quarantine": self.core.quarantine.stats(),
             "health": health,
         }
 
@@ -395,8 +426,59 @@ class CollectorService:
             sink.get("last_flush_duration_s") or 0.0,
             help="Duration of the last successful write-buffer flush",
         )
+        self._update_quarantine_metrics()
         update_dataset_metrics(self.metrics, self.core.store)
         return self.metrics.render()
+
+    def _update_quarantine_metrics(self) -> None:
+        """Expose Quarantine records and write failures by stable labels."""
+        stats = self.core.quarantine.stats()
+        with self._quarantine_metric_lock:
+            for entry in stats["records_by_stage_and_reason"]:
+                key = (entry["source_stage"], entry["reason_code"])
+                previous = self._last_quarantine_counts.get(key, 0)
+                delta = int(entry["count"]) - previous
+                if delta > 0:
+                    self.metrics.inc(
+                        "mdgw_collector_quarantine_records_total",
+                        labels={
+                            "source_stage": key[0],
+                            "reason_code": key[1],
+                        },
+                        amount=delta,
+                        help="Rejected inputs written to the Quarantine Dataset",
+                    )
+                self._last_quarantine_counts[key] = int(entry["count"])
+
+            failures = int(stats["write_failures"])
+            self.metrics.inc(
+                "mdgw_collector_quarantine_write_failures_total",
+                amount=max(0, failures - self._last_quarantine_failures),
+                help=(
+                    "Quarantine writes that failed; the corresponding input "
+                    "was not acknowledged (fail-closed)"
+                ),
+            )
+            self._last_quarantine_failures = failures
+
+        # Capacity/retention visibility: record volume grows until an operator
+        # runs `mdgw quarantine-gc`. Only stable labels and plain gauges are
+        # used (no paths, request ids or exception text).
+        self.metrics.set(
+            "mdgw_collector_quarantine_active_files",
+            int(stats["active_file_count"]),
+            help="Active Quarantine Data Files",
+        )
+        self.metrics.set(
+            "mdgw_collector_quarantine_active_bytes",
+            int(stats["active_bytes"]),
+            help="Bytes held by active Quarantine Data Files",
+        )
+        self.metrics.set(
+            "mdgw_collector_quarantine_retention_days",
+            int(stats["retention_days"]),
+            help="Quarantine Retention in days (0 = keep forever)",
+        )
 
     def _uptime_s(self) -> float:
         if self._started_at is None:

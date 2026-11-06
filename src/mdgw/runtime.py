@@ -20,6 +20,7 @@ from mdgw.api.ws_hub import WebSocketHub
 from mdgw.core.envelope import table_to_messages
 from mdgw.core.errors import UnknownInstrumentError
 from mdgw.core.time import utc_now
+from mdgw.ingest.composite import attach_quarantine
 from mdgw.replay.service import ReplayService
 from mdgw.service.collector_core import CollectorCore
 from mdgw.state.health import GapEvent, HealthTracker
@@ -72,6 +73,8 @@ class GatewayRuntime:
             row_group_size=config.storage.row_group_size,
             format_version=config.storage.format_version,
             schema_version=config.storage.schema_version,
+            duckdb=config.storage.duckdb.to_options(),
+            rule_versions={config.storage.quarantine.rule_version},
         )
         self.instrument_store: InstrumentStore | None = None
         self.aggregator = BarAggregator(
@@ -91,6 +94,14 @@ class GatewayRuntime:
             aggregator=self.aggregator,
             health=self._health,
             asset_class_for=self._asset_class_for,
+        )
+        # Independent Quarantine Dataset; never part of the Bars Dataset. A
+        # handler constructed before the runtime shares this exact Store.
+        self.quarantine = self._core.quarantine
+        attach_quarantine(
+            feed_handler,
+            self.quarantine,
+            rule_version=config.storage.quarantine.rule_version,
         )
 
         self._streaming: StreamingInterface | None = None
@@ -170,6 +181,9 @@ class GatewayRuntime:
             self._streaming = None
         self._close_feed_handler()
         self._close_state()
+        # This runtime owns the Store; the collector pipeline shares the exact
+        # instance, so it is closed here exactly once.
+        self.store.close()
         self._started = False
 
     def _close_replay(self) -> None:
@@ -292,6 +306,8 @@ class GatewayRuntime:
                 max_sessions=self.config.replay.max_sessions,
                 heartbeat_s=self.config.replay.heartbeat_s,
                 instrument_store=self.instrument_store,
+                batch_size=self.config.replay.batch_size,
+                prefetch_batches=self.config.replay.prefetch_batches,
             )
         return self._replay_service
 

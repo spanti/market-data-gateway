@@ -1,8 +1,11 @@
 """Bar history endpoints: JSON, Arrow IPC stream, CSV and file export.
 
-Every format reads through the same batch iterator, so JSON / Arrow / CSV /
-export cannot drift apart. Store calls run on worker threads; streaming bodies
-are never materialised in full.
+Every streaming format reads through the Store's DuckDB Manifest-Snapshot
+scan and every format renders the same contract RecordBatches, so JSON /
+Arrow / CSV / export cannot drift apart. Store calls run on worker threads;
+streaming bodies are never materialised in full. A failure after the response
+has started propagates and aborts the transfer; it is never appended to the
+body or turned into a normal end of stream.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import io
 import logging
 import shutil
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -47,7 +51,7 @@ from mdgw.core.time import iso_to_ns, ns_to_iso
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
 
-    from mdgw.store.parquet_dataset import ParquetBarStore
+    from mdgw.store.parquet_dataset import ParquetBarStore, StoreRead
 
 logger = logging.getLogger(__name__)
 
@@ -263,9 +267,10 @@ def _parse_limit(raw_limit: str | None) -> int | None:
 
 # -- storage access ---------------------------------------------------------
 #
-# Every read helper takes the validated `BarQuery` instead of re-exploding the
-# same `(instrument_id, interval, start_ns, end_ns, limit)` clump at each call
-# site. The store API stays primitive; only this module knows the mapping.
+# One HTTP request owns one `StoreRead`: its row-ceiling count, its existence
+# probe and its actual read all scan the same Manifest Snapshot under the same
+# Dataset Read Lease. The helpers below only translate the validated
+# `BarQuery` into the Store's primitive filters.
 
 
 def _query_filters(query: BarQuery) -> dict[str, Any]:
@@ -277,102 +282,69 @@ def _query_filters(query: BarQuery) -> dict[str, Any]:
     }
 
 
-def _count_store_bars(store: ParquetBarStore, query: BarQuery) -> int:
-    return store.count_bars(**_query_filters(query))
-
-
-def _read_store_bars(
-    store: ParquetBarStore,
-    query: BarQuery,
-    *,
-    limit: int | None,
-) -> pa.Table:
-    return store.read_bars(**_query_filters(query), limit=limit)
-
-
-def _iter_store_batches(
-    store: ParquetBarStore,
-    query: BarQuery,
-    *,
-    limit: int | None,
-) -> Iterator[pa.RecordBatch]:
-    return store.iter_batches(**_query_filters(query), limit=limit)
-
-
-def _read_earliest_bars(
-    store: ParquetBarStore,
-    query: BarQuery,
-    *,
-    keep: int,
-) -> pa.Table:
-    """Return the globally earliest ``keep`` Bars in ascending `open_ts` order.
-
-    Storage order is not a time order (Manifest entries are append-ordered and
-    Data Files may overlap), so a plain `limit` read cannot produce a page.
-    Scanning every matching row and retaining only the smallest ``keep`` rows
-    keeps memory bounded by the page size while preserving Arrow types exactly
-    (no Python datetime/decimal round-trip).
-    """
-    selected: pa.Table | None = None
-    for batch in _iter_store_batches(store, query, limit=None):
-        table = pa.Table.from_batches([batch], schema=BAR_SCHEMA)
-        if selected is not None:
-            table = pa.concat_tables([selected, table])
-        selected = table.sort_by([("open_ts", "ascending")]).slice(0, keep)
-    if selected is None:
-        return pa.Table.from_batches([], schema=BAR_SCHEMA)
-    return selected
+def _open_store_read(store: ParquetBarStore, query: BarQuery) -> StoreRead:
+    return store.open_read(**_query_filters(query))
 
 
 # -- JSON -------------------------------------------------------------------
 
 
 async def _respond_json(store: ParquetBarStore, query: BarQuery) -> Response:
-    total = await asyncio.to_thread(_count_store_bars, store, query)
-    # `limit` caps the response, so only the rows that would actually be
-    # rendered count against the JSON ceiling.
-    effective_total = total if query.limit is None else min(total, query.limit)
-    if effective_total > JSON_ROW_LIMIT:
-        message = (
-            f"JSON output is limited to {JSON_ROW_LIMIT} Bars; "
-            "use format=arrow or format=csv for larger ranges"
-        )
-        raise _RangeTooLargeError(
-            message,
-            details={"row_count": total, "limit": JSON_ROW_LIMIT},
-        )
+    payload = await asyncio.to_thread(_build_json_payload, store, query)
+    return JSONResponse(payload)
 
-    # Pagination metadata is a single-Instrument feature: it needs both
-    # `instrument` and `limit` (limit=0 counts) to be unambiguous.
-    paginated = query.instrument is not None and query.limit is not None
-    if not paginated:
-        table = await asyncio.to_thread(
-            _read_store_bars, store, query, limit=query.limit
+
+def _build_json_payload(store: ParquetBarStore, query: BarQuery) -> dict:
+    """Count and read on one Snapshot, so the ceiling cannot disagree with rows."""
+    with _open_store_read(store, query) as read:
+        # The exact raw-row count runs through DuckDB on this request's
+        # Snapshot and Lease. It is a separate query from the read, so no
+        # window SQL or implicit dedup can change the ceiling.
+        total = read.count_arrow()
+        # `limit` caps the response, so only the rows that would actually be
+        # rendered count against the JSON ceiling.
+        effective_total = (
+            total if query.limit is None else min(total, query.limit)
         )
-        return JSONResponse({"bars": table_to_messages(table)})
+        if effective_total > JSON_ROW_LIMIT:
+            message = (
+                f"JSON output is limited to {JSON_ROW_LIMIT} Bars; "
+                "use format=arrow or format=csv for larger ranges"
+            )
+            raise _RangeTooLargeError(
+                message,
+                details={"row_count": total, "limit": JSON_ROW_LIMIT},
+            )
 
-    assert query.limit is not None  # narrowed by `paginated`
-    limit = query.limit
-    # The paginated JSON surface has an explicit ordering contract: open_ts
-    # ascending. Storage order is not ordered (the Manifest is append-ordered
-    # and files may overlap), so reading `limit + 1` rows first would pick the
-    # wrong page. Stream every matching row and retain only the smallest
-    # `limit + 1` by `open_ts`, then render them in ascending order.
-    table = await asyncio.to_thread(
-        _read_earliest_bars, store, query, keep=limit + 1
-    )
+        # Pagination metadata is a single-Instrument feature: it needs both
+        # `instrument` and `limit` (limit=0 counts) to be unambiguous.
+        paginated = query.instrument is not None and query.limit is not None
+        if not paginated:
+            # Non-paginated JSON has no ordering contract: read through
+            # DuckDB, where LIMIT only caps returned rows.
+            table = read.read_arrow_bars(limit=query.limit)
+            return {"bars": table_to_messages(table)}
 
-    has_more = table.num_rows > limit
-    next_start: str | None = None
-    if has_more:
-        next_ns = table.column("open_ts").cast(pa.int64())[limit].as_py()
-        next_start = ns_to_iso(next_ns)
-    return JSONResponse(
-        {
+        assert query.limit is not None  # narrowed by `paginated`
+        limit = query.limit
+        # The paginated JSON surface has an explicit ordering contract:
+        # `open_ts` ascending. Storage order is not a time order (Manifest
+        # entries are append-ordered and Data Files may overlap), so DuckDB
+        # orders the whole Snapshot selection and applies `limit + 1` in one
+        # query. That is the page plus the first unreturned row, which yields
+        # `has_more` and `next_start`. No per-batch Python concat/sort runs,
+        # and raw Revisions are not deduplicated.
+        table = read.read_earliest_arrow_bars(keep=limit + 1)
+
+        has_more = table.num_rows > limit
+        next_start: str | None = None
+        if has_more:
+            next_ns = table.column("open_ts").cast(pa.int64())[limit].as_py()
+            next_start = ns_to_iso(next_ns)
+        return {
             "bars": table_to_messages(table.slice(0, limit)),
             "page": {"has_more": has_more, "next_start": next_start},
         }
-    )
 
 
 # -- Arrow stream -----------------------------------------------------------
@@ -382,20 +354,27 @@ async def _stream_arrow(
     store: ParquetBarStore,
     query: BarQuery,
 ) -> Response:
-    await asyncio.to_thread(store.validate_schema_version)
-    return StreamingResponse(
-        _arrow_body(store, query),
-        headers={
-            "Content-Type": ARROW_STREAM_MEDIA_TYPE,
-            "Content-Disposition": content_disposition(
-                "inline", f"{query.interval}-bars.arrow"
-            ),
-        },
-    )
+    # Acquire before the response starts so a schema mismatch or a Manifest
+    # race still yields the stable JSON error envelope.
+    read = await asyncio.to_thread(_open_store_read, store, query)
+    try:
+        return _CleanupStreamingResponse(
+            _arrow_body(read, query),
+            cleanup=read.close,
+            headers={
+                "Content-Type": ARROW_STREAM_MEDIA_TYPE,
+                "Content-Disposition": content_disposition(
+                    "inline", f"{query.interval}-bars.arrow"
+                ),
+            },
+        )
+    except BaseException:
+        read.close()
+        raise
 
 
 async def _arrow_body(
-    store: ParquetBarStore,
+    read: StoreRead,
     query: BarQuery,
 ) -> AsyncIterator[bytes]:
     sink = _ChunkSink()
@@ -403,7 +382,7 @@ async def _arrow_body(
     wrote_any = False
     closed = False
     try:
-        async for batch in _iter_batches(store, query):
+        async for batch in _iter_arrow_batches(read, query):
             writer.write_batch(batch)
             wrote_any = True
             chunk = sink.drain()
@@ -421,6 +400,7 @@ async def _arrow_body(
         if not closed:
             writer.close()
             sink.drain()
+        read.close()
 
 
 # -- CSV stream -------------------------------------------------------------
@@ -430,40 +410,67 @@ async def _stream_csv(
     store: ParquetBarStore,
     query: BarQuery,
 ) -> Response:
-    await asyncio.to_thread(store.validate_schema_version)
-    return StreamingResponse(
-        _csv_body(store, query),
-        headers={
-            "Content-Type": CSV_MEDIA_TYPE,
-            "Content-Disposition": content_disposition(
-                "inline", f"{query.interval}-bars.csv"
-            ),
-        },
-    )
+    read = await asyncio.to_thread(_open_store_read, store, query)
+    try:
+        return _CleanupStreamingResponse(
+            _csv_body(read, query),
+            cleanup=read.close,
+            headers={
+                "Content-Type": CSV_MEDIA_TYPE,
+                "Content-Disposition": content_disposition(
+                    "inline", f"{query.interval}-bars.csv"
+                ),
+            },
+        )
+    except BaseException:
+        read.close()
+        raise
 
 
 async def _csv_body(
-    store: ParquetBarStore,
+    read: StoreRead,
     query: BarQuery,
 ) -> AsyncIterator[bytes]:
-    yield (",".join(BAR_SCHEMA.names) + "\n").encode("utf-8")
-    async for batch in _iter_batches(store, query):
-        text = _batch_to_csv(batch)
-        if text:
-            yield text.encode("utf-8")
+    try:
+        # The header is the first chunk; from then on each bounded DuckDB
+        # batch is rendered and yielded as it arrives.
+        yield (",".join(BAR_SCHEMA.names) + "\n").encode("utf-8")
+        async for batch in _iter_arrow_batches(read, query):
+            text = _batch_to_csv(batch)
+            if text:
+                yield text.encode("utf-8")
+    finally:
+        read.close()
 
 
-async def _iter_batches(
-    store: ParquetBarStore,
+async def _iter_arrow_batches(
+    read: StoreRead,
     query: BarQuery,
 ) -> AsyncIterator[pa.RecordBatch]:
-    """Iterate Bar batches on worker threads so the event loop stays free."""
-    iterator = _iter_store_batches(store, query, limit=query.limit)
-    while True:
-        batch = await asyncio.to_thread(next, iterator, _END_OF_BATCHES)
-        if batch is _END_OF_BATCHES:
-            return
+    """Iterate DuckDB Relation Arrow Reader batches on worker threads."""
+    iterator = read.iter_arrow_batches(limit=query.limit)
+    async for batch in _pump_batches(iterator):
         yield batch
+
+
+async def _pump_batches(
+    iterator: Iterator[pa.RecordBatch],
+) -> AsyncIterator[pa.RecordBatch]:
+    """Move one blocking batch pull at a time off the event loop.
+
+    On client disconnect `next` may still be running on its worker thread; the
+    StoreRead close path interrupts the DuckDB scan and the lease is released
+    by the caller either way.
+    """
+    try:
+        while True:
+            batch = await asyncio.to_thread(next, iterator, _END_OF_BATCHES)
+            if batch is _END_OF_BATCHES:
+                return
+            yield batch
+    finally:
+        with suppress(ValueError):  # pragma: no cover - generator executing
+            iterator.close()
 
 
 def _batch_to_csv(batch: pa.RecordBatch) -> str:
@@ -504,8 +511,10 @@ async def _export_file(
         raise
 
     spec = _EXPORT_SPECS[query.format]
-    return StreamingResponse(
-        _file_body(path),
+    body = _ExportFileBody(path)
+    return _CleanupStreamingResponse(
+        body,
+        cleanup=body.close,
         headers={
             "Content-Type": spec.content_type,
             "Content-Disposition": content_disposition(
@@ -516,19 +525,37 @@ async def _export_file(
     )
 
 
-async def _file_body(path: Path) -> AsyncIterator[bytes]:
-    handle = None
-    try:
-        handle = await asyncio.to_thread(path.open, "rb")
-        while True:
-            chunk = await asyncio.to_thread(handle.read, _READ_CHUNK_SIZE)
-            if not chunk:
-                break
-            yield chunk
-    finally:
+class _ExportFileBody:
+    """Stream one materialized export file and remove it on every exit."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._handle: Any = None
+        self._closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        try:
+            self._handle = await asyncio.to_thread(self._path.open, "rb")
+            while True:
+                chunk = await asyncio.to_thread(
+                    self._handle.read, _READ_CHUNK_SIZE
+                )
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        """Close the handle (once) and remove the file and its directory."""
+        if self._closed:
+            return
+        self._closed = True
+        handle, self._handle = self._handle, None
         if handle is not None:
-            handle.close()
-        _remove_export(path)
+            with suppress(Exception):
+                handle.close()
+        _remove_export(self._path)
 
 
 def _write_export_file(store: ParquetBarStore, query: BarQuery) -> Path:
@@ -538,8 +565,12 @@ def _write_export_file(store: ParquetBarStore, query: BarQuery) -> Path:
     path = tempdir / f"{query.interval}-bars.{spec.suffix}"
 
     try:
-        batches = _iter_store_batches(store, query, limit=query.limit)
-        spec.writer(batches, path, store)
+        with _open_store_read(store, query) as read:
+            # One Manifest Snapshot and one DuckDB Reader produce the whole
+            # file. The response is not started until this function returns,
+            # so every generation failure stays a stable error envelope.
+            batches = read.iter_arrow_batches(limit=query.limit)
+            spec.writer(batches, path, store)
     except Exception:
         shutil.rmtree(tempdir, ignore_errors=True)
         raise
@@ -604,11 +635,40 @@ def _remove_export(path: Path) -> None:
 # -- helpers ----------------------------------------------------------------
 
 
+class _CleanupStreamingResponse(StreamingResponse):
+    """Run `cleanup` on every exit from the response call.
+
+    Starlette does not finalize the body iterator when the client disconnects
+    or when `send` itself fails, so a `finally` around the whole ASGI call is
+    the only place that releases the Reader/Read Lease and removes export
+    files on every path. The cleanup callables are idempotent.
+    """
+
+    def __init__(
+        self,
+        content: AsyncIterator[bytes],
+        *,
+        cleanup: Callable[[], None],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(content, **kwargs)
+        self._cleanup = cleanup
+
+    async def __call__(
+        self, scope: Any, receive: Any, send: Any
+    ) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._cleanup()
+
+
 class _ChunkSink:
     """File-like sink that collects IPC bytes until the response drains them."""
 
     def __init__(self) -> None:
         self._chunks: list[bytes] = []
+        # pyarrow's stream writer requires the file-like `closed` attribute.
         self.closed = False
 
     def write(self, data: bytes) -> int:

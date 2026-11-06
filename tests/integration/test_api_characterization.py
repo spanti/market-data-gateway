@@ -273,14 +273,19 @@ def test_json_bars_envelope_decimals_and_nanosecond_timestamps(
     assert set(payload) == {"bars"}
     messages = payload["bars"]
     assert len(messages) == 2
-    for index, message in enumerate(messages):
-        _assert_message_envelope(message, minute=index)
+    # Non-paginated JSON has no ordering contract: validate each message from
+    # its own open_ts instead of relying on physical scan order.
+    for message in messages:
+        minute_index = int(message["payload"]["open_ts"][14:16])
+        _assert_message_envelope(message, minute=minute_index)
 
     # Decimal values stay exact decimal strings, never JSON numbers/floats.
-    assert messages[0]["payload"]["open"] == precise
-    assert messages[0]["payload"]["high"] == "65010.0"
-    assert messages[0]["payload"]["volume"] == "12.34"
-    assert messages[1]["payload"]["open"] == "65000.1"
+    by_open = {message["payload"]["open"]: message for message in messages}
+    assert by_open[precise]["payload"]["high"] == "65010.0"
+    assert by_open[precise]["payload"]["volume"] == "12.34"
+    assert by_open["65000.1"]["payload"]["open_ts"].endswith(
+        "T00:01:00.000000000Z"
+    )
 
 
 # -- Arrow ------------------------------------------------------------------
@@ -312,11 +317,18 @@ def test_arrow_stream_is_table_semantically_equal_to_json(
     table = pa.ipc.open_stream(pa.BufferReader(body)).read_all()
     assert table.schema == BAR_SCHEMA
     assert table.num_rows == 2
-    assert table.column("open").to_pylist() == [
-        Decimal(precise),
-        Decimal("65000.1"),
-    ]
-    assert table_to_messages(table) == json.loads(json_body)["bars"]
+    assert sorted(table.column("open").to_pylist()) == sorted(
+        [Decimal(precise), Decimal("65000.1")]
+    )
+    # Non-paginated responses have no ordering contract; compare exact message
+    # content and multiplicity, not physical scan order.
+    assert sorted(
+        json.dumps(message, sort_keys=True)
+        for message in table_to_messages(table)
+    ) == sorted(
+        json.dumps(message, sort_keys=True)
+        for message in json.loads(json_body)["bars"]
+    )
 
 
 # -- CSV --------------------------------------------------------------------
@@ -349,10 +361,16 @@ def test_csv_text_header_and_exact_decimal_rendering(tmp_path: Path) -> None:
         ",".join(_csv_row(message))
         for message in json.loads(json_body)["bars"]
     ]
-    assert lines[1:] == expected
+    # Non-paginated output has no ordering contract; compare exact content and
+    # multiplicity instead of physical scan order.
+    assert sorted(lines[1:]) == sorted(expected)
     open_index = BAR_SCHEMA.names.index("open")
-    assert expected[0].split(",")[open_index] == precise
-    assert "e-" not in expected[0].lower()
+    precise_row = next(
+        line
+        for line in lines[1:]
+        if line.split(",")[open_index] == precise
+    )
+    assert "e-" not in precise_row.lower()
 
 
 # -- export -----------------------------------------------------------------
@@ -378,7 +396,17 @@ def test_export_formats_preserve_headers_and_table_semantics(
             "?interval=1m&format=arrow"
         )
 
-    messages = json.loads(json_body)["bars"]
+    # Non-paginated exports have no ordering contract; compare exact content
+    # and multiplicity, not physical scan order.
+    messages = sorted(
+        json.dumps(message, sort_keys=True)
+        for message in json.loads(json_body)["bars"]
+    )
+
+    def canonical(messages_: list[dict]) -> list[str]:
+        return sorted(
+            json.dumps(message, sort_keys=True) for message in messages_
+        )
 
     assert parquet_status == 200
     assert parquet_headers.get("Content-Type") == PARQUET
@@ -389,7 +417,7 @@ def test_export_formats_preserve_headers_and_table_semantics(
     parquet_table = pq.read_table(pa.BufferReader(parquet_body))
     assert parquet_table.schema == BAR_SCHEMA
     assert parquet_table.num_rows == 2
-    assert table_to_messages(parquet_table) == messages
+    assert canonical(table_to_messages(parquet_table)) == messages
 
     assert arrow_status == 200
     assert arrow_headers.get("Content-Type") == ARROW_FILE
@@ -400,7 +428,7 @@ def test_export_formats_preserve_headers_and_table_semantics(
     arrow_table = pa.ipc.open_file(pa.BufferReader(arrow_body)).read_all()
     assert arrow_table.schema == BAR_SCHEMA
     assert arrow_table.num_rows == 2
-    assert table_to_messages(arrow_table) == messages
+    assert canonical(table_to_messages(arrow_table)) == messages
 
 
 # -- errors and request ids -------------------------------------------------
@@ -539,8 +567,9 @@ def test_websocket_subscribe_event_ping_and_unsubscribe(tmp_path: Path) -> None:
     assert event["op"] == "event"
     assert event["topic"] == TOPIC
     _assert_message_envelope(event["data"])
-    # The WS Message Envelope is exactly the REST JSON form.
-    assert event["data"] == json.loads(rest_body)["bars"][0]
+    # The WS Message Envelope is exactly the REST JSON form. REST has no
+    # ordering contract, so the event must occur exactly once in the response.
+    assert json.loads(rest_body)["bars"].count(event["data"]) == 1
 
 
 def test_websocket_slow_consumer_gets_lag_notice_without_disconnect(

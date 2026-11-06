@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import (
     BaseModel,
@@ -15,6 +17,10 @@ from pydantic import (
 )
 
 from mdgw.core.schema import INTERVALS
+from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
+
+if TYPE_CHECKING:
+    from mdgw.store.duckdb_reader import DuckDBOptions
 
 # `bus.transport` only selects the single-process `GatewayRuntime` internal
 # transport. Multi-process Service Roles always use the explicit `tcp://`
@@ -139,6 +145,84 @@ class RateLimitConfig(_ConfigModel):
 
 
 
+_BYTE_SIZE_RE = re.compile(r"^\d+(?:\.\d+)?\s*(?:B|KB|MB|GB|TB)$", re.IGNORECASE)
+
+
+def _byte_size(value: str) -> str:
+    value = value.strip()
+    if _BYTE_SIZE_RE.match(value) is None:
+        msg = f"invalid byte size (expected e.g. '512MB'): {value!r}"
+        raise ValueError(msg)
+    return value
+
+
+class DuckDBConfig(_ConfigModel):
+    """Explicit resources for the DuckDB Arrow history read path.
+
+    This is not an engine switch: DuckDB is always a formal runtime
+    dependency. These settings only bound the per-read connection.
+    """
+
+    memory_limit: str = "1GB"
+    threads: int = Field(default=4, ge=1)
+    # None resolves to `<storage.root>/.duckdb_tmp` at Store startup, so spill
+    # never silently uses the process/OS default.
+    temp_directory: Path | None = None
+    max_temp_directory_size: str = "10GB"
+    arrow_batch_size: int = Field(default=65_536, ge=1)
+
+    @field_validator("memory_limit", "max_temp_directory_size")
+    @classmethod
+    def _valid_byte_size(cls, value: str) -> str:
+        return _byte_size(value)
+
+    def to_options(self) -> DuckDBOptions:
+        """Build the plain Store-level options without importing at module load."""
+        # Storage imports stay lazy so `mdgw.config` remains dependency-light.
+        from mdgw.store.duckdb_reader import DuckDBOptions  # ruff: ignore[import-outside-top-level]
+
+        return DuckDBOptions(
+            memory_limit=self.memory_limit,
+            threads=self.threads,
+            temp_directory=self.temp_directory,
+            max_temp_directory_size=self.max_temp_directory_size,
+            arrow_batch_size=self.arrow_batch_size,
+        )
+
+
+class QuarantineConfig(_ConfigModel):
+    """Independent Quarantine Dataset settings.
+
+    ``root=None`` means ``<storage.root>/quarantine``. The schema version is
+    independent of the Bar Data Contract. ``rule_version`` is the live
+    Normalization Rule Version stamped on Quarantine Records and on new Bars
+    Manifest entries; it is audit metadata, never a Schema authority.
+    """
+
+    root: Path | None = None
+    schema_version: int = Field(default=1, ge=1)
+    rule_version: str = NORMALIZATION_RULE_VERSION
+    # Whole UTC months older than this are eligible for GC. 0 keeps them
+    # forever; GC itself is always an explicit operator command (dry run by
+    # default) and never a background task.
+    retention_days: int = Field(default=30, ge=0)
+
+    @field_validator("rule_version")
+    @classmethod
+    def _non_empty_rule_version(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            msg = "quarantine rule_version must be a non-empty string"
+            raise ValueError(msg)
+        return cleaned
+
+    def resolved_root(self, storage_root: Path) -> Path:
+        """Resolve the configured root against the Storage root."""
+        if self.root is not None:
+            return Path(self.root)
+        return Path(storage_root) / "quarantine"
+
+
 class StorageConfig(_ConfigModel):
     root: Path = Path("./data")
     schema_version: int = 1
@@ -147,6 +231,23 @@ class StorageConfig(_ConfigModel):
     row_group_size: int = 1_000_000
     flush_max_bytes: int = 67_108_864
     flush_max_age_s: int = 3_600
+    duckdb: DuckDBConfig = Field(default_factory=DuckDBConfig)
+    quarantine: QuarantineConfig = Field(default_factory=QuarantineConfig)
+
+    @model_validator(mode="after")
+    def _quarantine_root_is_independent(self) -> StorageConfig:
+        """The Quarantine Dataset must never live inside the Bars Dataset."""
+        if self.quarantine.root is None:
+            return self
+        quarantine_root = Path(self.quarantine.root).resolve()
+        bars_root = (Path(self.root) / "bars").resolve()
+        if quarantine_root == bars_root or bars_root in quarantine_root.parents:
+            msg = (
+                "storage.quarantine.root must not be inside the Bars Dataset "
+                f"({bars_root})"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class RetentionConfig(_ConfigModel):
@@ -323,7 +424,7 @@ class AggregationConfig(_ConfigModel):
 
 
 class ReplayConfig(_ConfigModel):
-    """Replay Service Role endpoints and concurrency limits (DESIGN §6)."""
+    """Replay Service Role endpoints, concurrency and streaming limits."""
 
     control_bind_host: str = "127.0.0.1"
     control_port: int = Field(default=0, ge=0, le=65535)
@@ -331,6 +432,11 @@ class ReplayConfig(_ConfigModel):
     publish_port: int = Field(default=0, ge=0, le=65535)
     max_sessions: int = Field(default=4, ge=1)
     heartbeat_s: float = Field(default=1.0, gt=0)
+    # asap Replay reads the ordered DuckDB query through its Arrow batch
+    # reader. Both values are explicit memory bounds, not an engine switch:
+    # in-flight Bars are roughly `batch_size * (prefetch_batches + 2)`.
+    batch_size: int = Field(default=4_096, ge=1)
+    prefetch_batches: int = Field(default=2, ge=1)
 
 
 class GatewayConfig(_ConfigModel):

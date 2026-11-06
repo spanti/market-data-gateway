@@ -6,11 +6,20 @@ import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
 from mdgw.config import FeedConfig
 from mdgw.ingest.ccxt_feed import CcxtFeedHandler, TokenBucket, build_feed_handler
+from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
+from mdgw.quarantine import (
+    REASON_MALFORMED_ROW,
+    SOURCE_STAGE_CCXT_HISTORY_ROW,
+    SOURCE_STAGE_CCXT_LIVE_ROW,
+    QuarantineStore,
+    QuarantineWriteError,
+)
 
 UTC = timezone.utc
 SYMBOL = "BTC/USDT"
@@ -146,6 +155,28 @@ def _collect(handler: CcxtFeedHandler, count: int, timeout: float = 2.0):
         if len(bars) < count:
             time.sleep(0.01)
     return bars
+
+
+def _quarantine_store(tmp_path: Path) -> QuarantineStore:
+    return QuarantineStore(tmp_path / "quarantine")
+
+
+def _broken_quarantine_store(tmp_path: Path) -> QuarantineStore:
+    root = tmp_path / "broken-quarantine"
+    root.mkdir(parents=True)
+    # A directory at the Manifest path makes every append fail after the
+    # Parquet file has already been written.
+    (root / "_quarantine_manifest.json").mkdir()
+    return QuarantineStore(root)
+
+
+def _wait_for(predicate, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
 
 
 def test_handler_exposes_instruments_and_history_capability() -> None:
@@ -301,9 +332,12 @@ def test_ccxt_float_values_become_exact_decimals() -> None:
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), None])
-def test_non_finite_values_are_discarded(bad) -> None:
+def test_non_finite_values_are_discarded(tmp_path: Path, bad) -> None:
     exchange = FakeExchange()
-    handler = CcxtFeedHandler(config=_config(), exchange=exchange)
+    quarantine = _quarantine_store(tmp_path)
+    handler = CcxtFeedHandler(
+        config=_config(), exchange=exchange, quarantine=quarantine
+    )
     base = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
     try:
         exchange.push_for_symbols(
@@ -318,6 +352,11 @@ def test_non_finite_values_are_discarded(bad) -> None:
 
     assert [bar.open_ts for bar in bars] == [base + timedelta(minutes=1)]
     assert bars[0].close == Decimal("101.0")
+
+    (record,) = quarantine.read_records().to_pylist()
+    assert record["source_stage"] == SOURCE_STAGE_CCXT_LIVE_ROW
+    assert record["reason_code"] == REASON_MALFORMED_ROW
+    assert record["source_location"] == "ccxt:BTC/USDT:live:row=0"
 
 
 def test_mapping_row_uses_x_flag_and_decimals() -> None:
@@ -601,7 +640,9 @@ def test_history_acquires_the_rate_limiter_once_per_page() -> None:
     assert limiter.count == 3
 
 
-def test_history_skips_malformed_rows_instead_of_failing() -> None:
+def test_history_skips_malformed_rows_instead_of_failing(
+    tmp_path: Path,
+) -> None:
     now = datetime.now(tz=UTC)
     latest_closed = _minute_floor(now) - timedelta(minutes=1)
     first = latest_closed - timedelta(minutes=4)
@@ -613,8 +654,11 @@ def test_history_skips_malformed_rows_instead_of_failing() -> None:
         _row(first + timedelta(minutes=4), close=104.0),
     ]
 
+    quarantine = _quarantine_store(tmp_path)
     exchange = FakeExchange(history={SYMBOL: rows})
-    handler = CcxtFeedHandler(config=_config(), exchange=exchange)
+    handler = CcxtFeedHandler(
+        config=_config(), exchange=exchange, quarantine=quarantine
+    )
     try:
         bars = list(
             handler.fetch_history(
@@ -629,3 +673,235 @@ def test_history_skips_malformed_rows_instead_of_failing() -> None:
         first + timedelta(minutes=2),
         first + timedelta(minutes=4),
     ]
+    records = quarantine.read_records().to_pylist()
+    assert [
+        (record["source_location"], record["reason_code"])
+        for record in records
+    ] == [
+        ("ccxt:BTC/USDT:history:row=1", REASON_MALFORMED_ROW),
+        ("ccxt:BTC/USDT:history:row=3", REASON_MALFORMED_ROW),
+    ]
+    assert all(
+        record["source_stage"] == SOURCE_STAGE_CCXT_HISTORY_ROW
+        for record in records
+    )
+
+
+# -- Quarantine of malformed CCXT rows --------------------------------------
+
+
+def test_malformed_live_row_is_quarantined_then_skipped(
+    tmp_path: Path,
+) -> None:
+    exchange = FakeExchange()
+    quarantine = _quarantine_store(tmp_path)
+    handler = CcxtFeedHandler(
+        config=_config(), exchange=exchange, quarantine=quarantine
+    )
+    base = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+    try:
+        exchange.push_for_symbols(
+            {
+                SYMBOL: [
+                    _row(base, close="oops", closed=True),
+                    _row(
+                        base + timedelta(minutes=1),
+                        close=101.0,
+                        closed=True,
+                    ),
+                ]
+            }
+        )
+        bars = _collect(handler, 1)
+    finally:
+        handler.close()
+
+    assert [bar.open_ts for bar in bars] == [base + timedelta(minutes=1)]
+    (record,) = quarantine.read_records().to_pylist()
+    assert record["source_stage"] == SOURCE_STAGE_CCXT_LIVE_ROW
+    assert record["reason_code"] == REASON_MALFORMED_ROW
+    assert record["source_location"] == "ccxt:BTC/USDT:live:row=0"
+    assert record["feed"] == "binance_spot"
+    assert record["instrument_id"] == INSTRUMENT
+    assert record["interval"] == "1m"
+    assert record["rule_version"] == NORMALIZATION_RULE_VERSION
+    assert record["open_ts"] == base
+    assert "oops" in record["raw_record"]
+
+
+def test_default_rule_version_matches_the_normalization_single_source(
+    tmp_path: Path,
+) -> None:
+    """A handler built without an explicit rule version must not claim "1"."""
+    exchange = FakeExchange()
+    quarantine = _quarantine_store(tmp_path)
+    handler = CcxtFeedHandler(
+        config=_config(), exchange=exchange, quarantine=quarantine
+    )
+    base = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+    try:
+        exchange.push_for_symbols(
+            {
+                SYMBOL: [
+                    _row(base, close="oops", closed=True),
+                    _row(base + timedelta(minutes=1), closed=True),
+                ]
+            }
+        )
+        _collect(handler, 1)
+    finally:
+        handler.close()
+
+    (record,) = quarantine.read_records().to_pylist()
+    assert record["rule_version"] == NORMALIZATION_RULE_VERSION
+    assert record["rule_version"] == "polars-1"
+
+
+def test_configured_rule_version_still_reaches_the_quarantine_record(
+    tmp_path: Path,
+) -> None:
+    exchange = FakeExchange()
+    quarantine = _quarantine_store(tmp_path)
+    handler = CcxtFeedHandler(
+        config=_config(),
+        exchange=exchange,
+        quarantine=quarantine,
+        rule_version="configured-rules-7",
+    )
+    base = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+    try:
+        exchange.push_for_symbols(
+            {
+                SYMBOL: [
+                    _row(base, close="oops", closed=True),
+                    _row(base + timedelta(minutes=1), closed=True),
+                ]
+            }
+        )
+        _collect(handler, 1)
+    finally:
+        handler.close()
+
+    (record,) = quarantine.read_records().to_pylist()
+    assert record["rule_version"] == "configured-rules-7"
+
+
+def test_build_feed_handler_defaults_to_the_single_source_rule_version() -> None:
+    handler = build_feed_handler(_config(), exchange=FakeExchange())
+
+    assert handler.rule_version == NORMALIZATION_RULE_VERSION
+
+
+def test_attach_quarantine_without_a_version_keeps_the_handler_default(
+    tmp_path: Path,
+) -> None:
+    from mdgw.ingest.composite import attach_quarantine
+
+    handler = build_feed_handler(_config(), exchange=FakeExchange())
+    attach_quarantine(handler, _quarantine_store(tmp_path))
+
+    assert handler.rule_version == NORMALIZATION_RULE_VERSION
+
+
+def test_malformed_live_row_stops_the_source_when_quarantine_write_fails(
+    tmp_path: Path,
+) -> None:
+    exchange = FakeExchange()
+    quarantine = _broken_quarantine_store(tmp_path)
+    handler = CcxtFeedHandler(
+        config=_config(), exchange=exchange, quarantine=quarantine
+    )
+    base = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+    try:
+        # Start the background watcher first; it processes pushed payloads.
+        assert list(handler.iter_bars()) == []
+        exchange.push_for_symbols(
+            {SYMBOL: [_row(base, close="oops", closed=True)]}
+        )
+        assert _wait_for(lambda: quarantine.stats()["write_failures"] == 1)
+        with pytest.raises(QuarantineWriteError):
+            list(handler.iter_bars())
+
+        # The source cannot advance past the failed record: a later valid row
+        # is not silently consumed either.
+        exchange.push_for_symbols(
+            {SYMBOL: [_row(base + timedelta(minutes=1), close=101.0, closed=True)]}
+        )
+        time.sleep(0.1)
+        with pytest.raises(QuarantineWriteError):
+            list(handler.iter_bars())
+    finally:
+        handler.close()
+
+    assert quarantine.stats()["write_failures"] == 1
+    assert quarantine.stats()["records_written"] == 0
+    assert list(quarantine.root.glob("year=*/month=*/*.parquet")) == []
+
+
+def test_malformed_history_row_write_failure_stops_history(
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(tz=UTC)
+    latest_closed = _minute_floor(now) - timedelta(minutes=1)
+    first = latest_closed - timedelta(minutes=2)
+    rows = [
+        _row(first, close=100.0),
+        [_ms(first + timedelta(minutes=1)), "oops", 1, 1, 1, 1],
+        _row(first + timedelta(minutes=2), close=102.0),
+    ]
+    quarantine = _broken_quarantine_store(tmp_path)
+    exchange = FakeExchange(history={SYMBOL: rows})
+    handler = CcxtFeedHandler(
+        config=_config(), exchange=exchange, quarantine=quarantine
+    )
+    try:
+        with pytest.raises(QuarantineWriteError):
+            list(
+                handler.fetch_history(
+                    INSTRUMENT,
+                    "1m",
+                    first,
+                    latest_closed + timedelta(minutes=1),
+                )
+            )
+    finally:
+        handler.close()
+
+    assert quarantine.stats()["write_failures"] == 1
+    assert quarantine.stats()["records_written"] == 0
+
+
+def test_queue_overflow_is_not_quarantined(tmp_path: Path) -> None:
+    exchange = FakeExchange()
+    quarantine = _quarantine_store(tmp_path)
+    handler = CcxtFeedHandler(
+        config=_config(),
+        exchange=exchange,
+        quarantine=quarantine,
+        queue_maxsize=1,
+    )
+    base = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+    try:
+        assert list(handler.iter_bars()) == []
+        for index in range(3):
+            exchange.push_for_symbols(
+                {
+                    SYMBOL: [
+                        _row(
+                            base + timedelta(minutes=index),
+                            close=100.0 + index,
+                            closed=True,
+                        )
+                    ]
+                }
+            )
+        assert _wait_for(lambda: handler.dropped_bars >= 1)
+        bars = _collect(handler, 5, timeout=0.5)
+    finally:
+        handler.close()
+
+    assert handler.dropped_bars == 2
+    assert len(bars) == 1
+    assert bars[0].open_ts == base + timedelta(minutes=2)
+    assert quarantine.stats()["records_written"] == 0
+    assert quarantine.read_records().num_rows == 0

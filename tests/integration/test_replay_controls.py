@@ -244,8 +244,33 @@ def _wait_until(
     raise AssertionError(f"timed out waiting for {description}")
 
 
+class _GatedRead:
+    """StoreRead proxy whose first query waits behind a test-controlled gate."""
+
+    def __init__(self, inner: Any, gate: threading.Event) -> None:
+        self._inner = inner
+        self._gate = gate
+
+    def _wait(self) -> None:
+        assert self._gate.wait(5), "test never released the read gate"
+
+    def iter_replay_batches(
+        self, queries, *, batch_size=None, cancellation=None
+    ):
+        self._wait()
+        yield from self._inner.iter_replay_batches(
+            queries, batch_size=batch_size, cancellation=cancellation
+        )
+
+    def close(self) -> None:
+        self._inner.close()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class _BlockingReadStore:
-    """Proxy whose Parquet read waits behind a test-controlled gate."""
+    """Proxy whose Replay read waits behind a test-controlled gate."""
 
     def __init__(self, inner: ParquetBarStore, gate: threading.Event) -> None:
         self._inner = inner
@@ -255,9 +280,8 @@ class _BlockingReadStore:
     def dataset_root(self) -> Path:
         return self._inner.dataset_root
 
-    def iter_batches(self, **kwargs: Any):
-        assert self._gate.wait(5), "test never released the read gate"
-        yield from self._inner.iter_batches(**kwargs)
+    def open_read(self, **kwargs: Any):
+        return _GatedRead(self._inner.open_read(**kwargs), self._gate)
 
 
 class _GatePublisher:
@@ -614,7 +638,97 @@ def test_step_control_is_not_blocked_by_a_slow_publish(tmp_path: Path) -> None:
         service.close()
 
 
+def test_stop_waits_for_an_in_flight_publish(tmp_path: Path) -> None:
+    store = ParquetBarStore(tmp_path / "data")
+    _populate_minutes(store, range(3))
+    publisher = _GatePublisher()
+    service = ReplayService(
+        store,
+        publish_bar=publisher.publish_bar,
+        publish_event=publisher.publish_event,
+        session_id_factory=lambda: "rpl-stop-barrier",
+    )
+    session_id = service.create_session(_spec(mode="asap"))
+    try:
+        assert publisher.entered.wait(5), "the worker never published"
+
+        returned = threading.Event()
+
+        def stop() -> None:
+            service.stop_session(session_id)
+            returned.set()
+
+        thread = threading.Thread(target=stop, daemon=True)
+        thread.start()
+        # stop() must not return while its first Bar is still being published.
+        assert not returned.wait(0.2), "stop returned during an in-flight publish"
+
+        publisher.release.set()
+        assert returned.wait(5), "stop did not return after the publish finished"
+        assert service.wait_session(session_id, timeout=10)
+
+        # The in-flight Bar completed before stop returned; nothing after it.
+        assert _close_minutes(_market(publisher.messages, session_id)) == [1]
+        end = _end(publisher.messages, session_id)
+        assert end["reason"] == "stopped"
+        assert end["bars_sent"] == 1
+    finally:
+        publisher.release.set()
+        service.stop_session(session_id)
+        service.wait_session(session_id, timeout=10)
+        service.close()
+
+
 # -- seek ------------------------------------------------------------------
+
+
+def test_seek_waits_for_an_in_flight_publish_and_drops_the_old_generation(
+    tmp_path: Path,
+) -> None:
+    store = ParquetBarStore(tmp_path / "data")
+    _populate_minutes(store, range(3))
+    publisher = _GatePublisher()
+    service = ReplayService(
+        store,
+        publish_bar=publisher.publish_bar,
+        publish_event=publisher.publish_event,
+        session_id_factory=lambda: "rpl-seek-barrier",
+    )
+    session_id = service.create_session(_spec(mode="step"))
+    try:
+        service.step_session(session_id, 3)
+        assert publisher.entered.wait(5), "the worker never published"
+
+        returned = threading.Event()
+        errors: list[BaseException] = []
+
+        def seek() -> None:
+            try:
+                service.seek_session(session_id, _ns(1))
+            except BaseException as exc:  # noqa: BLE001 - asserted below
+                errors.append(exc)
+            finally:
+                returned.set()
+
+        thread = threading.Thread(target=seek, daemon=True)
+        thread.start()
+        # seek() must not return while its generation's Bar is being published.
+        assert not returned.wait(0.2), "seek returned during an in-flight publish"
+
+        publisher.release.set()
+        assert returned.wait(5), "seek did not return after the publish finished"
+        assert errors == []
+
+        # The in-flight Bar belonged to the old generation and completed before
+        # seek returned. Nothing from that generation may follow it.
+        time.sleep(0.2)
+        assert _close_minutes(_market(publisher.messages, session_id)) == [1]
+        assert service.session_bars_sent(session_id) == 1
+    finally:
+        publisher.release.set()
+        service.stop_session(session_id)
+        service.wait_session(session_id, timeout=10)
+        service.close()
 
 
 def test_seek_while_running_is_rejected(tmp_path: Path) -> None:

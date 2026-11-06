@@ -5,7 +5,7 @@ The import is deliberately offline and idempotent:
 * each archive ZIP is verified with its `.CHECKSUM` before any Bar is written;
 * a missing archive (404 or absent locally) is a `missing_file`, not a failure;
   a missing/mismatched CHECKSUM or a malformed file is a `failure`;
-* 1m Bars are normalized through the same `normalize_bar` used by live ingest,
+* 1m Bars are normalized through the same `normalize_batch` used by live ingest,
   then fed in chronological order to `BarAggregator` so 5m/15m/1h/1d parents
   only exist when their whole period is present;
 * the shared `merge_bar_batch` helper skips identical stored Bars and re-appends
@@ -26,12 +26,16 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mdgw.archive.binance import (
     SUPPORTED_ARCHIVE_INTERVAL,
+    ArchiveChecksumError,
+    ArchiveFieldError,
     ArchiveFormatError,
     ArchivePeriod,
+    ArchiveTimestampUnitError,
     archive_csv_filename,
     parse_checksum,
     parse_kline_csv,
@@ -46,11 +50,22 @@ from mdgw.backfill_common import (
     merge_bar_batch,
 )
 from mdgw.core.time import datetime_to_ns, to_utc, utc_now
-from mdgw.normalize.bar import normalize_bar
+from mdgw.normalize.batch import normalize_batch
+from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
+from mdgw.quarantine import (
+    REASON_ARCHIVE_CHECKSUM_MISMATCH,
+    REASON_ARCHIVE_FIELD_ERROR,
+    REASON_ARCHIVE_FORMAT_ERROR,
+    REASON_ARCHIVE_TIME_UNIT_UNSUPPORTED,
+    SOURCE_STAGE_ARCHIVE_FILE,
+    QuarantineRecord,
+    QuarantineStore,
+    QuarantineWriteError,
+)
 
 if TYPE_CHECKING:
     from mdgw.aggregate import BarAggregator
-    from mdgw.core.bar import RawBar
+    from mdgw.core.bar import Bar, RawBar
     from mdgw.state.high_water_mark import HighWaterMarkStore
     from mdgw.store.parquet_dataset import ParquetBarStore
 
@@ -106,6 +121,8 @@ class _ImportContext:
     cutoff_ns: int | None
     ingest_ts: datetime
     requested_granularity: str
+    quarantine: QuarantineStore
+    rule_version: str
 
 
 # The public keyword-only API mirrors the CLI options; an options object would
@@ -127,8 +144,17 @@ def import_archive(  # ruff: ignore[too-many-arguments]
     now: datetime | None = None,
     ingest_ts: datetime | None = None,
     today: date | None = None,
+    quarantine: QuarantineStore | None = None,
+    rule_version: str = NORMALIZATION_RULE_VERSION,
 ) -> ArchiveReport:
-    """Import all archive files covering `[start, end]` for every Instrument."""
+    """Import all archive files covering `[start, end]` for every Instrument.
+
+    A whole archive file is rejected from the canonical Dataset on checksum,
+    structure, key-field or source-time-unit failures, and one Quarantine
+    record locating the file/instrument/period is written. ``quarantine``
+    defaults to ``<store.root>/quarantine`` for direct callers; the operator
+    CLI passes the configured Storage Quarantine Store.
+    """
     if interval != SUPPORTED_ARCHIVE_INTERVAL:
         msg = (
             f"v1 archive import only supports {SUPPORTED_ARCHIVE_INTERVAL!r}, "
@@ -149,6 +175,9 @@ def import_archive(  # ruff: ignore[too-many-arguments]
     )
 
     report = ArchiveReport()
+    quarantine_store = quarantine or QuarantineStore(
+        Path(store.root) / "quarantine"
+    )
     context = _ImportContext(
         report=report,
         store=store,
@@ -163,6 +192,8 @@ def import_archive(  # ruff: ignore[too-many-arguments]
         cutoff_ns=cutoff_ns,
         ingest_ts=ingest_time,
         requested_granularity=granularity,
+        quarantine=quarantine_store,
+        rule_version=rule_version,
     )
     logger.info(
         "archive import started; stop the collector while importing",
@@ -219,6 +250,13 @@ def _import_period(
         )
     except (ArchiveFetchError, ArchiveFormatError, ValueError) as exc:
         _failure(report, instrument, context.feed, f"{filename}: {exc}")
+        _quarantine_archive_file(
+            context=context,
+            instrument=instrument,
+            period=period,
+            reason_code=_archive_reason_code(exc),
+            error=exc,
+        )
         return
 
     report.files += 1
@@ -229,16 +267,20 @@ def _import_period(
         return
 
     try:
-        bars = [
-            normalize_bar(raw, feed=context.feed, ingest_ts=context.ingest_ts)
-            for raw in selected
-        ]
-    except ValueError as exc:
+        bars = _normalize_bars(context, selected)
+    except ArchiveFieldError as exc:
         _failure(
             report,
             instrument,
             context.feed,
             f"{filename}: normalize failed: {exc}",
+        )
+        _quarantine_archive_file(
+            context=context,
+            instrument=instrument,
+            period=period,
+            reason_code=REASON_ARCHIVE_FIELD_ERROR,
+            error=exc,
         )
         return
 
@@ -262,7 +304,8 @@ def _import_period(
         return
 
     context.store.write_bars(
-        result.written, asset_class=instrument.asset_class
+        result.written,
+        asset_class=instrument.asset_class,
     )
     report.bars_written += len(result.written)
 
@@ -366,6 +409,30 @@ def _select_bars(
     return selected
 
 
+def _normalize_bars(
+    context: _ImportContext, raw_bars: list[RawBar]
+) -> list[Bar]:
+    """Normalize one whole archive file with the shared Polars rules.
+
+    Any rejection fails the whole file, preserving the previous archive
+    atomicity. The message deliberately carries only the stable Reason Codes,
+    never rejected values or engine details; the Quarantine Record keeps the
+    structured diagnostics.
+    """
+    batch = normalize_batch(
+        raw_bars, feed=context.feed, ingest_ts=context.ingest_ts
+    )
+    if batch.rejections:
+        reasons = ", ".join(
+            sorted({rejection.reason_code for rejection in batch.rejections})
+        )
+        msg = (
+            f"Normalization rejected {len(batch.rejections)} row(s): {reasons}"
+        )
+        raise ArchiveFieldError(msg)
+    return batch.bars
+
+
 def _load_verified_bars(
     *,
     context: _ImportContext,
@@ -384,12 +451,12 @@ def _load_verified_bars(
             "missing CHECKSUM for "
             f"{period.filename(instrument.symbol, context.interval)}"
         )
-        raise ArchiveFormatError(msg)
+        raise ArchiveChecksumError(msg)
     expected = parse_checksum(checksum_text)
     actual = hashlib.sha256(data).hexdigest()
     if actual != expected:
         msg = f"SHA-256 mismatch: expected {expected}, got {actual}"
-        raise ArchiveFormatError(msg)
+        raise ArchiveChecksumError(msg)
 
     csv_data = read_zip_csv(
         data,
@@ -406,6 +473,62 @@ def _load_verified_bars(
     # Chronological, de-duplicated order is required by BarAggregator.
     by_open = {bar.open_ts: bar for bar in raw_bars}
     return [by_open[key] for key in sorted(by_open)]
+
+
+def _archive_reason_code(error: BaseException) -> str:
+    """Map one archive validation failure to the stable Reason vocabulary."""
+    if isinstance(error, ArchiveChecksumError):
+        return REASON_ARCHIVE_CHECKSUM_MISMATCH
+    if isinstance(error, ArchiveTimestampUnitError):
+        return REASON_ARCHIVE_TIME_UNIT_UNSUPPORTED
+    if isinstance(error, ArchiveFieldError):
+        return REASON_ARCHIVE_FIELD_ERROR
+    return REASON_ARCHIVE_FORMAT_ERROR
+
+
+def _quarantine_archive_file(
+    *,
+    context: _ImportContext,
+    instrument: ArchiveInstrument,
+    period: ArchivePeriod,
+    reason_code: str,
+    error: BaseException,
+) -> None:
+    """Record one whole-file rejection without masking the archive failure.
+
+    The record locates the source file, Instrument and period. If the
+    Quarantine write fails, that is reported as an archive failure (the file
+    already failed validation and nothing was written); it is never a silent
+    skip.
+    """
+    filename = period.filename(instrument.symbol, context.interval)
+    record = QuarantineRecord(
+        source_stage=SOURCE_STAGE_ARCHIVE_FILE,
+        reason_code=reason_code,
+        rule_version=context.rule_version,
+        source_location=f"archive:file={filename}",
+        details={
+            "filename": filename,
+            "symbol": instrument.symbol,
+            "market_type": context.market_type,
+            "period_start": period.start.isoformat(),
+            "period_end": period.end.isoformat(),
+            "error_type": type(error).__name__,
+            "message": str(error),
+        },
+        feed=context.feed,
+        instrument_id=instrument.instrument_id,
+        interval=context.interval,
+    )
+    try:
+        context.quarantine.write_records([record])
+    except QuarantineWriteError as quarantine_error:
+        _failure(
+            context.report,
+            instrument,
+            context.feed,
+            f"{filename}: quarantine write failed: {quarantine_error}",
+        )
 
 
 def _failure(

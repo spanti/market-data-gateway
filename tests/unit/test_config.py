@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from mdgw.config import FeedConfig, GatewayConfig, load_config
+from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -76,6 +77,70 @@ def test_aggregation_rejects_unknown_interval() -> None:
     with pytest.raises(ValidationError, match="unsupported Bar Interval"):
         GatewayConfig.model_validate(
             {"aggregation": {"intervals": ["1m", "5m", "2m"]}}
+        )
+
+
+def test_quarantine_config_defaults_to_storage_subdirectory() -> None:
+    quarantine = GatewayConfig().storage.quarantine
+    assert quarantine.root is None
+    assert quarantine.schema_version == 1
+    assert quarantine.rule_version == NORMALIZATION_RULE_VERSION
+    assert quarantine.resolved_root(Path("data")) == Path("data/quarantine")
+
+
+def test_quarantine_config_accepts_an_independent_root_and_version() -> None:
+    config = GatewayConfig.model_validate(
+        {
+            "storage": {
+                "quarantine": {
+                    "root": "audit/quarantine",
+                    "schema_version": 2,
+                    "rule_version": "rules-2",
+                }
+            }
+        }
+    )
+    quarantine = config.storage.quarantine
+    assert quarantine.resolved_root(Path("ignored")) == Path("audit/quarantine")
+    assert quarantine.schema_version == 2
+    assert quarantine.rule_version == "rules-2"
+
+
+def test_quarantine_rejects_an_empty_rule_version() -> None:
+    with pytest.raises(ValidationError, match="rule_version"):
+        GatewayConfig.model_validate(
+            {"storage": {"quarantine": {"rule_version": "  "}}}
+        )
+
+
+def test_quarantine_retention_defaults_to_30_days_and_allows_forever() -> None:
+    assert GatewayConfig().storage.quarantine.retention_days == 30
+
+    forever = GatewayConfig.model_validate(
+        {"storage": {"quarantine": {"retention_days": 0}}}
+    )
+    assert forever.storage.quarantine.retention_days == 0
+
+    configured = GatewayConfig.model_validate(
+        {"storage": {"quarantine": {"retention_days": 90}}}
+    )
+    assert configured.storage.quarantine.retention_days == 90
+
+    with pytest.raises(ValidationError):
+        GatewayConfig.model_validate(
+            {"storage": {"quarantine": {"retention_days": -1}}}
+        )
+
+
+def test_quarantine_root_must_not_be_inside_the_bars_dataset() -> None:
+    with pytest.raises(ValidationError, match="must not be inside"):
+        GatewayConfig.model_validate(
+            {
+                "storage": {
+                    "root": "data",
+                    "quarantine": {"root": "data/bars/quarantine"},
+                }
+            }
         )
 
 
@@ -234,6 +299,8 @@ def test_replay_config_defaults() -> None:
     assert replay.publish_port == 0
     assert replay.max_sessions == 4
     assert replay.heartbeat_s == 1.0
+    assert replay.batch_size == 4_096
+    assert replay.prefetch_batches == 2
 
 
 def test_repository_toml_declares_replay() -> None:
@@ -246,9 +313,13 @@ def test_repository_toml_declares_replay() -> None:
     assert raw["replay"]["publish_port"] == 0
     assert raw["replay"]["max_sessions"] == 4
     assert raw["replay"]["heartbeat_s"] == 1.0
+    assert raw["replay"]["batch_size"] == 4_096
+    assert raw["replay"]["prefetch_batches"] == 2
 
     config = load_config(PROJECT_ROOT / "config" / "gateway.toml")
     assert config.replay.max_sessions == 4
+    assert config.replay.batch_size == 4_096
+    assert config.replay.prefetch_batches == 2
 
 
 @pytest.mark.parametrize(
@@ -258,6 +329,8 @@ def test_repository_toml_declares_replay() -> None:
         {"replay": {"publish_port": -1}},
         {"replay": {"max_sessions": 0}},
         {"replay": {"heartbeat_s": 0}},
+        {"replay": {"batch_size": 0}},
+        {"replay": {"prefetch_batches": 0}},
     ],
 )
 def test_replay_config_rejects_invalid_values(payload: dict) -> None:

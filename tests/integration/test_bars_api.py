@@ -131,12 +131,13 @@ def test_bars_arrow_streams_the_same_semantics_as_json(tmp_path: Path) -> None:
     assert table.schema == BAR_SCHEMA
     assert table.num_rows == 2
     messages = json.loads(json_body)["bars"]
-    assert table.column("open").to_pylist() == [
+    # Non-paginated responses have no ordering contract.
+    assert sorted(table.column("open").to_pylist()) == sorted(
         Decimal(bar["payload"]["open"]) for bar in messages
-    ]
-    assert table.column("open_ts").to_pylist() == [
+    )
+    assert sorted(table.column("open_ts").to_pylist()) == sorted(
         datetime(2024, 1, 1, 0, minute, tzinfo=UTC) for minute in (0, 1)
-    ]
+    )
 
 
 def test_bars_csv_streams_decimals_as_exact_text(tmp_path: Path) -> None:
@@ -390,10 +391,15 @@ def test_json_arrow_csv_and_exports_return_the_same_semantics(tmp_path: Path) ->
         for message in from_json
     ]
 
-    assert from_arrow == from_json
-    assert from_parquet == from_json
-    assert from_arrow_file == from_json
-    assert from_csv_messages == from_json_projection
+    # Non-paginated responses have no ordering contract; compare exact content
+    # and multiplicity instead of physical scan order.
+    def canonical(messages: list[dict]) -> list[str]:
+        return sorted(json.dumps(message, sort_keys=True) for message in messages)
+
+    assert canonical(from_arrow) == canonical(from_json)
+    assert canonical(from_parquet) == canonical(from_json)
+    assert canonical(from_arrow_file) == canonical(from_json)
+    assert canonical(from_csv_messages) == canonical(from_json_projection)
 
 
 def test_json_limit_bounds_the_range_too_large_check(

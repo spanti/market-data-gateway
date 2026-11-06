@@ -5,7 +5,10 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from mdgw.config import load_config
+from mdgw.core.bar import RawBar
 from mdgw.core.time import datetime_to_ns, ns_to_iso
 from mdgw.ingest.fake import BarInput, FakeFeedHandler
 from mdgw.runtime import GatewayRuntime
@@ -110,7 +113,7 @@ def test_restart_backfills_from_hwm_and_is_idempotent(tmp_path: Path) -> None:
 
         # start() backfilled, without publishing historical Bars.
         assert resumed.received_bar_count == 0
-        assert [row["open_ts"] for row in _rows(resumed, "1m")] == [
+        assert sorted(row["open_ts"] for row in _rows(resumed, "1m")) == [
             _at(minute=minute) for minute in range(10)
         ]
         assert sorted(row["open_ts"] for row in _rows(resumed, "5m")) == [
@@ -278,6 +281,45 @@ def test_ingested_bars_are_never_duplicated(tmp_path: Path) -> None:
         runtime.ingest()
         counts = Counter(row["open_ts"] for row in _rows(runtime, "1m"))
         assert all(count == 1 for count in counts.values())
+
+
+class _RejectingHistoryFeed:
+    """History source whose one Bar must fail Normalization."""
+
+    name = "fake"
+    supports_history = False
+    instrument_ids = (INSTRUMENT,)
+
+    def iter_bars(self):
+        return iter(())
+
+    def fetch_history(self, instrument_id, interval, start, end):
+        return (
+            RawBar(
+                instrument_id=INSTRUMENT,
+                interval="1m",
+                open_ts=_at(minute=0),
+                open=1.5,  # type: ignore[arg-type] - deliberately invalid
+                high=Decimal("2"),
+                low=Decimal("1"),
+                close=Decimal("1.5"),
+                volume=Decimal("1"),
+            ),
+        )
+
+
+def test_backfill_raises_when_history_normalization_rejects_a_bar(
+    tmp_path: Path,
+) -> None:
+    feed = _RejectingHistoryFeed()
+    with GatewayRuntime(
+        feed_handler=feed, config=_config(), data_root=tmp_path
+    ) as runtime:
+        runtime.start()
+        feed.supports_history = True
+        with pytest.raises(ValueError, match="floats are forbidden"):
+            runtime.backfill(now=_at(minute=10))
+        assert _rows(runtime, "1m") == []
 
 
 def test_backfill_rejects_a_forming_history_bar(tmp_path: Path) -> None:

@@ -8,7 +8,7 @@ import pyarrow as pa
 
 from mdgw.core.schema import BAR_SCHEMA
 from mdgw.ingest.fake import BarInput, FakeFeedHandler
-from mdgw.normalize.bar import normalize_bar
+from mdgw.normalize.batch import normalize_batch
 from mdgw.streaming import StreamingInterface
 
 
@@ -27,11 +27,11 @@ def test_zmq_inproc_carries_arrow_ipc_bars() -> None:
             )
         ],
     )
-    bar = normalize_bar(
-        next(feed.iter_bars()),
+    (bar,) = normalize_batch(
+        [next(feed.iter_bars())],
         feed=feed.name,
         ingest_ts=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
-    )
+    ).bars
 
     received: list[tuple[str, pa.Table]] = []
     endpoint = f"inproc://mdgw-test-{uuid4().hex}"

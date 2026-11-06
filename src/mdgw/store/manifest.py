@@ -7,6 +7,7 @@ ticket, so every entry is normalized from the file system when it is read.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -14,6 +15,8 @@ from typing import Any
 from urllib.parse import unquote
 
 import pyarrow.parquet as pq
+
+from mdgw.normalize.version import normalize_rule_versions
 
 DATASET_NAME = "bars"
 MANIFEST_NAME = "_manifest.json"
@@ -130,6 +133,11 @@ def normalize_manifest_entry(
             "created_ns": int(created_ns or 0),
             "partition": partition,
             "max_ingest_ns": int(entry.get("max_ingest_ns") or end_ns or 0),
+            # Audit metadata, never a Schema authority. A missing value means
+            # "legacy/unknown" and must never make the entry unreadable.
+            "rule_versions": list(
+                normalize_rule_versions(entry.get("rule_versions"))
+            ),
         }
     )
     return normalized
@@ -146,6 +154,24 @@ def read_manifest(dataset_root: Path) -> dict[str, Any]:
 
 def write_manifest(dataset_root: Path, manifest: dict[str, Any]) -> None:
     write_json_atomic(Path(dataset_root) / MANIFEST_NAME, manifest)
+
+
+MISSING_MANIFEST_GENERATION = "missing"
+
+
+def manifest_generation(dataset_root: Path) -> str:
+    """Stable identity of the current Manifest bytes.
+
+    A content hash (rather than size+mtime) cannot collide when a writer
+    replaces the Manifest with identical-size content inside one timestamp
+    tick. Two reads with the same generation see the same active file set.
+    """
+    path = Path(dataset_root) / MANIFEST_NAME
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return MISSING_MANIFEST_GENERATION
+    return hashlib.sha256(raw).hexdigest()
 
 
 def read_dataset_descriptor(dataset_root: Path) -> dict[str, Any]:

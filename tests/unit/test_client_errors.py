@@ -8,9 +8,13 @@ from decimal import Decimal
 
 import pytest
 
-from mdgw_client import ClientError, GatewayClient
+from mdgw_client import ClientError, GatewayClient, ReplayFailedError
 from mdgw_client.client import derive_ws_url
-from mdgw_client.errors import error_from_control_response, error_from_rest_body
+from mdgw_client.errors import (
+    error_from_control_response,
+    error_from_rest_body,
+    replay_error_from_end_of_session,
+)
 from mdgw_client.history import build_bars_url
 
 BTC = "binance:BTC/USDT"
@@ -80,6 +84,112 @@ def test_control_error_response_maps_to_client_error() -> None:
 def test_malformed_control_error_is_a_protocol_error() -> None:
     error = error_from_control_response({"ok": False, "error": "nope"})
     assert error.code == "protocol_error"
+
+
+def test_replay_error_end_of_session_maps_to_replay_failed_error() -> None:
+    error = replay_error_from_end_of_session(
+        {
+            "op": "end_of_session",
+            "session_id": "rpl-1",
+            "reason": "error",
+            "bars_sent": 3,
+            "error": {
+                "code": "schema_version_mismatch",
+                "message": "Dataset schema version is not supported",
+            },
+        }
+    )
+    assert isinstance(error, ReplayFailedError)
+    assert isinstance(error, ClientError)
+    assert error.code == "schema_version_mismatch"
+    assert error.message == "Dataset schema version is not supported"
+    assert error.bars_sent == 3
+
+
+def test_malformed_replay_error_end_of_session_is_a_protocol_error() -> None:
+    error = replay_error_from_end_of_session(
+        {"op": "end_of_session", "reason": "error", "error": "nope"}
+    )
+    assert isinstance(error, ReplayFailedError)
+    assert error.code == "protocol_error"
+    assert error.bars_sent is None
+
+
+def test_replay_error_eos_raises_a_sticky_failure_not_stop_iteration() -> None:
+    from mdgw_client.replay import ReplaySession, _SessionChannel
+
+    class _StubClient:
+        def _release_session(self, _session) -> None:
+            pass
+
+    channel = _SessionChannel(10)
+    session = ReplaySession(
+        client=_StubClient(),  # type: ignore[arg-type] - close-only dependency
+        session_id="rpl-sticky",
+        publish_endpoint="tcp://127.0.0.1:1",
+        channel=channel,
+    )
+    event = {
+        "op": "end_of_session",
+        "session_id": "rpl-sticky",
+        "reason": "error",
+        "bars_sent": 2,
+        "error": {"code": "internal_error", "message": "replay read failed"},
+    }
+    channel.offer(
+        ("replay.rpl-sticky.control", json.dumps(event).encode()), critical=True
+    )
+    try:
+        with pytest.raises(ReplayFailedError) as first:
+            session.next_event(timeout=1.0)
+        assert first.value.code == "internal_error"
+        assert first.value.message == "replay read failed"
+        assert first.value.bars_sent == 2
+        assert session.ended is True
+        assert session.end_of_session == event
+
+        # The failure is sticky: a repeated call never looks like normal
+        # replay completion (`StopIteration`), including ``__iter__``.
+        with pytest.raises(ReplayFailedError) as second:
+            session.next_event(timeout=1.0)
+        assert second.value.code == "internal_error"
+        with pytest.raises(ReplayFailedError):
+            list(session)
+    finally:
+        session.close()
+
+
+def test_a_normal_end_of_session_still_raises_stop_iteration() -> None:
+    from mdgw_client.replay import ReplaySession, _SessionChannel
+
+    class _StubClient:
+        def _release_session(self, _session) -> None:
+            pass
+
+    channel = _SessionChannel(10)
+    session = ReplaySession(
+        client=_StubClient(),  # type: ignore[arg-type] - close-only dependency
+        session_id="rpl-normal",
+        publish_endpoint="tcp://127.0.0.1:1",
+        channel=channel,
+    )
+    event = {
+        "op": "end_of_session",
+        "session_id": "rpl-normal",
+        "reason": "exhausted",
+        "bars_sent": 0,
+    }
+    channel.offer(
+        ("replay.rpl-normal.control", json.dumps(event).encode()), critical=True
+    )
+    try:
+        with pytest.raises(StopIteration):
+            session.next_event(timeout=1.0)
+        assert session.end_of_session == event
+        with pytest.raises(StopIteration):
+            session.next_event(timeout=1.0)
+    finally:
+        session.close()
 
 
 def test_bars_url_encodes_interval_instrument_and_timestamps() -> None:

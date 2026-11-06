@@ -55,7 +55,7 @@ _Avoid_: Roll-up、Resample（pandas 的实现名）、Downsample
 _Avoid_: Origin、Provider
 
 **Revision**:
-同一根 Bar 因源修正被重新发布时自增的版本号。读取方按 `(instrument_id, interval, open_ts)` 取最大 revision。
+同一根 Bar 因源修正被重新发布时自增的版本号。Dataset 可保存同一 `(instrument_id, interval, open_ts)` 的多个 Revision；需要唯一 Bar 系列的读取方才保留最大 revision。
 _Avoid_: Version、Correction（泛指时）
 
 **Event Time** (`event_ts`):
@@ -73,6 +73,24 @@ _Avoid_: Watermark（在 Flink/Beam 中特指事件时间完整性断言，语�
 **Backfill**:
 按 HWM 从数据源历史接口补采缺失 K 线的过程。
 _Avoid_: Replay（Replay 是模拟行情，Backfill 是补真实缺口）
+
+### 数据质量（Data Quality）
+
+**Normalization**:
+把 Venue 或归档输入转换为规范 Bar 的过程；它不改变 Bar 的身份，也不负责生成更高周期 Bar。
+_Avoid_: Cleaning（作为正式层名时）、Sanitization
+
+**Validation**:
+依据 Data Contract 与领域不变量判断输入能否成为规范数据的过程；它不猜测或修补含义不明的数据。
+_Avoid_: Cleaning、Type Casting
+
+**Quarantine**:
+因明确的 Validation 失败而被拒绝的记录及其原因、来源所构成的审计集合；其中的数据不属于可查询的规范 Dataset。
+_Avoid_: Dead Letter Queue、Bad Data Cache
+
+**Quarantine Reason** (`reason_code`):
+记录被隔离的稳定、低基数原因代码；它表达可分类的数据质量原因，不使用异常文本代替。
+_Avoid_: Error Message、Exception
 
 ### 接口（Interfaces）
 
@@ -116,6 +134,14 @@ _Avoid_: Part File、Chunk、Shard、Segment
 Dataset 根目录下的 `_manifest.json`，记录当前活跃的 Data File 清单。补采与 compaction 都只通过新增文件 + 切换清单生效。
 _Avoid_: Index、Catalog
 
+**Manifest Snapshot**:
+一次读取开始时从 Manifest 解析出的活动 Data File 条目集合；同一 HTTP 请求或 Replay Session 不混入之后新增的条目。
+_Avoid_: Snapshot（单独使用时）、Directory Scan
+
+**Dataset Read Lease**:
+一次读取对所选 Data Files 的临时保护，阻止 Compaction 与 GC 在读取结束前删除它们；它不是权威文件清单，也不改变数据所有权。
+_Avoid_: Read Lock、Snapshot Lock
+
 **Compaction**:
 把同一分区内的小 Data File 合并成更大的新文件、并用 Manifest 让旧文件失效的过程。它不修改任何已存在的文件。
 _Avoid_: Merge、Rewrite、Optimize（泛指时）
@@ -151,7 +177,7 @@ _Avoid_: Virtual Clock、Simulation Clock
 _Avoid_: Permit（可接受，但统一用 Step Credit）
 
 **End of Session**:
-回放数据耗尽时服务端发送的一次终止通知。
+一次 Replay Session 因数据耗尽、停止或读取失败而结束时，由服务端发送的一次终止通知，包含终止原因与已发送 Bar 数。
 _Avoid_: EOF、Finish
 
 ### 运行时（Runtime）

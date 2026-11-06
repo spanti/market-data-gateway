@@ -82,8 +82,19 @@ def run_direct(
             iter_durations.append(time.perf_counter() - started)
             iter_rows.append(count)
 
+        count_durations: list[float] = []
+        count_rows: list[int] = []
+        for _ in range(repeat):
+            started = time.perf_counter()
+            counted = store.count_bars(
+                instrument_id=instrument, interval=interval
+            )
+            count_durations.append(time.perf_counter() - started)
+            count_rows.append(counted)
+
     read_best, read_median = _best_median(read_durations)
     iter_best, iter_median = _best_median(iter_durations)
+    count_best, count_median = _best_median(count_durations)
     total_rows = read_rows[-1]
     print(f"mode: direct ParquetBarStore  rows: {total_rows:,}")
     print(
@@ -95,6 +106,12 @@ def run_direct(
         f"iter_batches:   best {iter_best:.3f}s "
         f"({format_rate(total_rows, iter_best)})  "
         f"median {iter_median:.3f}s ({format_rate(total_rows, iter_median)})"
+    )
+    print(
+        f"count_bars:     best {count_best:.3f}s "
+        f"({format_rate(count_rows[-1], count_best)})  "
+        f"median {count_median:.3f}s "
+        f"({format_rate(count_rows[-1], count_median)})"
     )
     return 0
 

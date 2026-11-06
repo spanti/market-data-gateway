@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,7 +22,19 @@ from mdgw.backfill_common import interval_ns, merge_bar_batch
 from mdgw.core.errors import UnknownInstrumentError
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import datetime_to_ns, ns_to_datetime, utc_now
-from mdgw.normalize.bar import normalize_bar
+from mdgw.normalize.batch import (
+    BatchNormalizationError,
+    BatchRejection,
+    NormalizedRow,
+    normalize_batch,
+)
+from mdgw.quarantine import (
+    REASON_UNKNOWN_INSTRUMENT,
+    SOURCE_STAGE_LIVE_INSTRUMENT_VALIDATE,
+    QuarantineRecord,
+    QuarantineStore,
+    live_batch_source_location,
+)
 from mdgw.reference import (
     InstrumentStore,
     export_instrument_snapshot,
@@ -33,10 +46,8 @@ from mdgw.state.high_water_mark import HighWaterMarkStore
 from mdgw.store.parquet_dataset import ParquetBarStore
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     from mdgw.config import GatewayConfig
-    from mdgw.core.bar import Bar
+    from mdgw.core.bar import Bar, RawBar
     from mdgw.ingest.feed_handler import FeedHandler
 
 logger = logging.getLogger(__name__)
@@ -67,6 +78,7 @@ class CollectorCore:
         asset_class_for: AssetClassResolver | None = None,
         sink: BarSink | None = None,
         sink_factory: Callable[[ParquetBarStore], BarSink] | None = None,
+        quarantine: QuarantineStore | None = None,
     ) -> None:
         self.feed_handler = feed_handler
         self.config = config
@@ -76,6 +88,8 @@ class CollectorCore:
             row_group_size=config.storage.row_group_size,
             format_version=config.storage.format_version,
             schema_version=config.storage.schema_version,
+            duckdb=config.storage.duckdb.to_options(),
+            rule_versions={config.storage.quarantine.rule_version},
         )
         self.aggregator = aggregator or BarAggregator(
             intervals=config.aggregation.intervals,
@@ -97,6 +111,13 @@ class CollectorCore:
         self.sink.bind(
             on_persisted=self._on_persisted,
             asset_class_for=self.asset_class_for,
+        )
+        # The Quarantine Dataset is independent of the Bars Dataset and is
+        # never registered, scanned or exported by the Store/REST/Replay.
+        self.quarantine = quarantine or QuarantineStore(
+            config.storage.quarantine.resolved_root(self.store.root),
+            schema_version=config.storage.quarantine.schema_version,
+            retention_days=config.storage.quarantine.retention_days,
         )
         # `GatewayRuntime` passes its own resolver because tests replace the
         # runtime's Instrument Store after start.
@@ -148,19 +169,38 @@ class CollectorCore:
             raise RuntimeError(_OPEN_BEFORE_INGEST_MESSAGE)
 
         ingest_ts = utc_now()
-        base_bars = [
-            normalize_bar(raw, feed=self.feed_handler.name, ingest_ts=ingest_ts)
-            for raw in self.feed_handler.iter_bars()
-        ]
-        if not base_bars:
+        raws = list(self.feed_handler.iter_bars())
+        if not raws:
             return 0, []
 
-        # Validate every base Bar against the Instrument Snapshot before the
-        # aggregator advances any window or retention water mark. Rejecting a
-        # batch must leave the Aggregation state untouched so the same Bars can
-        # be retried once the reference data is fixed.
-        for bar in base_bars:
-            self.asset_class_for(bar.instrument_id)
+        # One Polars Normalization pass at the existing batch boundary. The
+        # Feed Handler protocol and the Composite feed are unchanged.
+        batch = normalize_batch(
+            raws, feed=self.feed_handler.name, ingest_ts=ingest_ts
+        )
+
+        # Validate every normalized Bar against the Instrument Snapshot
+        # before the aggregator advances any window or retention water mark.
+        # Rejecting a batch must leave the Aggregation state untouched so the
+        # same Bars can be retried once the reference data is fixed.
+        validation_failures: list[tuple[NormalizedRow, UnknownInstrumentError]] = []
+        for row in batch.rows:
+            try:
+                self.asset_class_for(row.bar.instrument_id)
+            except UnknownInstrumentError as error:
+                validation_failures.append((row, error))
+
+        if batch.rejections or validation_failures:
+            self._quarantine_rejected_batch(
+                ingest_ts, batch.rejections, validation_failures
+            )
+            # A Quarantine write failure raised above is the surfaced error;
+            # nothing in this batch has been acknowledged or persisted.
+            if batch.rejections:
+                raise BatchNormalizationError(batch.rejections)
+            raise validation_failures[0][1]
+
+        base_bars = batch.bars
 
         # Every persistence path uses the same `(instrument, interval,
         # open_ts)` merge: identical content is skipped, corrections get a
@@ -206,6 +246,92 @@ class CollectorCore:
             },
         )
         return len(base_bars), written
+
+    # -- quarantine --------------------------------------------------------
+
+    def _quarantine_rejected_batch(
+        self,
+        ingest_ts: datetime,
+        rejections: tuple[BatchRejection, ...],
+        validation_failures: list[tuple[NormalizedRow, UnknownInstrumentError]],
+    ) -> None:
+        """Write one audit record per rejected row, then let the caller fail.
+
+        ``QuarantineStore.write_records`` is fail-closed: if it raises,
+        ``QuarantineWriteError`` propagates and the batch is not acknowledged,
+        published or persisted.
+        """
+        records = [
+            self._quarantine_record(
+                ingest_ts=ingest_ts,
+                row_index=rejection.row_index,
+                source_stage=rejection.source_stage,
+                reason_code=rejection.reason_code,
+                details=rejection.details,
+                raw=rejection.raw,
+                instrument_id=rejection.instrument_id,
+                interval=rejection.interval,
+                open_ts=rejection.open_ts,
+            )
+            for rejection in rejections
+        ]
+        records.extend(
+            self._quarantine_record(
+                ingest_ts=ingest_ts,
+                row_index=row.row_index,
+                source_stage=SOURCE_STAGE_LIVE_INSTRUMENT_VALIDATE,
+                reason_code=REASON_UNKNOWN_INSTRUMENT,
+                details={"instrument_id": row.bar.instrument_id},
+                raw=row.raw,
+                instrument_id=row.raw.instrument_id,
+                interval=row.raw.interval,
+                open_ts=row.bar.open_ts,
+            )
+            for row, _error in validation_failures
+        )
+        self.quarantine.write_records(records)
+
+    def _quarantine_record(  # ruff: ignore[too-many-arguments] - Quarantine record fields
+        self,
+        *,
+        ingest_ts: datetime,
+        row_index: int,
+        source_stage: str,
+        reason_code: str,
+        details: dict,
+        raw: RawBar,
+        instrument_id: str | None,
+        interval: str | None,
+        open_ts: datetime | None,
+    ) -> QuarantineRecord:
+        return QuarantineRecord(
+            source_stage=source_stage,
+            reason_code=reason_code,
+            rule_version=self.config.storage.quarantine.rule_version,
+            source_location=live_batch_source_location(ingest_ts, row_index),
+            details=details,
+            raw_record=self._raw_record(raw),
+            recorded_ts=ingest_ts,
+            feed=self.feed_handler.name,
+            instrument_id=instrument_id,
+            interval=interval,
+            open_ts=open_ts,
+        )
+
+    @staticmethod
+    def _raw_record(raw: RawBar) -> dict:
+        return {
+            "instrument_id": raw.instrument_id,
+            "interval": raw.interval,
+            "open_ts": _iso_or_text(raw.open_ts),
+            "open": raw.open,
+            "high": raw.high,
+            "low": raw.low,
+            "close": raw.close,
+            "volume": raw.volume,
+            "trade_count": raw.trade_count,
+            "revision": raw.revision,
+        }
 
     def _on_persisted(self, bars: list[Bar] | tuple[Bar, ...]) -> None:
         """Advance data HWM and freshness after Bars were durably written."""
@@ -312,6 +438,16 @@ class CollectorCore:
 
     def gap_events(self) -> tuple[GapEvent, ...]:
         return self.health.gap_events()
+
+
+def _iso_or_text(value: object) -> str:
+    """Readable raw-record text without imposing a timezone conversion."""
+    if isinstance(value, datetime):
+        try:
+            return value.isoformat()
+        except (ValueError, OverflowError):
+            return str(value)
+    return str(value)
 
 
 __all__ = ["CollectorCore"]
