@@ -11,7 +11,7 @@ from mdgw.reference import InstrumentStore, load_instrument_store
 from mdgw.replay.server import ReplayServer
 from mdgw.replay.service import ReplayService
 from mdgw.service.health_server import ServiceHealthServer
-from mdgw.store.parquet_dataset import ParquetBarStore
+from mdgw.store.composition import StorageComposition
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -33,14 +33,9 @@ class ReplayServiceRole:
         data_root: Path | None = None,
     ) -> None:
         self.config = config
-        self.store = ParquetBarStore(
-            data_root if data_root is not None else config.storage.root,
-            compression=config.storage.compression,
-            row_group_size=config.storage.row_group_size,
-            format_version=config.storage.format_version,
-            schema_version=config.storage.schema_version,
-            duckdb=config.storage.duckdb.to_options(),
-        )
+        # Replay only owns a Bars read dependency; Storage Composition owns
+        # the root resolution and Store mapping.
+        self.store = StorageComposition(config, root=data_root).bars()
         self.metrics = MetricsRegistry()
         self.instrument_store: InstrumentStore | None = None
 
