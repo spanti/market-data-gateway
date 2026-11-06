@@ -9,20 +9,31 @@ the effective Rule Version, file-system side effects and public errors.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from mdgw.config import GatewayConfig
-from mdgw.core.bar import Bar
+from mdgw.config import FeedConfig, GatewayConfig, load_config
+from mdgw.core.bar import Bar, RawBar
+from mdgw.ingest import ccxt_feed
+from mdgw.normalize.batch import BatchNormalizationError
 from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
 from mdgw.quarantine import QuarantineStore
+from mdgw.runtime import GatewayRuntime
 from mdgw.service.api import ApiService
+from mdgw.service.collector import CollectorService
+from mdgw.service.collector_core import CollectorCore
 from mdgw.service.replay import ReplayServiceRole
 from mdgw.store.composition import StorageBundle, StorageComposition
+from mdgw.store.manifest import active_manifest_entries
 from mdgw.store.parquet_dataset import ParquetBarStore
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+BTC = "binance:BTC/USDT"
+BASE_TS = datetime(2026, 1, 1, tzinfo=UTC)
 
 BAR = Bar(
     schema_version=1,
@@ -68,6 +79,105 @@ def _copied_config_with_quarantine_root(
     )
     storage = config.storage.model_copy(update={"quarantine": quarantine})
     return config.model_copy(update={"storage": storage})
+
+
+def _runtime_config(
+    *,
+    rule_version: str | None = None,
+    quarantine_root: Path | None = None,
+    feeds: tuple[FeedConfig, ...] | None = None,
+) -> GatewayConfig:
+    """The checked-in runtime config, with only the knobs this file needs."""
+    config = load_config(PROJECT_ROOT / "config" / "gateway.toml")
+    updates: dict[str, object] = {}
+    if rule_version is not None:
+        updates["rule_version"] = rule_version
+    if quarantine_root is not None:
+        updates["root"] = quarantine_root
+    quarantine = config.storage.quarantine.model_copy(update=updates)
+    storage = config.storage.model_copy(update={"quarantine": quarantine})
+    replace: dict[str, object] = {
+        "storage": storage,
+        "server": config.server.model_copy(update={"http_port": 0}),
+        "instruments": config.instruments.model_copy(
+            update={"path": PROJECT_ROOT / "config" / "instruments"}
+        ),
+    }
+    if feeds is not None:
+        replace["feeds"] = feeds
+    return config.model_copy(update=replace)
+
+
+def _raw(
+    minute: int,
+    *,
+    values: tuple[object, object, object, object, object] | None = None,
+) -> RawBar:
+    open_value, high, low, close, volume = values or (
+        Decimal(100),
+        Decimal(101),
+        Decimal(99),
+        Decimal("100.5"),
+        Decimal(1),
+    )
+    return RawBar(
+        instrument_id=BTC,
+        interval="1m",
+        open_ts=BASE_TS + timedelta(minutes=minute),
+        open=open_value,  # type: ignore[arg-type]
+        high=high,  # type: ignore[arg-type]
+        low=low,  # type: ignore[arg-type]
+        close=close,  # type: ignore[arg-type]
+        volume=volume,  # type: ignore[arg-type]
+        trade_count=1,
+        revision=0,
+    )
+
+
+class _AttachableFeed:
+    """Scripted feed exposing the same Quarantine attach seam as ccxt."""
+
+    name = "attachable"
+    supports_history = False
+
+    def __init__(self, batches: list[list[RawBar]] | None = None) -> None:
+        self._batches = list(batches or [])
+        self.quarantine = None
+        self.rule_version = NORMALIZATION_RULE_VERSION
+
+    @property
+    def instrument_ids(self) -> tuple[str, ...]:
+        return (BTC,)
+
+    def iter_bars(self):
+        return iter(self._batches.pop(0)) if self._batches else iter(())
+
+    def fetch_history(  # ruff: ignore[no-self-use] - Feed Handler protocol
+        self, _instrument_id, _interval, _start, _end
+    ):
+        return ()
+
+    def attach_quarantine(self, quarantine, *, rule_version=None) -> None:
+        # Mirrors the production ccxt seam: never replace an existing Store.
+        if self.quarantine is None:
+            self.quarantine = quarantine
+        if rule_version is not None:
+            self.rule_version = rule_version
+
+
+def _idle_exchange():
+    """Minimal ccxt.pro surface; construction must not touch the network."""
+    return SimpleNamespace(
+        rateLimit=50,
+        enableRateLimit=False,
+        has={
+            "watchOHLCV": True,
+            "watchOHLCVForSymbols": False,
+            "fetchOHLCV": False,
+        },
+        close=lambda: None,
+    )
+
 
 
 def test_bars_operation_returns_a_store_at_the_configured_root(
@@ -464,3 +574,263 @@ def test_replay_service_role_composes_bars_only_at_its_actual_root(
         assert not (override_root / "quarantine").exists()
     finally:
         role.stop()
+
+
+# -- collector composition: joint layout, identity and Rule Version ---------
+
+
+def test_gateway_runtime_rejects_a_layout_invalid_only_after_the_root_override(
+    tmp_path: Path,
+) -> None:
+    override_root = tmp_path / "override"
+    # Valid against the configured "./data" root; only the runtime override
+    # puts Quarantine inside the actual Bars Dataset.
+    config = _runtime_config(
+        quarantine_root=override_root / "bars" / "quarantine"
+    )
+
+    with pytest.raises(ValueError, match="must not be inside the Bars Dataset"):
+        GatewayRuntime(
+            feed_handler=_AttachableFeed(),
+            config=config,
+            data_root=override_root,
+        )
+
+    # The Bars Store (and its DuckDB temp dir) must not have been created.
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_collector_service_rejects_a_layout_invalid_only_after_the_root_override(
+    tmp_path: Path,
+) -> None:
+    override_root = tmp_path / "override"
+    config = _runtime_config(
+        quarantine_root=override_root / "bars" / "quarantine"
+    )
+
+    with pytest.raises(ValueError, match="must not be inside the Bars Dataset"):
+        CollectorService(
+            config,
+            data_root=override_root,
+            feed_handler=_AttachableFeed(),
+        )
+
+    assert list(tmp_path.iterdir()) == []
+
+
+# -- CollectorCore: default path uses composition, seams stay intact --------
+
+
+def test_collector_core_anchors_default_quarantine_on_an_injected_store_root(
+    tmp_path: Path,
+) -> None:
+    store = ParquetBarStore(tmp_path / "injected-store")
+    core = CollectorCore(
+        feed_handler=_AttachableFeed(),
+        config=_config(tmp_path / "configured"),
+        store=store,
+    )
+    try:
+        assert core.store is store
+        assert core.quarantine.root == tmp_path / "injected-store" / "quarantine"
+        assert not (tmp_path / "configured").exists()
+    finally:
+        store.close()
+
+
+def test_collector_core_keeps_a_configured_quarantine_root_with_an_injected_store(
+    tmp_path: Path,
+) -> None:
+    explicit_root = tmp_path / "audit" / "quarantine"
+    store = ParquetBarStore(tmp_path / "injected-store")
+    core = CollectorCore(
+        feed_handler=_AttachableFeed(),
+        config=_config(
+            tmp_path / "configured",
+            quarantine={"root": str(explicit_root)},
+        ),
+        store=store,
+    )
+    try:
+        # An explicit configured root wins over the injected Store root.
+        assert core.quarantine.root == explicit_root
+    finally:
+        store.close()
+
+
+def test_collector_core_uses_an_injected_quarantine_and_defaults_the_store(
+    tmp_path: Path,
+) -> None:
+    injected = QuarantineStore(tmp_path / "injected-quarantine")
+    core = CollectorCore(
+        feed_handler=_AttachableFeed(),
+        config=_config(tmp_path / "configured"),
+        data_root=tmp_path / "data",
+        quarantine=injected,
+    )
+    try:
+        assert core.quarantine is injected
+        assert core.store.root == tmp_path / "data"
+        assert core.store.dataset_root == tmp_path / "data" / "bars"
+        assert not (tmp_path / "configured").exists()
+    finally:
+        core.store.close()
+
+
+def test_collector_core_keeps_both_injected_objects(
+    tmp_path: Path,
+) -> None:
+    store = ParquetBarStore(tmp_path / "injected-store")
+    injected = QuarantineStore(tmp_path / "injected-quarantine")
+    core = CollectorCore(
+        feed_handler=_AttachableFeed(),
+        config=_config(tmp_path / "configured"),
+        data_root=tmp_path / "ignored-data-root",
+        store=store,
+        quarantine=injected,
+    )
+    try:
+        assert core.store is store
+        assert core.quarantine is injected
+    finally:
+        store.close()
+
+
+def test_collector_core_rejects_a_quarantine_inside_an_injected_store(
+    tmp_path: Path,
+) -> None:
+    store = ParquetBarStore(tmp_path / "injected-store")
+    config = _copied_config_with_quarantine_root(
+        tmp_path / "configured",
+        tmp_path / "injected-store" / "bars" / "nested",
+    )
+    try:
+        with pytest.raises(
+            ValueError, match="must not be inside the Bars Dataset"
+        ):
+            CollectorCore(
+                feed_handler=_AttachableFeed(),
+                config=config,
+                store=store,
+            )
+    finally:
+        store.close()
+
+
+# -- one collector composition: shared Quarantine and Rule Version ----------
+
+
+def test_gateway_runtime_shares_one_quarantine_with_its_feed_handler(
+    tmp_path: Path,
+) -> None:
+    feed = _AttachableFeed()
+    runtime = GatewayRuntime(
+        feed_handler=feed,
+        config=_runtime_config(rule_version="rules-2"),
+        data_root=tmp_path,
+    )
+    try:
+        assert runtime.quarantine is feed.quarantine
+        assert runtime.quarantine.root == tmp_path / "quarantine"
+        assert runtime.store.root == tmp_path
+        assert feed.rule_version == "rules-2"
+    finally:
+        runtime.store.close()
+
+
+def test_collector_service_shares_one_quarantine_with_its_feed_handler(
+    tmp_path: Path,
+) -> None:
+    feed = _AttachableFeed()
+    service = CollectorService(
+        _runtime_config(rule_version="rules-2"),
+        data_root=tmp_path,
+        feed_handler=feed,
+    )
+    try:
+        assert service.core.quarantine is feed.quarantine
+        assert service.core.quarantine.root == tmp_path / "quarantine"
+        assert service.core.store.root == tmp_path
+        assert feed.rule_version == "rules-2"
+    finally:
+        service.stop()
+
+
+@pytest.mark.parametrize(
+    ("configured_rule_version", "expected"),
+    [
+        (None, NORMALIZATION_RULE_VERSION),
+        ("rules-2", "rules-2"),
+    ],
+)
+def test_runtime_rule_version_reaches_bars_and_quarantine_writes(
+    tmp_path: Path,
+    configured_rule_version: str | None,
+    expected: str,
+) -> None:
+    rejected = [
+        _raw(
+            99,
+            values=(
+                1.5,
+                Decimal(101),
+                Decimal(99),
+                Decimal("100.5"),
+                Decimal(1),
+            ),
+        )
+    ]
+    accepted = [_raw(minute) for minute in range(5)]
+    feed = _AttachableFeed([rejected, accepted])
+    runtime = GatewayRuntime(
+        feed_handler=feed,
+        config=_runtime_config(rule_version=configured_rule_version),
+        data_root=tmp_path,
+    )
+    runtime.start()
+    try:
+        with pytest.raises(BatchNormalizationError):
+            runtime.ingest()
+        records = runtime.quarantine.read_records().to_pylist()
+        assert [record["rule_version"] for record in records] == [expected]
+
+        runtime.ingest()
+        entries = active_manifest_entries(runtime.store.dataset_root)
+        assert entries
+        assert {tuple(entry["rule_versions"]) for entry in entries} == {
+            (expected,)
+        }
+        # The same value reached the handler through its attach seam.
+        assert feed.rule_version == expected
+    finally:
+        runtime.stop()
+
+
+def test_collector_service_default_feed_handler_build_uses_the_rule_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # CollectorService builds its own ccxt handler from config; replace only
+    # the outbound exchange factory so no network is touched.
+    monkeypatch.setattr(
+        ccxt_feed, "_create_exchange", lambda _feed: _idle_exchange()
+    )
+    feeds = (
+        FeedConfig(
+            name="binance_spot",
+            kind="ccxt",
+            venue="binance",
+            symbols=("BTC/USDT",),
+        ),
+    )
+    service = CollectorService(
+        _runtime_config(rule_version="rules-2", feeds=feeds),
+        data_root=tmp_path,
+    )
+    try:
+        handler = service.core.feed_handler
+        assert handler.name == "binance_spot"
+        assert handler.rule_version == "rules-2"
+        assert handler.quarantine is service.core.quarantine
+        assert service.core.store.root == tmp_path
+    finally:
+        service.stop()
