@@ -668,6 +668,7 @@ class _ChunkSink:
 
     def __init__(self) -> None:
         self._chunks: list[bytes] = []
+        # pyarrow's stream writer requires the file-like `closed` attribute.
         self.closed = False
 
     def write(self, data: bytes) -> int:
