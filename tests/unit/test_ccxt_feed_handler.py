@@ -12,6 +12,7 @@ import pytest
 
 from mdgw.config import FeedConfig
 from mdgw.ingest.ccxt_feed import CcxtFeedHandler, TokenBucket, build_feed_handler
+from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
 from mdgw.quarantine import (
     REASON_MALFORMED_ROW,
     SOURCE_STAGE_CCXT_HISTORY_ROW,
@@ -723,9 +724,83 @@ def test_malformed_live_row_is_quarantined_then_skipped(
     assert record["feed"] == "binance_spot"
     assert record["instrument_id"] == INSTRUMENT
     assert record["interval"] == "1m"
-    assert record["rule_version"] == "1"
+    assert record["rule_version"] == NORMALIZATION_RULE_VERSION
     assert record["open_ts"] == base
     assert "oops" in record["raw_record"]
+
+
+def test_default_rule_version_matches_the_normalization_single_source(
+    tmp_path: Path,
+) -> None:
+    """A handler built without an explicit rule version must not claim "1"."""
+    exchange = FakeExchange()
+    quarantine = _quarantine_store(tmp_path)
+    handler = CcxtFeedHandler(
+        config=_config(), exchange=exchange, quarantine=quarantine
+    )
+    base = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+    try:
+        exchange.push_for_symbols(
+            {
+                SYMBOL: [
+                    _row(base, close="oops", closed=True),
+                    _row(base + timedelta(minutes=1), closed=True),
+                ]
+            }
+        )
+        _collect(handler, 1)
+    finally:
+        handler.close()
+
+    (record,) = quarantine.read_records().to_pylist()
+    assert record["rule_version"] == NORMALIZATION_RULE_VERSION
+    assert record["rule_version"] == "polars-1"
+
+
+def test_configured_rule_version_still_reaches_the_quarantine_record(
+    tmp_path: Path,
+) -> None:
+    exchange = FakeExchange()
+    quarantine = _quarantine_store(tmp_path)
+    handler = CcxtFeedHandler(
+        config=_config(),
+        exchange=exchange,
+        quarantine=quarantine,
+        rule_version="configured-rules-7",
+    )
+    base = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+    try:
+        exchange.push_for_symbols(
+            {
+                SYMBOL: [
+                    _row(base, close="oops", closed=True),
+                    _row(base + timedelta(minutes=1), closed=True),
+                ]
+            }
+        )
+        _collect(handler, 1)
+    finally:
+        handler.close()
+
+    (record,) = quarantine.read_records().to_pylist()
+    assert record["rule_version"] == "configured-rules-7"
+
+
+def test_build_feed_handler_defaults_to_the_single_source_rule_version() -> None:
+    handler = build_feed_handler(_config(), exchange=FakeExchange())
+
+    assert handler.rule_version == NORMALIZATION_RULE_VERSION
+
+
+def test_attach_quarantine_without_a_version_keeps_the_handler_default(
+    tmp_path: Path,
+) -> None:
+    from mdgw.ingest.composite import attach_quarantine
+
+    handler = build_feed_handler(_config(), exchange=FakeExchange())
+    attach_quarantine(handler, _quarantine_store(tmp_path))
+
+    assert handler.rule_version == NORMALIZATION_RULE_VERSION
 
 
 def test_malformed_live_row_stops_the_source_when_quarantine_write_fails(
