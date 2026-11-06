@@ -207,7 +207,8 @@ e.g. `query` 1,922,606 bytes now), so this is the same deterministic row set
 but not byte-identical files. The M0 table's `Data Files` column also reports
 the generator's constant (1 for single-write datasets), whereas the current
 Manifest has e.g. 2 active files for `query`; all comparisons use the same
-saved files for every pass.
+saved files for every pass. §5.4 reruns this exact copy after the review fixes
+and states the active-byte accounting precisely.
 
 ### 5.1 Latency / throughput
 
@@ -305,6 +306,66 @@ Approval rationale:
 
 No peak-memory deviation above 20% was needed. No other latency/throughput
 deviation above 10% was observed.
+
+### 5.4 Same-copy rerun after the review fixes
+
+The review fixes (Rule Version default, read-lease lifetime, Replay publish
+barrier, explicit DuckDB temp directory, connection-cache shutdown) do not
+change the read query, Arrow boundary, REST serialization or Replay pacing
+semantics. The saved corpus was rerun unchanged (no `--rebuild`) to prove the
+§5 numbers reproduce on exactly the same copy:
+
+```bash
+D:/Anaconda3/envs/nautilus/python.exe benchmarks/bench_baseline.py \
+  --repeat 5 \
+  --data-dir "C:/Users/10107/AppData/Local/Temp/mdgw-duckdb-baseline" \
+  --json-out benchmarks/.acceptance-logs/review-fixes-same-corpus.json
+```
+
+**Methodology correction.** "Same corpus as M0" means the same directory,
+deterministic row set and active Manifest bytes — not byte-identical Parquet
+files. The M0 report measured files written by the pre-migration writer; the
+saved directory's active files were regenerated during the migration with the
+current writer and are ~2.4% larger (`query` 1,922,606 active bytes in 2 active
+files versus 1,833 KiB in the M0 table). `_corpus.json` correctly records the
+active byte total but its `files` column is the generator's constant (1), and
+one unreferenced Parquet file not listed in the Manifest remains under
+`query/`; Manifest authority excludes it. The marker existed, so it did **not** prevent
+reuse. All M0 deltas below are therefore row-wise comparisons against the M0
+medians already recorded in `RESULTS-duckdb-baseline.md`, on the same logical
+rows but not byte-identical physical files.
+
+| Scenario | Rows | M0 median s | Rerun median s | Delta vs M0 | Rerun spread | M0 traced peak | Rerun traced peak | M0 Arrow peak | Rerun Arrow peak |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `store.scan_100k` | 100,000 | 0.0199 | 0.0223 | +12.1% (D1) | 9.1% | 368.40 KiB | 375.42 KiB | 31.52 MiB | 88.19 KiB |
+| `store.count_100k` | 100,000 | 0.0193 | 0.0069 | -64.4% | 40.1% | 368.31 KiB | 27.80 KiB | 17.58 MiB | 0 B |
+| `store.read_bars_50k` | 50,000 | 0.0098 | 0.0181 | +85.1% (D1) | 5.5% | 364.69 KiB | 371.94 KiB | 17.43 MiB | 293.12 KiB |
+| `store.scan_multi_50k` | 50,000 | 0.1017 | 0.0376 | -63.0% | 4.5% | 457.66 KiB | 294.82 KiB | 3.76 MiB | 76.25 KiB |
+| `store.count_multi_50k` | 50,000 | 0.0986 | 0.0222 | -77.5% | 22.5% | 457.57 KiB | 270.25 KiB | 3.63 MiB | 0 B |
+| `store.scan_revisions_6k` | 6,000 | 0.0042 | 0.0072 | +72.5% (D1) | 16.7% | 35.28 KiB | 41.17 KiB | 0.00 B | 0 B |
+| `store.count_revisions_6k` | 6,000 | 0.0042 | 0.0064 | +53.1% (D1) | 56.6% | 35.23 KiB | 26.80 KiB | 0.00 B | 0 B |
+| `rest.json_50k` | 50,000 | 1.5548 | 1.5064 | -3.1% | 4.2% | 131.23 MiB | 131.24 MiB | 14.17 MiB | 293.12 KiB |
+| `rest.arrow_50k` | 50,000 | 0.0825 | 0.0634 | -23.1% | 41.1% | 23.64 MiB | 17.75 MiB | 21.69 MiB | 261.62 KiB |
+| `rest.csv_50k` | 50,000 | 1.2805 | 1.3415 | +4.8% | 4.1% | 62.71 MiB | 65.92 MiB | 21.69 MiB | 261.62 KiB |
+| `rest.export_parquet_50k` | 50,000 | 0.0790 | 0.0620 | -21.6% | 37.4% | 3.13 MiB | 3.13 MiB | 29.57 MiB | 6.69 MiB |
+| `rest.export_arrow_50k` | 50,000 | 0.0849 | 0.0674 | -20.7% | 46.7% | 12.10 MiB | 13.13 MiB | 21.69 MiB | 293.12 KiB |
+| `rest.pagination_2k_limit100` (20 pages) | 2,000 | 0.3410 | 0.3410 | 0.0% | 24.1% | 2.01 MiB | 1.61 MiB | 990.44 KiB | 704 B |
+| `rest.revision_json_6k` | 6,000 | 0.2082 | 0.2100 | +0.9% | 17.1% | 15.66 MiB | 15.68 MiB | 1.06 MiB | 35.38 KiB |
+| `rest.revision_pagination_6k_limit100` (61 pages) | 6,060 | 1.2554 | 1.1035 | -12.1% | 6.7% | 3.57 MiB | 2.92 MiB | 1.70 MiB | 704 B |
+| `replay.query_prep_20k` | 20,000 | 1.0565 | 0.6170 | -41.6% | 17.6% | 40.69 MiB | 38.32 MiB | 9.90 MiB | 0 B |
+| `replay.ipc_encode_20k` | 20,000 | 2.7933 | 2.6604 | -4.8% | 4.4% | 7.32 KiB | 7.32 KiB | 6.50 KiB | 6.50 KiB |
+| `replay.e2e_publish_20k` | 20,000 | 3.7617 | 3.5906 | -4.5% | 7.7% | 40.70 MiB | 25.88 MiB | 9.90 MiB | 6.50 KiB |
+
+The rerun reproduces §5.1 within run-to-run noise (the largest shift versus
+the ticket-19 final medians is `replay.query_prep_20k` +14.0%, whose spread is
+17.6%). The only >10% M0 deviations are the four already-approved D1 direct
+one-shot Store calls; every REST, pagination, Revision-heavy and Replay
+scenario remains inside the 10% gate and no memory peak exceeds its §5.2
+value by more than noise. The bounded Replay memory proof in §6 is unchanged:
+the review fixes add one publish lock and no buffering or per-row state, so
+process memory remains independent of the result row count; the measured
+Python/Arrow/DuckDB-temp peaks and the spill-to-disk explanation still apply.
+The revision-heavy walk still returns 6,060 rows for 6,000 stored rows.
 
 ## 6. Bounded memory scaling (asap / realtime / step)
 
@@ -464,3 +525,62 @@ approved one-shot direct-Store fixed overhead; Replay memory is flat in
 Python/Arrow while DuckDB spills to bounded temporary disk; and failure
 behaviour is explicit (no silent truncation, no fallback engine, fail-closed
 Quarantine).
+
+## Review fixes
+
+Post-acceptance two-axis review fixes on branch `ticket/review-fixes`
+(worktree `E:/total-project/mdgw-worktrees/duckdb-review`), based on
+integration tip `7ef2d23`.
+
+| Commit | Fix | Regression tests |
+|---|---|---|
+| `b3ff488` | CCXT/composite default Rule Version now uses `NORMALIZATION_RULE_VERSION` (`polars-1`) instead of `"1"`; an explicit configured value still wins | `test_default_rule_version_matches_the_normalization_single_source`, `test_configured_rule_version_still_reaches_the_quarantine_record`, `test_build_feed_handler_defaults_to_the_single_source_rule_version`, `test_attach_quarantine_without_a_version_keeps_the_handler_default` |
+| `9da68ee` | Lease lifetime: `StoreRead.close()` waits for the DuckDB scanner's real release before dropping the lease; `_reacquire()` is guarded against a close race so a replacement lease is not installed after close. Also the explicit `<store.root>/.duckdb_tmp` temp directory, `mdgw_duckdb_temp_bytes` / `mdgw_duckdb_active_connections`, and connection-cache shutdown (`ParquetBarStore.close()` idempotent; Runtime/Collector/Api close their own Store) | `test_close_during_a_snapshot_reacquire_releases_the_new_lease`, `test_close_keeps_the_lease_until_a_blocked_scan_has_released`, `test_store_uses_a_deterministic_temp_directory_under_its_root`, `test_store_keeps_an_explicitly_configured_temp_directory`, `test_duckdb_temp_bytes_sums_files_in_the_configured_temp_directory`, `test_duckdb_active_connections_tracks_one_live_scan`, `test_store_close_is_idempotent_and_refuses_new_connections`, `test_update_dataset_metrics_exposes_duckdb_temp_and_connections` |
+| `ae960e6` | Replay seek/stop publish barrier: the worker re-checks cancel/generation and publishes under `_publish_lock`; seek/stop wait (bounded, 3 s) so an in-flight Bar completes first and no stale-generation Bar follows. `step()` never takes the barrier | `test_stop_waits_for_an_in_flight_publish`, `test_seek_waits_for_an_in_flight_publish_and_drops_the_old_generation`; all existing asap/realtime/step/seek/stop tests still pass |
+| `d1d2ae8` | Truthful `_RowIssues.optional_integer` name; documented why `_ChunkSink.closed` stays (pyarrow requires it) | existing normalization/export suites |
+
+**Full offline suite (Windows).**
+
+```bash
+D:/Anaconda3/envs/nautilus/python.exe -m pytest -q
+```
+
+**Result: 1094 passed, 5 failed, 1 skipped, 1 deselected in 217.32 s.** The
+five failures are the same pre-existing Typer/Click CLI failures listed in
+§2.1; 1094 = the previous 1080 plus the 14 review regression tests. No new
+failure. `D:/Anaconda3/envs/nautilus/python.exe -m ruff check src` passes.
+Log: `benchmarks/.acceptance-logs/review-fixes-full-suite.log`.
+
+**Linux lease/lifecycle subset.**
+
+```bash
+MSYS_NO_PATHCONV=1 docker run --rm \
+  -v "E:/total-project/mdgw-worktrees/duckdb-review:/app" -w /app \
+  python:3.13-slim bash -lc \
+  "pip install --quiet \
+     --index-url https://mirrors.aliyun.com/pypi/simple \
+     --trusted-host mirrors.aliyun.com -e '.[test]' \
+   && python -m pytest -q \
+     tests/contract/test_read_lease.py \
+     tests/contract/test_storage_file_lifecycle.py \
+     tests/contract/test_compaction_gc.py"
+```
+
+**Result: 26 passed, 1 skipped in 5.26 s.** The skip is the Windows-only
+file-sharing case in `test_storage_file_lifecycle.py`; the POSIX
+unlink-of-open-file case executed on Linux. The literal command with default
+PyPI was attempted first but dependency download stalled at ~170 MB after
+46 minutes without reaching the test phase, so the identical image, mount and
+test selection were rerun against Aliyun's PyPI mirror; only the package
+source differs. Log:
+`benchmarks/.acceptance-logs/review-fixes-linux-lease.log`.
+
+**Same-corpus rerun:** §5.4 reproduces the acceptance matrix on the saved
+`C:/Users/10107/AppData/Local/Temp/mdgw-duckdb-baseline` copy without
+`--rebuild` (marker reused; active bytes ~2.4% above the M0 table). Only the
+approved D1 direct-Store deviations exceed 10%; all REST/pagination/Replay
+scenarios pass. Replay memory scaling is unchanged (§6): the fixes add a
+publish lock and no buffering.
+
+**Merge:** `integration/duckdb-polars-storage` (tip `7ef2d23`) was merged into
+`ticket/review-fixes` after the fixes; no conflicts.
