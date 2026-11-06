@@ -22,6 +22,12 @@ DuckDB 收到的是 `read_parquet($files)` 的绑定参数，即当前 Snapshot 
 
 Arrow 边界就是 Data Contract。DuckDB 2.x 以 `relation.to_arrow_reader(batch_size=...)` 逐批导出；连接显式设置 `timezone=UTC`，保证 `timestamp[ns, tz=UTC]`。DuckDB 导出会把所有字段标记为 nullable，并且看不到 Hive `interval`，所以每个 RecordBatch 都按 `BAR_SCHEMA` 的字段顺序和 nullability 重建，`interval` 由所在分区显式填入。Decimal 与时间戳始终是带类型的 Arrow/Parquet 值，不经过 SQL 文本 cast、Python 行转换或 Polars 往返。一个连接在任一时刻只服务一个 Reader，Reader 关闭前不会启动冲突查询；正常耗尽的连接最多保留一个空闲实例复用，取消或失败的连接直接关闭。
 
+## 资源预算与连接缓存
+
+每个 Reader 独占一条连接，并各自套用配置中的 `memory_limit`、`threads`、`max_temp_directory_size` 与 Arrow batch size；并发 Reader 不会共享同一份执行内存或临时目录预算，也不会在同一连接上启动冲突查询。`DuckDBConnectionCache` 只是至多保留一个空闲连接的复用槽：正常耗尽的连接放回缓存，取消或失败的连接直接关闭。它是有界连接池，不是共享 Catalog、Manifest 权威或第二份数据来源；缓存的连接不携带任何跨请求的查询状态。
+
+未显式配置时，临时目录确定为 `<store.root>/.duckdb_tmp` 并在 Store 启动时创建；显式配置的路径优先。全局排序与聚合的 spill 文件不是权威数据副本，其占用通过 `mdgw_duckdb_temp_bytes` 暴露，签出连接数通过 `mdgw_duckdb_active_connections` 暴露；两者都不改变 `/api/v1/status` 的 JSON 形状。
+
 ## REST 与 Replay 的语义差异
 
 两者共享 Manifest 与扫描基础设施，但不共享查询语义。REST History 固定按 `open_ts` 的半开区间 `[start, end)` 过滤，返回全部 raw Revisions；JSON 行数上限由同一 Snapshot 上的精确 raw 行 count 决定，不做隐式去重。非分页 JSON、Arrow、CSV 和 export 没有全局 `ORDER BY`，因此不承诺任何全序，也不承诺物理存储顺序。单 Instrument 分页 JSON 是唯一的显式排序面：一个查询按 `open_ts` 升序取全局最早的 `limit + 1` 行，返回前 `limit` 行并据此给出 `has_more` / `next_start`；同 `open_ts` 的文件位置与文件内行号 tie-break 只为复现既有可观察行为，不是公共排序承诺。Revision-heavy 数据下游标无法表达同时间戳内的行进度，这是既有契约缺口，保持独立（`docs/revision-heavy-time-cursor.md`）。

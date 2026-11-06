@@ -96,6 +96,10 @@ def test_metrics_exposes_http_request_duration_histogram(
     assert "mdgw_api_ws_sessions" in text
     assert "mdgw_api_ws_dropped_total" in text
     assert "mdgw_dataset_active_file_count" in text
+    # DuckDB spill disk and checked-out connections are observable without
+    # changing the /api/v1/status JSON shape.
+    assert "mdgw_duckdb_temp_bytes" in text
+    assert "mdgw_duckdb_active_connections" in text
 
 
 def test_histogram_labels_use_route_template_and_response_status(

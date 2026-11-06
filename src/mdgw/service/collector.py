@@ -212,6 +212,8 @@ class CollectorService:
             self._health_server.stop()
             self._health_server = None
         self.core.close_state()
+        # The CollectorService owns this Store (CollectorCore created it).
+        self.core.store.close()
         self._started = False
         self._started_at = None
 

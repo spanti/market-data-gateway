@@ -33,11 +33,10 @@ from mdgw.core.envelope import table_to_messages
 from mdgw.core.schema import BAR_SCHEMA
 from mdgw.ingest.fake import BarInput, FakeFeedHandler
 from mdgw.runtime import GatewayRuntime
+from mdgw.store.parquet_dataset import ParquetBarStore
 
 if TYPE_CHECKING:
     from collections.abc import Generator
-
-    from mdgw.store.parquet_dataset import ParquetBarStore
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 HOST = "127.0.0.1"
@@ -114,7 +113,10 @@ def _seed(tmp_path: Path, bars: list[BarInput]) -> ParquetBarStore:
         runtime.ingest()
     finally:
         runtime.stop()
-    return runtime.store
+    # `GatewayRuntime.stop()` closes the Store it owns (including its DuckDB
+    # connection cache). The REST surface under test reads the same Dataset
+    # through its own read-side Store, exactly like the API service role.
+    return ParquetBarStore(tmp_path)
 
 
 @contextmanager

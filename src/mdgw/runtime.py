@@ -181,6 +181,9 @@ class GatewayRuntime:
             self._streaming = None
         self._close_feed_handler()
         self._close_state()
+        # This runtime owns the Store; the collector pipeline shares the exact
+        # instance, so it is closed here exactly once.
+        self.store.close()
         self._started = False
 
     def _close_replay(self) -> None:

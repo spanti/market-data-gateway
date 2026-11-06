@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -310,3 +311,160 @@ def test_manifest_change_during_lease_acquisition_retries_with_a_new_snapshot(
     assert isinstance(table, pa.Table)
     assert table.num_rows == 2
     assert active_session_locks(store.dataset_root) == []
+
+
+class _GatedReacquireStore(ParquetBarStore):
+    """Block the second lease acquisition so a close can race the refresh."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.lease_acquisitions = 0
+        self.reacquire_lease_acquired = threading.Event()
+        self.reacquire_resume = threading.Event()
+
+    def _after_lease_acquired(self, _lease) -> None:
+        self.lease_acquisitions += 1
+        if self.lease_acquisitions >= 2:
+            self.reacquire_lease_acquired.set()
+            if not self.reacquire_resume.wait(10):
+                raise RuntimeError("test did not resume the reacquire")
+
+
+def test_close_during_a_snapshot_reacquire_releases_the_new_lease(
+    tmp_path: Path,
+) -> None:
+    writer = ParquetBarStore(tmp_path)
+    _write(writer, [_bar(0)])
+    _write(writer, [_bar(1)])
+
+    store = _GatedReacquireStore(tmp_path)
+    read = store.open_read(interval="1m")
+    assert store.lease_acquisitions == 1
+    assert active_session_locks(store.dataset_root)
+
+    # Force the StoreRead to refresh its Snapshot: the first Data File is gone
+    # and the Manifest has moved to the second generation.
+    manifest = _manifest(store.dataset_root)
+    victim = manifest["files"][0]
+    (store.dataset_root / victim["path"]).unlink()
+    manifest["files"][0]["active"] = False
+    (store.dataset_root / "_manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+    )
+
+    result: dict[str, object] = {}
+
+    def consume() -> None:
+        try:
+            result["rows"] = _rows(read)
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            result["error"] = exc
+
+    worker = threading.Thread(target=consume, name="mdgw-reacquire-race")
+    worker.start()
+    assert store.reacquire_lease_acquired.wait(5)
+
+    # The refresh has already created its replacement lease and is paused
+    # before installing it. Closing now must not leave that lease behind.
+    assert active_session_locks(store.dataset_root)
+    read.close()
+    assert read.lease is None
+    store.reacquire_resume.set()
+
+    worker.join(10)
+    assert not worker.is_alive()
+    error = result.get("error")
+    assert isinstance(error, RuntimeError)
+    assert "closed" in str(error)
+    assert active_session_locks(store.dataset_root) == []
+    assert _wait_until(
+        lambda: not any(
+            thread.name.startswith("mdgw-read-lease-")
+            for thread in threading.enumerate()
+        ),
+        description="reacquire lease heartbeat stopped",
+    )
+
+
+def test_close_keeps_the_lease_until_a_blocked_scan_has_released(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mdgw.store import duckdb_reader
+
+    store = ParquetBarStore(tmp_path)
+    _write(store, [_bar(0), _bar(1)])
+
+    entered = threading.Event()
+    allow_read = threading.Event()
+    original_open = duckdb_reader.DuckDBArrowScanner._open_sql_reader
+
+    class _BlockingReader:
+        """A real Reader whose first blocking call is held by the test."""
+
+        def __init__(self, inner) -> None:
+            self._inner = inner
+
+        def read_next_batch(self):
+            entered.set()
+            if not allow_read.wait(10):
+                raise RuntimeError("test never released the blocked read")
+            return self._inner.read_next_batch()
+
+        def close(self) -> None:
+            self._inner.close()
+
+    def open_reader(self, sql, params, *, batch_size):
+        inner = original_open(self, sql, params, batch_size=batch_size)
+        return _BlockingReader(inner)
+
+    monkeypatch.setattr(
+        duckdb_reader.DuckDBArrowScanner,
+        "_open_sql_reader",
+        open_reader,
+    )
+
+    read = store.open_read(interval="1m")
+    result: dict[str, object] = {}
+
+    def consume() -> None:
+        try:
+            result["batches"] = list(read.iter_arrow_batches())
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            result["error"] = exc
+
+    worker = threading.Thread(target=consume, name="mdgw-blocked-scan")
+    worker.start()
+    assert entered.wait(5)
+    assert active_session_locks(store.dataset_root)
+
+    closed = threading.Event()
+
+    def close_read() -> None:
+        read.close()
+        closed.set()
+
+    closer = threading.Thread(target=close_read, name="mdgw-close-blocked-read")
+    closer.start()
+    try:
+        # The scanner is still inside read_next_batch(), so close() must not
+        # drop the lease yet.
+        assert not closed.wait(0.3)
+        assert active_session_locks(store.dataset_root)
+    finally:
+        allow_read.set()
+
+    worker.join(10)
+    closer.join(10)
+    assert not worker.is_alive()
+    assert not closer.is_alive()
+    assert active_session_locks(store.dataset_root) == []
+
+
+def _wait_until(predicate, *, description: str, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())

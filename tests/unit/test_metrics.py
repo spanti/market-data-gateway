@@ -142,3 +142,24 @@ def test_concurrent_histogram_observes_are_not_lost() -> None:
     assert 'mdgw_concurrent_seconds_bucket{le="+Inf"} 8000' in text
     assert "mdgw_concurrent_seconds_sum 500" in text
     assert "mdgw_concurrent_seconds_count 8000" in text
+
+
+def test_update_dataset_metrics_exposes_duckdb_temp_and_connections(
+    tmp_path,
+) -> None:
+    from mdgw.service.common import update_dataset_metrics
+    from mdgw.store.parquet_dataset import ParquetBarStore
+
+    store = ParquetBarStore(tmp_path)
+    temp_directory = store.duckdb.temp_directory
+    assert temp_directory is not None
+    (temp_directory / "duckdb_temp_block-0").write_bytes(b"x" * 11)
+
+    registry = MetricsRegistry()
+    update_dataset_metrics(registry, store)
+
+    assert registry.get("mdgw_duckdb_temp_bytes") == 11
+    assert registry.get("mdgw_duckdb_active_connections") == 0
+    text = registry.render()
+    assert "mdgw_duckdb_temp_bytes 11" in text
+    assert "mdgw_duckdb_active_connections 0" in text

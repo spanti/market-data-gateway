@@ -165,7 +165,8 @@ class DuckDBConfig(_ConfigModel):
 
     memory_limit: str = "1GB"
     threads: int = Field(default=4, ge=1)
-    # None keeps DuckDB's own default temporary directory.
+    # None resolves to `<storage.root>/.duckdb_tmp` at Store startup, so spill
+    # never silently uses the process/OS default.
     temp_directory: Path | None = None
     max_temp_directory_size: str = "10GB"
     arrow_batch_size: int = Field(default=65_536, ge=1)
