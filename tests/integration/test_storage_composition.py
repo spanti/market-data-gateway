@@ -427,6 +427,22 @@ def test_api_service_composes_bars_only_at_its_actual_root(
         service.store.close()
 
 
+def test_quarantine_operation_returns_a_new_store_each_time(
+    tmp_path: Path,
+) -> None:
+    composition = StorageComposition(_config(tmp_path / "data"))
+
+    first = composition.quarantine()
+    second = composition.quarantine()
+
+    assert isinstance(first, QuarantineStore)
+    assert isinstance(second, QuarantineStore)
+    assert first is not second
+    assert first.root == second.root == tmp_path / "data" / "quarantine"
+    # Quarantine-only composition has no construction-time file-system effect.
+    assert not (tmp_path / "data").exists()
+
+
 def test_replay_service_role_composes_bars_only_at_its_actual_root(
     tmp_path: Path,
 ) -> None:
