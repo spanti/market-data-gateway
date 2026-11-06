@@ -171,3 +171,44 @@ were preserved and not committed. ADR-0014 still phrases the default
 Quarantine root as `<storage.root>/quarantine`; that remains accurate when
 no `--root` override is given, and the ADR was left unchanged as a historical
 record while the operational docs describe the effective-root rule.
+
+## Post-review fixes
+
+Two-axis review of `d574487`: no hard standards violations and no spec
+implementation defects; 1 test-coverage gap plus 4 standards judgement calls
+were recorded.
+
+Fix branch `ticket/storage-review-fixes` (worktree
+`E:/total-project/mdgw-worktrees/storage-review`), based on `d574487`:
+- `3312eed` refactor(config): share the quarantine independence check
+- `db659f9` refactor(collector): extract default store resolution
+- `e94954d` refactor(cli): use the composition-owned effective root
+- `193b739` test(quarantine): reuse _write_config for GC layout cases
+- `068fc3e` test(storage): cover snapshot and HWM under the effective root
+
+Merged with `--no-ff` as `6164256` ("merge: storage composition code-review
+fixes"). Scope audit `git diff --stat d574487..HEAD`: exactly six files,
+141 insertions, 92 deletions — `src/mdgw/config.py`,
+`src/mdgw/store/composition.py`, `src/mdgw/service/collector_core.py`,
+`src/mdgw/cli.py`, `tests/integration/test_quarantine_retention_gc.py`,
+`tests/integration/test_storage_composition.py`. One shared
+`ensure_quarantine_is_independent` helper now backs both config and
+composition with the same `ValueError` message; injected-Store resolution and
+CLI effective-root behavior are unchanged. No docs, spec, ticket, GLOSSARY or
+ADR changes; no behavior change beyond the refactor.
+
+Post-fix full offline suite in the main workspace
+(`D:/Anaconda3/envs/nautilus/python.exe -m pytest -q`):
+**5 failed, 1138 passed, 1 skipped, 1 deselected in 224.43s (0:03:44)**.
+Failures are only the known pre-existing ones: the four
+`tests/integration/test_archive_backfill.py` Typer/CLI cases and
+`tests/unit/test_cli_flags.py::test_run_rejects_an_unknown_service_role`.
+Focused files: `test_config.py` 56 passed,
+`test_storage_composition.py` 34 passed,
+`test_quarantine_retention_gc.py` 7 passed, `test_mdgw_cli.py` 7 passed,
+`test_multiprocess_services.py` 5 passed. Ruff: changed `src/` files 0
+findings; changed test files only the pre-existing
+`test_quarantine_retention_gc.py` findings.
+
+Intentionally not changed: `api`/`replay` central `rule_versions` ownership;
+nested-layout tests remain explicit rather than parametrized.
