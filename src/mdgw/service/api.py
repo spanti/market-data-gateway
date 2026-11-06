@@ -15,7 +15,7 @@ from mdgw.core.envelope import table_to_messages
 from mdgw.metrics import MetricsRegistry
 from mdgw.reference import load_instrument_store
 from mdgw.service.common import ns_iso, update_dataset_metrics
-from mdgw.store.parquet_dataset import ParquetBarStore
+from mdgw.store.composition import StorageComposition
 from mdgw.streaming import StreamingInterface
 
 if TYPE_CHECKING:
@@ -41,14 +41,9 @@ class ApiService:
         data_root: Path | None = None,
     ) -> None:
         self.config = config
-        self.store = ParquetBarStore(
-            data_root if data_root is not None else config.storage.root,
-            compression=config.storage.compression,
-            row_group_size=config.storage.row_group_size,
-            format_version=config.storage.format_version,
-            schema_version=config.storage.schema_version,
-            duckdb=config.storage.duckdb.to_options(),
-        )
+        # The api only owns a Bars read dependency; Storage Composition owns
+        # the root resolution and Store mapping.
+        self.store = StorageComposition(config, root=data_root).bars()
         self.instrument_store = load_instrument_store(self.store.root)
         self.metrics = MetricsRegistry()
 

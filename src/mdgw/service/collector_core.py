@@ -43,12 +43,13 @@ from mdgw.reference import (
 from mdgw.service.bar_sink import BarSink, ImmediateBarSink
 from mdgw.state.health import GapEvent, HealthTracker
 from mdgw.state.high_water_mark import HighWaterMarkStore
-from mdgw.store.parquet_dataset import ParquetBarStore
+from mdgw.store.composition import StorageComposition
 
 if TYPE_CHECKING:
     from mdgw.config import GatewayConfig
     from mdgw.core.bar import Bar, RawBar
     from mdgw.ingest.feed_handler import FeedHandler
+    from mdgw.store.parquet_dataset import ParquetBarStore
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,30 @@ _OPEN_BEFORE_INGEST_MESSAGE = (
 _OPEN_BEFORE_BACKFILL_MESSAGE = (
     "CollectorCore.open_state() must be called before backfill()"
 )
+
+
+def _resolve_default_stores(
+    composition: StorageComposition,
+    config: GatewayConfig,
+    store: ParquetBarStore | None,
+    quarantine: QuarantineStore | None,
+) -> tuple[ParquetBarStore, QuarantineStore, str]:
+    """Use injected Stores untouched and compose only the missing half.
+
+    A default Quarantine anchors on the injected Store root; a configured
+    explicit Quarantine root still wins. The Rule Version comes from the
+    composition that built the default Stores, or from the primary
+    config-derived composition when both Stores were injected.
+    """
+    if store is None:
+        if quarantine is None:
+            bundle = composition.bars_and_quarantine()
+            return bundle.bars, bundle.quarantine, composition.rule_version
+        return composition.bars(), quarantine, composition.rule_version
+    if quarantine is not None:
+        return store, quarantine, composition.rule_version
+    anchored = StorageComposition(config, root=store.root)
+    return store, anchored.quarantine(), anchored.rule_version
 
 
 class CollectorCore:
@@ -82,14 +107,15 @@ class CollectorCore:
     ) -> None:
         self.feed_handler = feed_handler
         self.config = config
-        self.store = store or ParquetBarStore(
-            data_root if data_root is not None else config.storage.root,
-            compression=config.storage.compression,
-            row_group_size=config.storage.row_group_size,
-            format_version=config.storage.format_version,
-            schema_version=config.storage.schema_version,
-            duckdb=config.storage.duckdb.to_options(),
-            rule_versions={config.storage.quarantine.rule_version},
+        # One effective Normalization Rule Version for everything this core
+        # writes, owned by the same composition that built the defaults.
+        self.store, self.quarantine, self.rule_version = (
+            _resolve_default_stores(
+                StorageComposition(config, root=data_root),
+                config,
+                store,
+                quarantine,
+            )
         )
         self.aggregator = aggregator or BarAggregator(
             intervals=config.aggregation.intervals,
@@ -114,11 +140,6 @@ class CollectorCore:
         )
         # The Quarantine Dataset is independent of the Bars Dataset and is
         # never registered, scanned or exported by the Store/REST/Replay.
-        self.quarantine = quarantine or QuarantineStore(
-            config.storage.quarantine.resolved_root(self.store.root),
-            schema_version=config.storage.quarantine.schema_version,
-            retention_days=config.storage.quarantine.retention_days,
-        )
         # `GatewayRuntime` passes its own resolver because tests replace the
         # runtime's Instrument Store after start.
         self._asset_class_for_callback = asset_class_for
@@ -307,7 +328,7 @@ class CollectorCore:
         return QuarantineRecord(
             source_stage=source_stage,
             reason_code=reason_code,
-            rule_version=self.config.storage.quarantine.rule_version,
+            rule_version=self.rule_version,
             source_location=live_batch_source_location(ingest_ts, row_index),
             details=details,
             raw_record=self._raw_record(raw),

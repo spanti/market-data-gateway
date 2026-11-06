@@ -223,6 +223,25 @@ class QuarantineConfig(_ConfigModel):
         return Path(storage_root) / "quarantine"
 
 
+def ensure_quarantine_is_independent(
+    bars_dataset_root: Path, quarantine_root: Path
+) -> None:
+    """Raise when the Quarantine Dataset is inside the Bars Dataset.
+
+    ADR-0014 requires the two Datasets to be independent. Normalized
+    comparison does not require either path to exist, so the same check also
+    covers root overrides and programmatically copied configs.
+    """
+    bars_root = Path(bars_dataset_root).resolve()
+    quarantine = Path(quarantine_root).resolve()
+    if quarantine == bars_root or bars_root in quarantine.parents:
+        msg = (
+            "storage.quarantine.root must not be inside the Bars Dataset "
+            f"({bars_root})"
+        )
+        raise ValueError(msg)
+
+
 class StorageConfig(_ConfigModel):
     root: Path = Path("./data")
     schema_version: int = 1
@@ -239,14 +258,9 @@ class StorageConfig(_ConfigModel):
         """The Quarantine Dataset must never live inside the Bars Dataset."""
         if self.quarantine.root is None:
             return self
-        quarantine_root = Path(self.quarantine.root).resolve()
-        bars_root = (Path(self.root) / "bars").resolve()
-        if quarantine_root == bars_root or bars_root in quarantine_root.parents:
-            msg = (
-                "storage.quarantine.root must not be inside the Bars Dataset "
-                f"({bars_root})"
-            )
-            raise ValueError(msg)
+        ensure_quarantine_is_independent(
+            Path(self.root) / "bars", Path(self.quarantine.root)
+        )
         return self
 
 

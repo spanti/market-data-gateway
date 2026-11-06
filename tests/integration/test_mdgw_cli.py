@@ -102,6 +102,49 @@ def test_cli_compact_merges_files(tmp_path: Path) -> None:
     assert _active_count(store.dataset_root) == 1
 
 
+def test_cli_compact_rejects_an_invalid_duration_without_creating_storage(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "data"
+
+    result = _run_cli(
+        "--root", str(root), "compact", "--older-than", "tomorrow"
+    )
+
+    assert result.returncode != 0
+    assert "older-than" in result.stderr
+    # Parameter validation happens before storage composition: no data root,
+    # Dataset descriptor, Manifest or DuckDB temp directory.
+    assert not root.exists()
+
+
+def test_cli_gc_rejects_dry_run_with_apply_without_creating_storage(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "data"
+    config_path = tmp_path / "gateway.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[storage]",
+                f'root = "{root.as_posix()}"',
+                "[retention]",
+                "enabled = true",
+                "bars_days = 90",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = _run_cli(
+        "--config", str(config_path), "gc", "--dry-run", "--apply"
+    )
+
+    assert result.returncode != 0
+    assert not root.exists()
+
+
 def test_cli_gc_defaults_to_dry_run_and_apply_deletes(tmp_path: Path) -> None:
     store = ParquetBarStore(tmp_path)
     store.write_bars(

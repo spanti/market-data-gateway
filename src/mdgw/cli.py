@@ -24,9 +24,8 @@ import typer
 from mdgw.config import GatewayConfig, load_config
 from mdgw.core.time import utc_now
 from mdgw.logging import configure_json_logging
-from mdgw.quarantine import QuarantineStore
+from mdgw.store.composition import StorageComposition
 from mdgw.store.maintenance import parse_duration
-from mdgw.store.parquet_dataset import ParquetBarStore
 
 if TYPE_CHECKING:
     from mdgw.core.instrument import Instrument
@@ -104,14 +103,14 @@ def compact(
     """Merge small Data Files per partition."""
     config_path, root_path = _common_options(ctx, config, root)
     gateway_config = _load_config(config_path)
-    store = _build_store(root_path, gateway_config)
-
     try:
         duration = parse_duration(older_than)
     except ValueError as exc:
         raise typer.BadParameter(
             str(exc), param_hint="--older-than"
         ) from exc
+
+    store = StorageComposition(gateway_config, root=root_path).bars()
 
     report = store.compact(older_than=duration)
     print(
@@ -156,7 +155,7 @@ def gc(
 
     config_path, root_path = _common_options(ctx, config, root)
     gateway_config = _load_config(config_path)
-    store = _build_store(root_path, gateway_config)
+    store = StorageComposition(gateway_config, root=root_path).bars()
 
     if not gateway_config.retention.enabled:
         print("gc: retention is disabled; nothing to do")
@@ -219,23 +218,19 @@ def quarantine_gc(  # ruff: ignore[too-many-arguments, too-many-positional-argum
 
     config_path, root_path = _common_options(ctx, config, root)
     gateway_config = _load_config(config_path)
-    storage_root = (
-        root_path if root_path is not None else gateway_config.storage.root
-    )
     quarantine_config = gateway_config.storage.quarantine
-    store = QuarantineStore(
-        quarantine_config.resolved_root(storage_root),
-        schema_version=quarantine_config.schema_version,
-        retention_days=quarantine_config.retention_days,
-    )
     requested = (
-        store.retention_days
+        quarantine_config.retention_days
         if retention_days is None
         else int(retention_days)
     )
     if requested < 0:
         msg = "retention days must be 0 (keep forever) or positive"
         raise typer.BadParameter(msg, param_hint="--retention-days")
+
+    # Quarantine-only composition: this command must not construct a
+    # ParquetBarStore, create a DuckDB temp directory or touch Bars state.
+    store = StorageComposition(gateway_config, root=root_path).quarantine()
     if requested == 0:
         print("quarantine-gc: retention is 0 (keep forever); nothing to delete")
         return 0
@@ -472,7 +467,7 @@ def _run_service(
     config = _load_config(config_path)
     level = log_level or config.service.log_level
     configure_json_logging(level, service=service)
-    data_root = root or config.storage.root
+    data_root = StorageComposition(config, root=root).effective_root
 
     try:
         role = _build_service(
@@ -565,7 +560,7 @@ def _run_up(
     config = _load_config(config_path)
     level = log_level or config.service.log_level
     configure_json_logging(level, service="supervisor")
-    data_root = root or config.storage.root
+    data_root = StorageComposition(config, root=root).effective_root
 
     from mdgw.service.supervisor import Supervisor  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
 
@@ -684,23 +679,6 @@ def _load_config(config_path: Path | None) -> GatewayConfig:
         raise SystemExit(msg) from exc
 
 
-def _build_store(
-    root: Path | None, config: GatewayConfig
-) -> ParquetBarStore:
-    root = root or config.storage.root
-    return ParquetBarStore(
-        root,
-        compression=config.storage.compression,
-        row_group_size=config.storage.row_group_size,
-        format_version=config.storage.format_version,
-        schema_version=config.storage.schema_version,
-        duckdb=config.storage.duckdb.to_options(),
-        # New Manifest entries carry the configured audit Rule Version so the
-        # operator CLI and the archive importer share one lineage identity.
-        rule_versions=[config.storage.quarantine.rule_version],
-    )
-
-
 # -- archive backfill --------------------------------------------------------
 
 
@@ -799,12 +777,6 @@ def _run_archive_backfill(  # ruff: ignore[too-many-arguments, too-many-statemen
     config = _load_config(config_path)
     level = log_level or config.service.log_level
     configure_json_logging(level, service="backfill")
-    store = _build_store(root, config)
-    quarantine = QuarantineStore(
-        config.storage.quarantine.resolved_root(store.root),
-        schema_version=config.storage.quarantine.schema_version,
-        retention_days=config.storage.quarantine.retention_days,
-    )
 
     end = end or (utc_now().date() - timedelta(days=1))
     if end < start:
@@ -812,6 +784,9 @@ def _run_archive_backfill(  # ruff: ignore[too-many-arguments, too-many-statemen
             f"error: --end {end} precedes --start {start}", err=True
         )
         raise typer.Exit(code=1)
+
+    composition = StorageComposition(config, root=root)
+    bundle = composition.bars_and_quarantine()
 
     from mdgw.aggregate import BarAggregator  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
     from mdgw.archive import (  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
@@ -857,11 +832,13 @@ def _run_archive_backfill(  # ruff: ignore[too-many-arguments, too-many-statemen
     retention_bars_days = (
         config.retention.bars_days if config.retention.enabled else 0
     )
-    hwm = HighWaterMarkStore(store.root / config.collector.state_db_name)
+    hwm = HighWaterMarkStore(
+        bundle.bars.root / config.collector.state_db_name
+    )
     try:
         report = import_archive(
             instruments=archive_instruments,
-            store=store,
+            store=bundle.bars,
             hwm=hwm,
             aggregator=aggregator,
             fetcher=fetcher,
@@ -872,10 +849,11 @@ def _run_archive_backfill(  # ruff: ignore[too-many-arguments, too-many-statemen
             interval=interval,
             granularity=granularity,
             retention_bars_days=retention_bars_days,
-            quarantine=quarantine,
-            # The configured audit Rule Version reaches both Quarantine
-            # records and the Manifest entries written by this Store.
-            rule_version=config.storage.quarantine.rule_version,
+            quarantine=bundle.quarantine,
+            # The one effective Rule Version from this composition reaches
+            # both Quarantine records and the Manifest entries written by the
+            # composed Bars Store.
+            rule_version=composition.rule_version,
         )
     finally:
         hwm.close()

@@ -24,7 +24,7 @@ from mdgw.ingest.composite import attach_quarantine
 from mdgw.replay.service import ReplayService
 from mdgw.service.collector_core import CollectorCore
 from mdgw.state.health import GapEvent, HealthTracker
-from mdgw.store.parquet_dataset import ParquetBarStore
+from mdgw.store.composition import StorageComposition
 from mdgw.streaming import StreamingInterface
 
 if TYPE_CHECKING:
@@ -67,15 +67,12 @@ class GatewayRuntime:
     ) -> None:
         self.feed_handler = feed_handler
         self.config = config
-        self.store = ParquetBarStore(
-            data_root if data_root is not None else config.storage.root,
-            compression=config.storage.compression,
-            row_group_size=config.storage.row_group_size,
-            format_version=config.storage.format_version,
-            schema_version=config.storage.schema_version,
-            duckdb=config.storage.duckdb.to_options(),
-            rule_versions={config.storage.quarantine.rule_version},
-        )
+        # One joint composition owns both the Bars and Quarantine mappings and
+        # the effective Normalization Rule Version for this runtime.
+        composition = StorageComposition(config, root=data_root)
+        bundle = composition.bars_and_quarantine()
+        self.store = bundle.bars
+        self.quarantine = bundle.quarantine
         self.instrument_store: InstrumentStore | None = None
         self.aggregator = BarAggregator(
             intervals=config.aggregation.intervals,
@@ -91,17 +88,17 @@ class GatewayRuntime:
             feed_handler=feed_handler,
             config=config,
             store=self.store,
+            quarantine=self.quarantine,
             aggregator=self.aggregator,
             health=self._health,
             asset_class_for=self._asset_class_for,
         )
-        # Independent Quarantine Dataset; never part of the Bars Dataset. A
-        # handler constructed before the runtime shares this exact Store.
-        self.quarantine = self._core.quarantine
+        # The pipeline and the handler share this exact independent Quarantine
+        # Dataset instance, and both use the composition's one Rule Version.
         attach_quarantine(
             feed_handler,
             self.quarantine,
-            rule_version=config.storage.quarantine.rule_version,
+            rule_version=composition.rule_version,
         )
 
         self._streaming: StreamingInterface | None = None

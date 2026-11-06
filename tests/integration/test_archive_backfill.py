@@ -206,10 +206,15 @@ def _rows(store: ParquetBarStore, interval: str) -> list[dict]:
 
 
 def _write_cli_fixture(
-    tmp_path: Path, *, rule_version: str | None = None
+    tmp_path: Path,
+    *,
+    rule_version: str | None = None,
+    data_root: Path | None = None,
+    quarantine_root: Path | None = None,
+    quarantine_schema_version: int | None = None,
 ) -> tuple[Path, Path]:
     """Write a minimal config + Instrument Reference Data for CLI tests."""
-    data_root = tmp_path / "data"
+    data_root = data_root or tmp_path / "data"
     instruments_dir = tmp_path / "instruments"
     instruments_dir.mkdir()
     (instruments_dir / "binance.yaml").write_text(
@@ -241,13 +246,16 @@ def _write_cli_fixture(
         "[instruments]",
         f'path = "{instruments_dir.as_posix()}"',
     ]
+    quarantine_lines: list[str] = []
+    if quarantine_root is not None:
+        quarantine_lines.append(f'root = "{quarantine_root.as_posix()}"')
+    if quarantine_schema_version is not None:
+        quarantine_lines.append(f"schema_version = {quarantine_schema_version}")
     if rule_version is not None:
-        config_lines.extend(
-            [
-                "[storage.quarantine]",
-                f'rule_version = "{rule_version}"',
-            ]
-        )
+        quarantine_lines.append(f'rule_version = "{rule_version}"')
+    if quarantine_lines:
+        config_lines.append("[storage.quarantine]")
+        config_lines.extend(quarantine_lines)
     config_path = tmp_path / "gateway.toml"
     config_path.write_text(
         "\n".join(config_lines) + "\n", encoding="utf-8"
@@ -781,6 +789,81 @@ def test_cli_backfill_rejects_a_missing_archive_dir(tmp_path: Path) -> None:
     assert not data_root.exists()
 
 
+def test_cli_backfill_rejects_end_before_start_without_creating_storage(
+    tmp_path: Path,
+) -> None:
+    config_path, data_root = _write_cli_fixture(tmp_path)
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+
+    result = main(
+        [
+            "backfill",
+            "--archive",
+            "--config",
+            str(config_path),
+            "--start",
+            "2024-01-02",
+            "--end",
+            "2024-01-01",
+            "--archive-dir",
+            str(archive_dir),
+        ]
+    )
+
+    assert result == 1
+    # Argument validation precedes storage composition: no data root, Dataset
+    # descriptor, Manifest or DuckDB temp directory.
+    assert not data_root.exists()
+
+
+def test_cli_backfill_rejects_an_override_induced_nested_layout_without_writes(
+    tmp_path: Path,
+) -> None:
+    configured_root = tmp_path / "configured"
+    override_root = tmp_path / "override"
+    nested_quarantine = override_root / "bars" / "quarantine"
+    # Valid against the configured root; only the CLI override puts Quarantine
+    # inside the actual Bars Dataset.
+    config_path, _ = _write_cli_fixture(
+        tmp_path,
+        data_root=configured_root,
+        quarantine_root=nested_quarantine,
+    )
+    archive_dir = tmp_path / "archive"
+    day = date(2024, 1, 1)
+    _write_archive(
+        archive_dir,
+        ArchivePeriod("daily", day, day),
+        times=[datetime(2024, 1, 1, 12, 0, tzinfo=UTC)],
+    )
+
+    with pytest.raises(ValueError, match="must not be inside the Bars Dataset"):
+        main(
+            [
+                "backfill",
+                "--archive",
+                "--config",
+                str(config_path),
+                "--root",
+                str(override_root),
+                "--instrument",
+                INSTRUMENT,
+                "--start",
+                "2024-01-01",
+                "--end",
+                "2024-01-01",
+                "--archive-dir",
+                str(archive_dir),
+            ]
+        )
+
+    # Composition fails before the Bars root, DuckDB temp directory, Dataset
+    # descriptor, Manifest or Quarantine root is created.
+    assert not configured_root.exists()
+    assert not override_root.exists()
+
+
 def _write_daily_files(archive_dir: Path, start: date, end: date) -> None:
     day = start
     while day <= end:
@@ -1211,3 +1294,123 @@ def test_cli_archive_backfill_uses_the_configured_rule_version(
     quarantine = QuarantineStore(data_root / "quarantine")
     (record,) = quarantine.read_records().to_pylist()
     assert record["rule_version"] == expected
+
+
+def test_cli_archive_backfill_uses_the_configured_quarantine_root(
+    tmp_path: Path, capsys
+) -> None:
+    configured_root = tmp_path / "configured"
+    override_root = tmp_path / "override"
+    explicit_quarantine = tmp_path / "audit" / "quarantine"
+    config_path, _ = _write_cli_fixture(
+        tmp_path,
+        data_root=configured_root,
+        quarantine_root=explicit_quarantine,
+        quarantine_schema_version=2,
+        rule_version="custom-2",
+    )
+    archive_dir = tmp_path / "archive"
+    good_day = date(2024, 1, 1)
+    _write_archive(
+        archive_dir,
+        ArchivePeriod("daily", good_day, good_day),
+        times=[
+            datetime(2024, 1, 1, 12, minute, tzinfo=UTC)
+            for minute in range(2)
+        ],
+    )
+    bad_day = date(2024, 1, 2)
+    _write_archive(
+        archive_dir,
+        ArchivePeriod("daily", bad_day, bad_day),
+        times=[datetime(2024, 1, 2, 12, 0, tzinfo=UTC)],
+        corrupt_checksum=True,
+    )
+
+    result = main(
+        [
+            "backfill",
+            "--archive",
+            "--config",
+            str(config_path),
+            "--root",
+            str(override_root),
+            "--instrument",
+            INSTRUMENT,
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-02",
+            "--archive-dir",
+            str(archive_dir),
+        ]
+    )
+
+    assert result == 1
+    assert "failures=1" in capsys.readouterr().out
+
+    # The configured explicit Quarantine root receives the record and keeps
+    # its own schema; it does not follow the Bars root override.
+    (record,) = QuarantineStore(
+        explicit_quarantine
+    ).read_records().to_pylist()
+    assert record["source_stage"] == SOURCE_STAGE_ARCHIVE_FILE
+    assert record["reason_code"] == REASON_ARCHIVE_CHECKSUM_MISMATCH
+    assert record["quarantine_schema_version"] == 2
+    assert record["rule_version"] == "custom-2"
+    assert not (override_root / "quarantine").exists()
+    assert not configured_root.exists()
+
+    # The same effective Rule Version reaches the Bars Manifest written by
+    # the composed Bars Store.
+    store = ParquetBarStore(override_root)
+    entries = active_manifest_entries(store.dataset_root)
+    assert entries
+    assert {tuple(entry["rule_versions"]) for entry in entries} == {
+        ("custom-2",)
+    }
+
+
+def test_cli_archive_backfill_default_quarantine_follows_the_root_override(
+    tmp_path: Path, capsys
+) -> None:
+    configured_root = tmp_path / "configured"
+    override_root = tmp_path / "override"
+    config_path, _ = _write_cli_fixture(tmp_path, data_root=configured_root)
+    archive_dir = tmp_path / "archive"
+    day = date(2024, 1, 1)
+    _write_archive(
+        archive_dir,
+        ArchivePeriod("daily", day, day),
+        times=[datetime(2024, 1, 1, 12, 0, tzinfo=UTC)],
+        corrupt_checksum=True,
+    )
+
+    result = main(
+        [
+            "backfill",
+            "--archive",
+            "--config",
+            str(config_path),
+            "--root",
+            str(override_root),
+            "--instrument",
+            INSTRUMENT,
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-01",
+            "--archive-dir",
+            str(archive_dir),
+        ]
+    )
+
+    assert result == 1
+    assert "failures=1" in capsys.readouterr().out
+
+    # The default Quarantine root is anchored on the actual storage root.
+    (record,) = QuarantineStore(
+        override_root / "quarantine"
+    ).read_records().to_pylist()
+    assert record["reason_code"] == REASON_ARCHIVE_CHECKSUM_MISMATCH
+    assert not configured_root.exists()
