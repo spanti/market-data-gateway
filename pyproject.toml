@@ -26,6 +26,9 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "websockets>=13",
+    # OIDC ID Token signature verification (RS256/ES256 via JWKS) in the
+    # Admin API. Deliberately the only crypto dependency; no PyJWT/authlib.
+    "cryptography>=42",
 ]
 
 [project.scripts]

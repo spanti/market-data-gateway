@@ -319,6 +319,10 @@ class ApiService:
             queue_size=self.config.streaming.queue_size,
             lag_notice_interval_ms=self.config.streaming.lag_notice_interval_ms,
         )
+        # The Admin WebSocket reuses the public hub's bounded queue and
+        # lag_notice plumbing; attach it before the app mounts admin routes.
+        if self._admin is not None:
+            self._admin.ws_hub = self._hub
         app = create_app(
             self.store,
             instrument_store=self.instrument_store,

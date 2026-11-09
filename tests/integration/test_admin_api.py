@@ -444,6 +444,10 @@ def test_api_service_mounts_admin_and_releases_the_lease_on_stop(
     service = ApiService(config, data_root=tmp_path)
     try:
         service.start()
+        # Ticket 02: the Admin WS reuses the public hub, attached before the
+        # app (and therefore the admin router) is built.
+        assert service._admin is not None
+        assert service._admin.ws_hub is service._hub
         status, headers, body = _request(
             service.base_url + CAPABILITIES
         )
