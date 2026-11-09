@@ -22,7 +22,23 @@ export const apiClient = axios.create({
   },
 });
 
-function normalizeHeaders(headers: unknown): HeaderMap {
+/**
+ * Blob downloads use their own client so the global JSON interceptor does not
+ * replace the response body with a normalized error. The caller parses a Blob
+ * error body through `parseBlobFailure`; the bytes of a successful CSV are
+ * never touched by the frontend.
+ */
+export const blobClient = axios.create({
+  baseURL: BASE_URL,
+  // Large synchronous exports can be slow; an abort controller owns lifetime.
+  timeout: 0,
+  withCredentials: true,
+  headers: {
+    Accept: "text/csv, application/json",
+  },
+});
+
+export function normalizeHeaders(headers: unknown): HeaderMap {
   if (!headers) {
     return {};
   }
