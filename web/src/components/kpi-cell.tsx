@@ -27,7 +27,11 @@ export function KpiCell({
   className,
 }: KpiCellProps) {
   return (
-    <div data-slot="kpi-cell" className={cn("p-4", className)}>
+    <div
+      data-slot="kpi-cell"
+      data-kpi-label={label}
+      className={cn("p-4", className)}
+    >
       <dt className="text-xs text-muted-foreground">
         {label}
         {qualifier ? (

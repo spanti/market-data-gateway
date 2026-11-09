@@ -83,6 +83,12 @@ export default defineConfig(({ mode }) => {
             ],
             "vendor-http": ["axios"],
             "vendor-schema": ["zod"],
+            "vendor-echarts": [
+              "echarts/core",
+              "echarts/charts",
+              "echarts/components",
+              "echarts/renderers",
+            ],
           },
         },
       },
