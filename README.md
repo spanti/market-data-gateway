@@ -247,14 +247,19 @@ REST, WebSocket and Replay.
 
 ## Tests and benchmarks
 
-Run the full offline suite from the repository root:
+Run the Python offline suite from the repository root:
 
 ```bash
 conda run -n nautilus python -m pytest -q
 ```
 
 Network tests are marked `network` and deselected by default
-(`addopts = -m 'not network'`). The full offline suite is the acceptance gate.
+(`addopts = -m 'not network'`). The Python offline suite is the Python
+acceptance gate. The Operator Console has separate typecheck, lint, unit,
+production build and Playwright gates; see
+[Operator Console local development](web/README.md#local-development). CI runs
+the Python offline suite and the web typecheck, lint, unit and production build
+gates on every push and pull request.
 
 ```bash
 python benchmarks/bench_ingest.py
