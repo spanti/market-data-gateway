@@ -63,11 +63,12 @@ def _session(now_ns: int = 1_000 * SECONDS) -> SessionRecord:
     )
 
 
-def test_ticket_02_migration_is_discovered_after_foundation() -> None:
+def test_migrations_are_discovered_in_numeric_order() -> None:
     versions = [version for version, _ in discover_migrations()]
 
-    assert versions == [1, 2]
-    assert ADMIN_STORE_SCHEMA_VERSION == 2
+    # 003 is ticket 03's Operator Audit Event schema.
+    assert versions == [1, 2, 3]
+    assert ADMIN_STORE_SCHEMA_VERSION == 3
 
 
 def test_auth_tables_exist_in_the_management_database(

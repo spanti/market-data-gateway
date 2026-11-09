@@ -271,7 +271,7 @@ def test_capabilities_is_public_even_though_auth_is_required(
     assert "client_secret" not in json.dumps(document)
 
 
-def test_unimplemented_adapters_stay_unsupported_with_flags_enabled(
+def test_unconfigured_oidc_stays_unsupported_while_audit_is_available(
     tmp_path: Path,
 ) -> None:
     config = _admin_config(tmp_path).model_copy(
@@ -287,14 +287,19 @@ def test_unimplemented_adapters_stay_unsupported_with_flags_enabled(
     adapter_states = {
         entry["name"]: entry["state"] for entry in document["adapters"]
     }
+    # An adapter flag alone cannot announce OIDC without a configured client.
     assert adapter_states["oidc"] == "unsupported"
-    assert adapter_states["audit_store"] == "unsupported"
     assert document["capabilities"]["oidc_session"]["state"] == (
         "unsupported"
     )
-    assert document["capabilities"]["operator_audit"]["state"] == (
-        "unsupported"
-    )
+    # Ticket 03 implements the in-process append-only audit store.
+    assert adapter_states["audit_store"] == "available"
+    assert document["capabilities"]["operator_audit"] == {
+        "state": "enabled",
+        "export": False,
+        "edit": False,
+        "delete": False,
+    }
 
 
 def test_admin_openapi_path_is_additive_when_enabled(
