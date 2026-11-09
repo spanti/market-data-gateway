@@ -119,7 +119,7 @@ function DisabledArea({
 }
 
 export function FeedSubscriptionView() {
-  const { capability, session } = useRuntimeMode();
+  const { capability, session, writesStopped } = useRuntimeMode();
   const queryClient = useQueryClient();
   const csrfToken = session?.csrfToken ?? null;
 
@@ -142,8 +142,16 @@ export function FeedSubscriptionView() {
   const flowReadBlockReason = flowReadReason ?? flowCapabilityReason;
   const canReadFeed = isAdmin && feedReadReason === null;
   const canReadFlow = isAdmin && flowReadBlockReason === null;
-  const feedWriteBlockReason = writeReason ?? feedCapabilityReason;
-  const flowWriteBlockReason = flowWriteReason ?? flowCapabilityReason;
+  const stoppedWriteReason: DisabledReasonValue | null = writesStopped
+    ? {
+        code: "requires-login",
+        message: "会话已停止写操作，请重新登录",
+      }
+    : null;
+  const feedWriteBlockReason =
+    stoppedWriteReason ?? writeReason ?? feedCapabilityReason;
+  const flowWriteBlockReason =
+    stoppedWriteReason ?? flowWriteReason ?? flowCapabilityReason;
 
   const subscriptionsQuery = useQuery({
     queryKey: FEED_QUERY_KEY,

@@ -102,7 +102,10 @@ function adminSession(role: "SuperAdmin" | "Operator" | "Auditor"): AdminSession
     access_role: role,
     user: { subject: "oidc-subject-1", displayName: "Ada", email: null },
     server_time: null,
+    session: null,
+    csrf: { header_name: "X-CSRF-Token", token: "csrf" },
     csrfToken: "csrf",
+    received_at: 0,
   };
 }
 
@@ -134,6 +137,17 @@ function renderView(options: {
       options.subject.kind === "role" ? options.subject.role : null,
     subject: options.subject,
     refreshCapabilities: () => undefined,
+    sessionIssue: null,
+    sessionExpiry: {
+      state: "none",
+      bound: null,
+      remainingMs: null,
+      remainingSeconds: null,
+    },
+    writesStopped: false,
+    authPending: false,
+    logout: async () => undefined,
+    refreshSession: async () => undefined,
   };
 
   const view = render(

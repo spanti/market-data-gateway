@@ -294,7 +294,14 @@ function lifecycleDisabledReason(
   subject: PermissionSubject,
   action: ServiceLifecycleAction,
   capability: CapabilityState | null,
+  writesStopped: boolean,
 ): DisabledReasonValue | null {
+  if (writesStopped) {
+    return {
+      code: "requires-login",
+      message: "会话已停止写操作，请重新登录",
+    };
+  }
   const roleReason = disabledReasonFor(
     subject,
     `service.lifecycle.${action}` as const,
@@ -443,7 +450,7 @@ function OperationSummary({
 }
 
 export function ServiceInstanceView() {
-  const { capability, session } = useRuntimeMode();
+  const { capability, session, writesStopped } = useRuntimeMode();
   const subject = usePermissionSubject();
   const csrfToken = session?.csrfToken ?? null;
 
@@ -784,6 +791,7 @@ export function ServiceInstanceView() {
                           subject,
                           action,
                           capability,
+                          writesStopped,
                         );
                         const lockedReason: DisabledReasonValue | null =
                           operationActive
