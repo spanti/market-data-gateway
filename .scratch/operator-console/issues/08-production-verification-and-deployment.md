@@ -4,7 +4,7 @@
 
 **Blocked by:** 02, 03, 04, 05, 06, 07
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] 1280/1440px、Chrome/Edge、键盘、状态非颜色编码和图表表格读数通过检查。
 - [ ] 静态资源自托管，CSP、安全头和内网-only Current Contract 警告完整。
@@ -15,3 +15,5 @@
 - [ ] 原型分支和最终视觉决策已记录，生产树不包含 throwaway switcher/variants。
 
 ## Comments
+
+**Resolved (2026-11-09):** 合并提交 `e46ec46`，评审修复至 `ecb0c15`。交付 `web/Dockerfile`（Node 构建 → Nginx 静态，75.4 MB，无 Node 运行时）、`web/nginx/` 双模式模板（Current Contract 代理 REST/WS/ops/Prometheus；Admin 模式 404 `/prometheus`、`/metrics`、`/status`、`/ws`、`/ops/*`）、CSP/安全响应头与代理头信任边界、`web/README.md`、`web/docs/acceptance-report.md`。Playwright 17/17 通过（真实 Python collector/api/replay/Prometheus + Chrome）：真实 CSV 下载、图与游标、1280/1440 与键盘、监控状态、真实 WS 虚拟列表与断线分段；Admin 401/403/409/429/确认框为拦截式契约测试。Docker 构建成功；Edge 布局/键盘 4/4。验收报告逐项区分真实联调/契约测试/后端阻塞/未执行；生产树无原型切换器或变体。代码评审修复后最终套件 458 tests + 17 E2E。

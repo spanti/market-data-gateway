@@ -4,7 +4,7 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] Feed 与 WS Session Subscription 不混淆，409 和 Drift 可见，删除不影响历史数据的语义清楚。
 - [ ] API Rate Limit 与 WebSocket Slow Consumer 分开，无通用模糊阈值。
@@ -15,3 +15,5 @@
 - [ ] Auditor 可建立只读会话订阅但不能使用自由 JSON；所有角色矩阵经组件与契约测试。
 
 ## Comments
+
+**Resolved (2026-11-09):** 合并提交 `ac1bb8f`。Console 三视图分离：Service Instance（Current Contract 真实 ops 状态；生命周期仅 Admin 契约测试）、Feed Subscription（Desired/Observed/Drift/Last Error、409 人工合并、流控拆分，仅契约测试）、WebSocket Debug（真实 `/ws`：受控 Topic、ping/pong 仅显示“已同步”、server lag 与界面丢弃分开、10,000 条环形虚拟列表、筛选/清空/暂停、安全原始 JSON、断线分段）。角色矩阵：Auditor 仅受控订阅，Operator/SuperAdmin 白名单 JSON；能力未知时禁止连接。Admin API 不存在，相关流程仅 MSW 契约测试。代码评审修复：实时跟随使用模式感知 WS 目标、429 门控、RHF+Zod、术语统一。最终套件 458 tests + 17 E2E。

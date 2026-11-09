@@ -4,7 +4,7 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] OIDC Token、密码和会话不进入 URL/localStorage，前端无角色选择器。
 - [ ] 30 分钟空闲与 8 小时绝对会话提示、401 停止写操作和注销流程可用。
@@ -16,3 +16,5 @@
 - [ ] 未与真实 OIDC/Admin API 联调时明确报告验证缺口。
 
 ## Comments
+
+**Resolved (2026-11-09):** 合并提交 `680a4c8`。OIDC 会话生命周期（跳转登录、会话探测、内存 CSRF、注销、30m idle / 8h absolute 5 分钟预警、401 停止写入、403 不登出、无 token/密码持久化）、角色矩阵、Operator Audit Event 筛选/分页/Operation ID 时间线/脱敏 before/after 仅契约测试（Admin API/OIDC 不存在）。Current Contract 无假登录、无角色切换器。代码评审修复：能力/版本不兼容门控、429 门控、术语与类型统一。最终套件 458 tests。

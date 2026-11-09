@@ -4,7 +4,7 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] 当前快照不累积成伪历史，持久 Gap 与当前快照在 UI 上有明确来源区别。
 - [ ] 不显示通用 Sequence 连续性结论或 seq+1 误报。
@@ -15,3 +15,5 @@
 - [ ] Admin 功能在后端联调前只计契约测试，不标记完整交付。
 
 ## Comments
+
+**Resolved (2026-11-09):** 合并提交 `d72bfc0`。Current Contract 显示 Collector 进程内 `gap_unrecoverable` 快照并明确“重启丢失”，不做客户端累积；Collector 不可达显示未知；无 Sequence 连续性或 `seq+1` 结论。Admin 持久 Gap 与 Backfill Job（七状态、`1m + 内部 Bar Aggregation` 计划、部分成功、协作取消、重试新建关联 Job、Gap 关联解决、无物理删除）仅契约测试。代码评审修复：Admin/能力未知模式不再请求 collector ops、版本不兼容禁用写入、统一能力门控。最终套件 458 tests。
