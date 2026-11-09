@@ -1,6 +1,7 @@
 import { Outlet } from "react-router-dom";
 import { GlobalHttpNotice } from "@/components/global-http-notice";
 import { ModeBanner } from "@/components/mode-banner";
+import { SessionExpiryNotice } from "@/components/session-expiry-notice";
 import { TopNav } from "@/components/top-nav";
 
 export function AppShell() {
@@ -14,6 +15,7 @@ export function AppShell() {
       </a>
       <TopNav />
       <ModeBanner />
+      <SessionExpiryNotice />
       <GlobalHttpNotice />
       <main
         id="main-content"
