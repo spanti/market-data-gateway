@@ -162,6 +162,15 @@ export interface HealthPayload {
   service: string;
 }
 
+/**
+ * `/readyz` uses 200 for ready and 503 for not-ready with a small JSON body.
+ * A 503 is real readiness data, not a transport failure, so it must reach the
+ * UI instead of being rejected as an error.
+ */
+function isReadinessResponse(status: number): boolean {
+  return status === 200 || status === 503;
+}
+
 export async function fetchDatasetStatus(
   signal?: AbortSignal,
 ): Promise<DatasetStatus> {
@@ -177,7 +186,10 @@ export async function fetchApiStatus(signal?: AbortSignal): Promise<ApiStatus> {
 }
 
 export async function fetchApiReady(signal?: AbortSignal): Promise<ReadyPayload> {
-  const response = await apiClient.get<ReadyPayload>("/readyz", { signal });
+  const response = await apiClient.get<ReadyPayload>("/readyz", {
+    signal,
+    validateStatus: isReadinessResponse,
+  });
   return response.data;
 }
 
@@ -203,17 +215,7 @@ export async function fetchCollectorReady(
 ): Promise<ReadyPayload> {
   const response = await opsClient.get<ReadyPayload>(
     `${COLLECTOR_OPS_BASE}/readyz`,
-    { signal },
-  );
-  return response.data;
-}
-
-export async function fetchReplayStatus(
-  signal?: AbortSignal,
-): Promise<ReplayStatus> {
-  const response = await opsClient.get<ReplayStatus>(
-    `${REPLAY_OPS_BASE}/status`,
-    { signal },
+    { signal, validateStatus: isReadinessResponse },
   );
   return response.data;
 }
@@ -223,6 +225,16 @@ export async function fetchReplayReady(
 ): Promise<ReadyPayload> {
   const response = await opsClient.get<ReadyPayload>(
     `${REPLAY_OPS_BASE}/readyz`,
+    { signal, validateStatus: isReadinessResponse },
+  );
+  return response.data;
+}
+
+export async function fetchReplayStatus(
+  signal?: AbortSignal,
+): Promise<ReplayStatus> {
+  const response = await opsClient.get<ReplayStatus>(
+    `${REPLAY_OPS_BASE}/status`,
     { signal },
   );
   return response.data;
