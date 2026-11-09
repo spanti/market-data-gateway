@@ -4,7 +4,7 @@
 
 **Blocked by:** 01, 02, 03
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] InstrumentId/Venue/bar/Interval 和重复订阅经过校验，Instrument Reference Data 保持只读。
 - [ ] Desired/Observed/Drift/Last Error 和版本冲突真实可见，Collector 确认才算生效。
@@ -15,3 +15,5 @@
 - [ ] 并发、Collector 拒绝、重启和冲突集成测试完整。
 
 ## Comments
+
+**Resolved (2026-11-10):** 版本化 Feed Subscription 与两类动态流控已合并 `5f3c504`（feature `69db2c2`）。迁移 004；Desired 持久化于管理库，Collector 确认后才更新 Observed，Drift/Last Error 可见，删除为 tombstone 且不清理历史；If-Match 版本冲突返回 409；API Rate Limit 与 WS Slow Consumer 独立版本、审计和热应用；共享 Collector 控制面（loopback TCP + token + 允许列表 + schema/超时/相关 ID）。31 个新测试，合并时 1674 passed / 5 个既有 CLI 失败。评审修复 TOML 首启种子（S1）、feed/venue 校验（S2）、控制端口拆分（S3）、slow-consumer `enabled=false`（S5）。

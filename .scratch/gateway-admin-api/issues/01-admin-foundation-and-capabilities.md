@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] capabilities 区分不支持、已启用和适配器不可用，包含管理面版本与认证要求。
 - [ ] Admin 错误使用统一 envelope 和稳定码，不泄露默认 422/detail。
@@ -14,3 +14,5 @@
 - [ ] 现有公开 API、WS、Replay、Manifest 与 Dataset 测试保持通过。
 
 ## Comments
+
+**Resolved (2026-11-10):** Admin API 基线与能力发现已实现并合并 `7c3fe65`（feature `e194f03`）。`src/mdgw/admin/` 提供 `AdminContext`、能力文档（版本/认证/适配器/能力/limits）、统一错误码与 envelope、独立管理 SQLite（WAL、migrations 001、事务、单实例租约）、可信代理解析和不接受任意命令的控制 envelope。`[admin] enabled=false` 默认保持 Current Contract 404；公开 REST/WS/Replay/Dataset 契约未变。新增 124 项测试，合并时 1262 passed / 5 个既有 CLI 失败。代码评审后补上租约心跳（S4）、Collector/Supervisor 控制端口拆分（S3）与 ADR-0017。
