@@ -133,12 +133,13 @@ class AsgiServer:
         self._sock: socket.socket | None = None
         self._host: str | None = None
         self._bound_port: int | None = None
+        self._scheme = "http"
         self._on_shutdown: Callable[[], Awaitable[None]] | None = None
         self._started = False
 
     # -- lifecycle ---------------------------------------------------------
 
-    def start(
+    def start(  # ruff: ignore[too-many-arguments]  # explicit server configuration
         self,
         app: Any,
         *,
@@ -146,6 +147,8 @@ class AsgiServer:
         port: int,
         thread_name: str,
         on_shutdown: Callable[[], Awaitable[None]] | None = None,
+        ssl_certfile: str | None = None,
+        ssl_keyfile: str | None = None,
     ) -> int:
         """Start the server and return the resolved bound port.
 
@@ -153,12 +156,19 @@ class AsgiServer:
         the new app/host/port. On any startup failure the socket, serve task,
         event loop, and thread are torn down before the original exception is
         re-raised.
+
+        ``ssl_certfile``/``ssl_keyfile`` serve the app over HTTPS, which lets
+        tests exercise ``Secure`` cookies without weakening the default.
         """
         if self._started:
             assert self._bound_port is not None
             return self._bound_port
+        if (ssl_certfile is None) != (ssl_keyfile is None):
+            msg = "ssl_certfile and ssl_keyfile must be supplied together"
+            raise ValueError(msg)
 
         self._host = host
+        self._scheme = "https" if ssl_certfile is not None else "http"
         self._on_shutdown = on_shutdown
         try:
             bound_port = self._start_on_thread(
@@ -167,10 +177,13 @@ class AsgiServer:
                 port=port,
                 thread_name=thread_name,
                 on_shutdown=on_shutdown,
+                ssl_certfile=ssl_certfile,
+                ssl_keyfile=ssl_keyfile,
             )
         except BaseException:
             self._teardown(failure=True)
             self._host = None
+            self._scheme = "http"
             self._on_shutdown = None
             raise
         self._bound_port = bound_port
@@ -200,6 +213,7 @@ class AsgiServer:
             self._teardown(failure=False)
             self._bound_port = None
             self._host = None
+            self._scheme = "http"
             self._on_shutdown = None
 
     def call_soon_threadsafe(
@@ -230,11 +244,11 @@ class AsgiServer:
         host = self._host
         if host in _WILDCARD_HOSTS:
             host = _LOOPBACK_HOST
-        return f"http://{host}:{port}"
+        return f"{self._scheme}://{host}:{port}"
 
     # -- internals ---------------------------------------------------------
 
-    def _start_on_thread(
+    def _start_on_thread(  # ruff: ignore[too-many-arguments]  # explicit server configuration
         self,
         app: Any,
         *,
@@ -242,6 +256,8 @@ class AsgiServer:
         port: int,
         thread_name: str,
         on_shutdown: Callable[[], Awaitable[None]] | None,
+        ssl_certfile: str | None = None,
+        ssl_keyfile: str | None = None,
     ) -> int:
         sock = _bind_socket(host, port)
         self._sock = sock
@@ -259,6 +275,8 @@ class AsgiServer:
             log_config=None,
             access_log=False,
             lifespan="on",
+            ssl_certfile=ssl_certfile,
+            ssl_keyfile=ssl_keyfile,
         )
         self._server = uvicorn.Server(config)
 

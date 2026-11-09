@@ -470,8 +470,35 @@ class AdminAdaptersConfig(_ConfigModel):
     prometheus: bool = False
 
 
+#: Access Roles are fixed by the contract. Kept here (not imported from the
+#: admin package) so configuration stays a foundation module.
+ADMIN_ACCESS_ROLES: tuple[str, ...] = ("SuperAdmin", "Operator", "Auditor")
+
+
+def _validate_relative_redirect_path(value: str, field: str) -> str:
+    """Reject unsafe SPA redirect paths.
+
+    Redirects only ever go to a same-origin relative path: no absolute URL,
+    no protocol-relative ``//host``, no control characters and no backslash
+    (which some browsers normalize into a separator).
+    """
+    if not isinstance(value, str):
+        msg = f"{field} must be a string"
+        # Pydantic validators signal bad input as ValueError.
+        raise ValueError(msg)  # ruff: ignore[type-check-without-type-error]
+    if not value.startswith("/") or value.startswith("//"):
+        msg = f"{field} must be a same-origin relative path starting with '/'"
+        raise ValueError(msg)
+    if "\\" in value or any(
+        ord(character) < 0x20 or ord(character) == 0x7F for character in value
+    ):
+        msg = f"{field} must not contain control characters or backslashes"
+        raise ValueError(msg)
+    return value
+
+
 class AdminOidcConfig(_ConfigModel):
-    """Placeholder OIDC client settings; sessions arrive in a later ticket."""
+    """OIDC Authorization Code + PKCE client settings and role mapping."""
 
     issuer: str | None = None
     client_id: str | None = None
@@ -480,6 +507,29 @@ class AdminOidcConfig(_ConfigModel):
     client_secret_env: str | None = None
     roles_claim: str = "groups"
     scopes: tuple[str, ...] = ("openid", "profile", "email")
+    #: Ordered group -> Access Role mapping. The client can never select a
+    #: role; exactly one distinct role must resolve or the login is denied.
+    role_mapping: dict[str, str] = Field(default_factory=dict)
+    #: Optional fixed redirect URI. When unset it is derived from the request
+    #: origin (or ``admin.proxy.public_origin``), which keeps local tests and
+    #: reverse-proxy deployments working without a second source of truth.
+    redirect_uri: str | None = None
+    default_return_to: str = "/"
+    error_redirect_path: str = "/login"
+    #: Bounded caches for discovery/JWKS and bounded HTTP waits.
+    discovery_ttl_s: float = Field(default=300.0, gt=0)
+    jwks_ttl_s: float = Field(default=300.0, gt=0)
+    http_timeout_s: float = Field(default=5.0, gt=0)
+    #: Login transactions are short-lived (the contract allows at most 10 min).
+    transaction_ttl_s: int = Field(default=300, gt=0, le=600)
+    clock_skew_s: int = Field(default=60, ge=0, le=300)
+
+    @property
+    def is_configured(self) -> bool:
+        """True only when a full OIDC client can be built."""
+        return bool(
+            self.issuer and self.client_id and self.client_secret_env
+        )
 
     @field_validator("issuer")
     @classmethod
@@ -503,6 +553,89 @@ class AdminOidcConfig(_ConfigModel):
             msg = f"{info.field_name} must be a non-empty string"
             raise ValueError(msg)
         return cleaned
+
+    @field_validator("redirect_uri")
+    @classmethod
+    def _redirect_uri_is_http(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        parts = urlsplit(cleaned)
+        if (
+            parts.scheme not in {"http", "https"}
+            or not parts.netloc
+            or parts.fragment
+        ):
+            msg = "redirect_uri must be an absolute http(s) URL"
+            raise ValueError(msg)
+        return cleaned
+
+    @field_validator("default_return_to")
+    @classmethod
+    def _default_return_to_is_relative(cls, value: str) -> str:
+        return _validate_relative_redirect_path(value, "default_return_to")
+
+    @field_validator("error_redirect_path")
+    @classmethod
+    def _error_path_is_relative(cls, value: str) -> str:
+        return _validate_relative_redirect_path(value, "error_redirect_path")
+
+    @field_validator("role_mapping", mode="before")
+    @classmethod
+    def _normalize_role_mapping(cls, value: object) -> dict[str, str]:
+        """Accept a mapping or an ordered list of ``[group, role]`` pairs.
+
+        Duplicate groups are rejected when they disagree: an ambiguous mapping
+        could silently elevate a user and must fail configuration.
+        """
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            entries: list[tuple[object, object]] = list(value.items())
+        elif isinstance(value, (list, tuple)):
+            entries = []
+            for entry in value:
+                if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                    entries.append((entry[0], entry[1]))
+                elif isinstance(entry, dict) and set(entry) == {
+                    "group",
+                    "role",
+                }:
+                    entries.append((entry["group"], entry["role"]))
+                else:
+                    msg = (
+                        "role_mapping entries must be [group, role] pairs or "
+                        "{group, role} tables"
+                    )
+                    raise ValueError(msg)
+        else:
+            msg = "role_mapping must be a mapping or a list of pairs"
+            # Pydantic validators signal bad input as ValueError.
+            raise ValueError(msg)  # ruff: ignore[type-check-without-type-error]
+
+        mapping: dict[str, str] = {}
+        for raw_group, raw_role in entries:
+            if not isinstance(raw_group, str) or not raw_group.strip():
+                msg = "role_mapping group must be a non-empty string"
+                raise ValueError(msg)
+            if not isinstance(raw_role, str) or raw_role not in (
+                ADMIN_ACCESS_ROLES
+            ):
+                msg = (
+                    "role_mapping role must be one of "
+                    f"{', '.join(ADMIN_ACCESS_ROLES)}"
+                )
+                raise ValueError(msg)
+            group = raw_group.strip()
+            previous = mapping.get(group)
+            if previous is not None and previous != raw_role:
+                msg = (
+                    f"role_mapping maps group {group!r} to conflicting roles "
+                    f"({previous}, {raw_role})"
+                )
+                raise ValueError(msg)
+            mapping[group] = raw_role
+        return mapping
 
 
 class AdminSessionConfig(_ConfigModel):

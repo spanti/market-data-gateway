@@ -11,9 +11,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from starlette.responses import JSONResponse
 
+from mdgw.admin.auth.dependencies import require_authenticated_request
+from mdgw.admin.auth.routes import (
+    create_auth_router,
+    create_protected_auth_router,
+)
 from mdgw.admin.capabilities import build_capabilities_document
 
 if TYPE_CHECKING:
@@ -25,6 +30,18 @@ if TYPE_CHECKING:
 
 ADMIN_PREFIX = "/api/v1/admin"
 
+#: The explicit public Admin routes. Every other current or future Admin route
+#: is mounted under a router-level session dependency (and this set is pinned
+#: by the route-matrix test).
+PUBLIC_ADMIN_PATHS: frozenset[str] = frozenset(
+    {
+        "/api/v1/admin/capabilities",
+        "/api/v1/admin/auth/login",
+        "/api/v1/admin/auth/callback",
+        "/api/v1/admin/auth/session",
+    }
+)
+
 #: Later tickets append their router factory here (one registration each).
 FEATURE_ROUTER_FACTORIES: list[Callable[[AdminContext], APIRouter]] = []
 
@@ -35,11 +52,23 @@ def register_feature(factory: Callable[[AdminContext], APIRouter]) -> None:
 
 
 def create_admin_router(context: AdminContext) -> APIRouter:
-    """Build the full admin router for one runtime context."""
+    """Build the full admin router for one runtime context.
+
+    Feature routers registered by later tickets are mounted inside a parent
+    router whose session dependency runs first, so a future Admin route is
+    authenticated by default rather than by remembering to add a guard.
+    """
     router = APIRouter(prefix=ADMIN_PREFIX, tags=["Admin"])
     router.include_router(_capabilities_router(context))
+    router.include_router(create_auth_router(context))
+
+    protected = APIRouter(
+        dependencies=[Depends(require_authenticated_request(context))]
+    )
+    protected.include_router(create_protected_auth_router(context))
     for factory in FEATURE_ROUTER_FACTORIES:
-        router.include_router(factory(context))
+        protected.include_router(factory(context))
+    router.include_router(protected)
     return router
 
 
@@ -60,6 +89,9 @@ def _capabilities_router(context: AdminContext) -> APIRouter:
         document = build_capabilities_document(
             config=context.config,
             adapter_states=context.adapter_statuses(),
+            built_adapters=context.built_adapters(),
+            built_capabilities=context.built_capabilities(),
+            capability_details=context.capability_details(),
         )
         return JSONResponse(
             document, headers={"Cache-Control": "no-store"}
@@ -71,6 +103,7 @@ def _capabilities_router(context: AdminContext) -> APIRouter:
 __all__ = [
     "ADMIN_PREFIX",
     "FEATURE_ROUTER_FACTORIES",
+    "PUBLIC_ADMIN_PATHS",
     "create_admin_router",
     "mount_admin",
     "register_feature",

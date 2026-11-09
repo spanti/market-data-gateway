@@ -36,7 +36,9 @@ class WebSocketTransport(Protocol):
 
     async def send_json(self, payload: Any) -> None: ...
 
-    async def close(self) -> object: ...
+    async def close(
+        self, code: int = 1000, reason: str | None = None
+    ) -> object: ...
 
 
 def valid_topics(value: Any) -> list[str]:
@@ -177,7 +179,7 @@ class WebSocketSession:
         except Exception:  # connection closed by the peer mid-write
             logger.debug("WebSocket writer stopped", exc_info=True)
 
-    async def close(self) -> None:
+    async def close(self, code: int = 1000) -> None:
         if self._closed:
             return
         self._closed = True
@@ -192,7 +194,12 @@ class WebSocketSession:
         )
         self._background.clear()
         with suppress(Exception):
-            await self._ws.close()
+            # Preserve the public Streaming Interface close (1000) when no
+            # application close code was requested.
+            if code == 1000:
+                await self._ws.close()
+            else:
+                await self._ws.close(code=code)
 
 
 class _HubClosedError(RuntimeError):
@@ -243,7 +250,9 @@ class WebSocketHub:
         )
         return session
 
-    async def unregister(self, session: WebSocketSession) -> None:
+    async def unregister(
+        self, session: WebSocketSession, *, close_code: int = 1000
+    ) -> None:
         self._sessions.discard(session)
         logger.info(
             "websocket session closed",
@@ -252,7 +261,7 @@ class WebSocketHub:
                 "session_id": session.session_id,
             },
         )
-        await session.close()
+        await session.close(code=close_code)
 
     def publish(self, topic: str, messages: list[dict[str, Any]]) -> None:
         """Fan out pre-encoded Message Envelopes. Must run on the event loop."""
