@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/table";
 import type { DisabledReason as DisabledReasonValue } from "@/runtime/permissions";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
+import { CAPABILITY_KEYS } from "@/runtime/capability-gates";
 import { BackfillJobCreateForm } from "./backfill-job-create-form";
 import {
   formatRange,
@@ -222,9 +223,15 @@ function RowAction({
 export function BackfillJobsSection() {
   const { session } = useRuntimeMode();
   const queryClient = useQueryClient();
-  const gate = useQualityGate("backfill.job.view", "backfill_job");
-  const createGate = useQualityGate("backfill.job.create", "backfill_job");
-  const actionGate = useQualityGate("backfill.job.cancel", "backfill_job");
+  const gate = useQualityGate("backfill.job.view", CAPABILITY_KEYS.backfillJob);
+  const createGate = useQualityGate(
+    "backfill.job.create",
+    CAPABILITY_KEYS.backfillJob,
+  );
+  const actionGate = useQualityGate(
+    "backfill.job.cancel",
+    CAPABILITY_KEYS.backfillJob,
+  );
   const [cursor, setCursor] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<
     { kind: "cancel" | "retry"; job: BackfillJob } | null

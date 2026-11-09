@@ -47,9 +47,11 @@ import {
   type FeedConflictState,
 } from "@/pages/console/feed-subscription";
 import {
-  capabilityDisabledReason,
-  type DisabledReason as DisabledReasonValue,
-} from "@/runtime/permissions";
+  adminCapabilityAvailability,
+  CAPABILITY_KEYS,
+  type CapabilityKey,
+} from "@/runtime/capability-gates";
+import type { DisabledReason as DisabledReasonValue } from "@/runtime/permissions";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
 import { useActionReason } from "@/runtime/use-permission";
 
@@ -66,15 +68,10 @@ const FLOW_QUERY_KEY = ["console", "flow-control"] as const;
 
 function adminCapabilityReason(
   capability: CapabilityState | null,
-  name: string,
+  key: CapabilityKey,
 ): DisabledReasonValue | null {
-  if (capability?.mode !== "admin-api") {
-    return null;
-  }
-  if (capability.compatible === false) {
-    return { code: "backend-unsupported", message: "Admin API 版本不兼容" };
-  }
-  return capabilityDisabledReason(capability.document?.capabilities[name]);
+  const availability = adminCapabilityAvailability(capability, key);
+  return availability.kind === "disabled" ? availability.reason : null;
 }
 
 function timestamp(value: string | null | undefined): string {
@@ -130,11 +127,11 @@ export function FeedSubscriptionView() {
 
   const feedCapabilityReason = adminCapabilityReason(
     capability,
-    "feed_subscription",
+    CAPABILITY_KEYS.feedSubscription,
   );
   const flowCapabilityReason = adminCapabilityReason(
     capability,
-    "feed_flow_control",
+    CAPABILITY_KEYS.feedFlowControl,
   );
 
   const isAdmin = capability?.mode === "admin-api";

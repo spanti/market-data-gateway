@@ -121,31 +121,18 @@ const ANONYMOUS_ACTIONS: ReadonlySet<Action> = new Set<Action>([
   "service.instance.view",
 ]);
 
-const REQUIRED_ROLES: Record<Action, readonly AccessRole[]> = {
-  "monitoring.view": ROLES,
-  "bars.view": ROLES,
-  "quality.view": ROLES,
-  "export.csv.direct": ROLES,
-  "export.job.create": ROLES,
-  "export.job.view.own": ROLES,
-  "export.job.view.all": ["SuperAdmin"],
-  "feed.subscription.view": ROLES,
-  "feed.subscription.write": ["SuperAdmin", "Operator"],
-  "flow.control.view": ROLES,
-  "flow.control.write": ["SuperAdmin", "Operator"],
-  "backfill.job.view": ROLES,
-  "backfill.job.create": ["SuperAdmin", "Operator"],
-  "backfill.job.cancel": ["SuperAdmin", "Operator"],
-  "ws.session.subscribe": ROLES,
-  "ws.debug.freeform": ["SuperAdmin", "Operator"],
-  "service.instance.view": ROLES,
-  "service.lifecycle.start": ["SuperAdmin"],
-  "service.lifecycle.stop": ["SuperAdmin"],
-  "service.lifecycle.reload": ["SuperAdmin"],
-  "audit.view": ROLES,
-  "monitoring.proxy.query": ROLES,
-  "user.role.manage": ["SuperAdmin"],
-};
+/**
+ * Derived from the single Access Role matrix above, so a capability change
+ * cannot drift between `can()` and the disabled-reason copy. Role order is
+ * the canonical matrix order (SuperAdmin, Operator, Auditor).
+ */
+const REQUIRED_ROLES: Record<Action, readonly AccessRole[]> = ALL_ACTIONS.reduce(
+  (required, action) => {
+    required[action] = ROLES.filter((role) => ROLE_ACTIONS[role].has(action));
+    return required;
+  },
+  {} as Record<Action, readonly AccessRole[]>,
+);
 
 export function can(subject: PermissionSubject, action: Action): boolean {
   if (subject.kind === "anonymous") {

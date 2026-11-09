@@ -1,7 +1,11 @@
 import { z } from "zod";
 import { apiClient } from "@/api/http/client";
-import { capabilityDisabledReason } from "@/runtime/permissions";
 import type { CapabilityState } from "@/api/capabilities";
+import {
+  adminCapabilityAvailability,
+  CAPABILITY_KEYS,
+  requiresAdminApiReason,
+} from "@/runtime/capability-gates";
 import type { DisabledReason } from "@/runtime/permissions";
 import type { TrendSeries } from "@/api/monitoring/types";
 
@@ -168,34 +172,18 @@ export type AdminMonitoringAvailability =
 export function adminMonitoringAvailability(
   capability: CapabilityState | null,
 ): AdminMonitoringAvailability {
-  if (!capability) {
-    return {
-      kind: "disabled",
-      reason: { code: "capabilities-unknown", message: "能力未知，暂不可用" },
-    };
-  }
-  if (capability.mode === "current-contract") {
-    return {
-      kind: "disabled",
-      reason: { code: "requires-admin-api", message: "需要 Admin API" },
-    };
-  }
-  if (capability.mode === "capabilities-unknown") {
-    return {
-      kind: "disabled",
-      reason: { code: "capabilities-unknown", message: "能力未知，暂不可用" },
-    };
-  }
-  if (!capability.document) {
-    return {
-      kind: "disabled",
-      reason: { code: "requires-login", message: "需要登录" },
-    };
-  }
-  const reason = capabilityDisabledReason(
-    capability.document.capabilities.monitoring_proxy,
+  const availability = adminCapabilityAvailability(
+    capability,
+    CAPABILITY_KEYS.monitoringProxy,
   );
-  return reason ? { kind: "disabled", reason } : { kind: "enabled" };
+  switch (availability.kind) {
+    case "enabled":
+      return { kind: "enabled" };
+    case "disabled":
+      return availability;
+    case "not-admin":
+      return { kind: "disabled", reason: requiresAdminApiReason() };
+  }
 }
 
 function seriesName(

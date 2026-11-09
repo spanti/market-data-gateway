@@ -1,4 +1,8 @@
 import type { CapabilityState } from "@/api/capabilities";
+import {
+  adminCapabilityAvailability,
+  CAPABILITY_KEYS,
+} from "@/runtime/capability-gates";
 import type { DisabledReason } from "@/runtime/permissions";
 
 /**
@@ -26,40 +30,36 @@ function gap(code: DisabledReason["code"], message: string): ServiceInstanceSour
 export function serviceInstanceSource(
   capability: CapabilityState | null,
 ): ServiceInstanceSource {
-  if (!capability) {
-    return gap("capabilities-unknown", "能力未知，暂不可用");
+  const availability = adminCapabilityAvailability(
+    capability,
+    CAPABILITY_KEYS.serviceLifecycle,
+  );
+
+  if (availability.kind === "not-admin") {
+    return { kind: "direct" };
+  }
+  if (availability.kind === "disabled") {
+    // The generic capability gate reports a missing key as "后端未实现";
+    // this seam has a more specific, operator-facing gap message.
+    if (
+      availability.reason.code === "backend-unsupported" &&
+      availability.reason.message === "后端未实现"
+    ) {
+      return gap("backend-unsupported", ADMIN_SERVICE_INSTANCE_GAP);
+    }
+    return gap(availability.reason.code, availability.reason.message);
   }
 
-  switch (capability.mode) {
-    case "current-contract":
-      return { kind: "direct" };
-    case "capabilities-unknown":
-      return gap("capabilities-unknown", "能力未知，暂不可用");
-    case "admin-api": {
-      if (capability.compatible === false) {
-        return gap("backend-unsupported", "Admin API 版本不兼容");
-      }
-      if (!capability.document) {
-        return gap("requires-login", "需要登录");
-      }
-      const entry = capability.document.capabilities.service_lifecycle;
-      if (!entry || entry.state === "unsupported") {
-        return gap("backend-unsupported", ADMIN_SERVICE_INSTANCE_GAP);
-      }
-      if (entry.state === "adapter_unavailable") {
-        return gap("adapter-unavailable", "适配器不可用");
-      }
-      const supervisor = capability.document.adapters?.find(
-        (adapter) =>
-          adapter.name === "supervisor" && adapter.kind === "service_lifecycle",
-      );
-      if (supervisor?.state === "unavailable") {
-        return gap("adapter-unavailable", "适配器不可用");
-      }
-      if (supervisor?.state === "unsupported") {
-        return gap("backend-unsupported", ADMIN_SERVICE_INSTANCE_GAP);
-      }
-      return { kind: "admin" };
-    }
+  const document = capability?.mode === "admin-api" ? capability.document : null;
+  const supervisor = document?.adapters?.find(
+    (adapter) =>
+      adapter.name === "supervisor" && adapter.kind === "service_lifecycle",
+  );
+  if (supervisor?.state === "unavailable") {
+    return gap("adapter-unavailable", "适配器不可用");
   }
+  if (supervisor?.state === "unsupported") {
+    return gap("backend-unsupported", ADMIN_SERVICE_INSTANCE_GAP);
+  }
+  return { kind: "admin" };
 }

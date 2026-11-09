@@ -56,7 +56,10 @@ import {
 } from "@/pages/console/lifecycle";
 import { serviceInstanceSource } from "@/runtime/service-instance-source";
 import {
-  capabilityDisabledReason,
+  adminCapabilityAvailability,
+  CAPABILITY_KEYS,
+} from "@/runtime/capability-gates";
+import {
   disabledReasonFor,
   type DisabledReason as DisabledReasonValue,
   type PermissionSubject,
@@ -378,22 +381,26 @@ function lifecycleDisabledReason(
       message: "该实例不支持此操作",
     };
   }
-  if (capability?.mode !== "admin-api") {
+  const availability = adminCapabilityAvailability(
+    capability,
+    CAPABILITY_KEYS.serviceLifecycle,
+  );
+  if (availability.kind === "not-admin") {
+    // Current Contract never reaches here with a role (the role gate above
+    // already returns); lifecycle remains an Admin-only contract target.
     return null;
   }
-  if (capability.compatible === false) {
-    return { code: "backend-unsupported", message: "Admin API 版本不兼容" };
+  if (availability.kind === "disabled") {
+    return availability.reason;
   }
-  const capabilityReason = capabilityDisabledReason(
-    capability.document?.capabilities.service_lifecycle,
-  );
-  if (capabilityReason) {
-    return capabilityReason;
-  }
-  const supervisor = capability.document?.adapters?.find(
-    (adapter) =>
-      adapter.name === "supervisor" && adapter.kind === "service_lifecycle",
-  );
+  const supervisor =
+    capability?.mode === "admin-api"
+      ? capability.document?.adapters?.find(
+          (adapter) =>
+            adapter.name === "supervisor" &&
+            adapter.kind === "service_lifecycle",
+        )
+      : undefined;
   if (supervisor?.state === "unavailable") {
     return { code: "adapter-unavailable", message: "Supervisor 不可用" };
   }

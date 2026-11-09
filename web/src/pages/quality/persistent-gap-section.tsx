@@ -25,6 +25,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { BAR_INTERVALS, type BarInterval } from "@/lib/time-range";
+import { CAPABILITY_KEYS } from "@/runtime/capability-gates";
 import {
   formatRange,
   formatUtcTimestamp,
@@ -93,7 +94,10 @@ function linkedJobs(gap: {
  * Gap.
  */
 export function PersistentGapSection() {
-  const gate = useQualityGate("backfill.job.view", "persistent_backfill_gaps");
+  const gate = useQualityGate(
+    "backfill.job.view",
+    CAPABILITY_KEYS.persistentBackfillGaps,
+  );
   const [draft, setDraft] = useState<GapFilters>(EMPTY_FILTERS);
   const [applied, setApplied] = useState<GapFilters>(EMPTY_FILTERS);
   const [cursor, setCursor] = useState<string | null>(null);

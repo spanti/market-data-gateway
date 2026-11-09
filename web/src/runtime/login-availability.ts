@@ -1,5 +1,9 @@
 import type { CapabilityState } from "@/api/capabilities";
 import {
+  adminCompatibilityReason,
+  CAPABILITY_KEYS,
+} from "@/runtime/capability-gates";
+import {
   capabilityDisabledReason,
   type DisabledReason,
 } from "@/runtime/permissions";
@@ -15,11 +19,9 @@ export function loginDisabledReason(
   if (!capability || capability.mode !== "admin-api") {
     return null;
   }
-  if (capability.compatible === false) {
-    return {
-      code: "backend-unsupported",
-      message: "Admin API 版本不兼容",
-    };
+  const incompatible = adminCompatibilityReason(capability);
+  if (incompatible) {
+    return incompatible;
   }
   const document = capability.document;
   if (!document) {
@@ -39,5 +41,7 @@ export function loginDisabledReason(
       message: "后端未实现 OIDC",
     };
   }
-  return capabilityDisabledReason(document.capabilities.oidc_session);
+  return capabilityDisabledReason(
+    document.capabilities[CAPABILITY_KEYS.oidcSession],
+  );
 }
