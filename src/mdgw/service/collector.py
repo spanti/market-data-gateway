@@ -3,18 +3,32 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from typing import TYPE_CHECKING
 
+from mdgw.aggregate.bar_aggregator import AGGREGATION_INTERNAL
+from mdgw.core.time import datetime_to_ns
 from mdgw.ingest.composite import (
     attach_quarantine,
     build_configured_feed_handler,
 )
+from mdgw.ingest.feed_status import (
+    FEED_ERROR_CODES,
+    FEED_STATES,
+    FeedConnectionStatus,
+    handler_feed_statuses,
+)
 from mdgw.metrics import MetricsRegistry
 from mdgw.service.bar_sink import BufferedBarSink
 from mdgw.service.collector_core import CollectorCore
-from mdgw.service.common import iso_to_seconds, ns_iso, update_dataset_metrics
+from mdgw.service.common import (
+    advance_counter,
+    iso_to_seconds,
+    ns_iso,
+    update_dataset_metrics,
+)
 from mdgw.service.health_server import ServiceHealthServer
 from mdgw.store.composition import StorageComposition
 from mdgw.streaming import StreamingInterface
@@ -33,6 +47,36 @@ STATUS_INTERVAL_S = 1.0
 POLL_INTERVAL_S = 0.05
 ERROR_BACKOFF_S = 1.0
 _NOT_STARTED_MESSAGE = "CollectorService.start() must be called first"
+
+#: Ingestion Delay spans sub-second to Backfill-scale minutes. The help text
+#: names source clock skew: event time comes from the Venue clock. The Gateway
+#: has no protocol RTT measurement, so no metric is named Network Latency and
+#: this delay must never be mislabelled as one.
+INGESTION_DELAY_BUCKETS: tuple[float, ...] = (
+    0.1,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    30.0,
+    60.0,
+    120.0,
+    300.0,
+    600.0,
+    math.inf,
+)
+
+_INGESTION_DELAY_HELP = (
+    "Ingestion Delay: seconds from the Bar event time (close_ts) to the "
+    "collector ingest time (ingest_ts); includes source clock skew; this is "
+    "not a protocol RTT or Network Latency measurement"
+)
+_STORAGE_BYTES_HELP = (
+    "Bytes written to Parquet Data Files by the collector write buffer, as "
+    "reported by the Store write result (includes aggregated parent Bars and "
+    "buffered flushes; queue depth stays a separate metric)"
+)
 
 
 class CollectorService:
@@ -87,6 +131,13 @@ class CollectorService:
         self._last_quarantine_counts: dict[tuple[str, str], int] = {}
         self._last_quarantine_failures = 0
         self._quarantine_metric_lock = threading.Lock()
+        # Feed connection gauges/counters are refreshed from the real handler
+        # lifecycle; cumulative reconnect counters advance by source delta.
+        self._feed_metric_lock = threading.Lock()
+        self._last_feed_reconnects: dict[tuple[str, str], float] = {}
+        # Storage bytes are cumulative Store write results; advance by delta.
+        self._storage_metric_lock = threading.Lock()
+        self._last_storage_bytes_metric = 0.0
 
         self._streaming: StreamingInterface | None = None
         self._health_server: ServiceHealthServer | None = None
@@ -256,6 +307,9 @@ class CollectorService:
                 continue
 
             if bars:
+                # Only live base Bars carry a meaningful ingest/event pair;
+                # aggregated parents reuse child ingest times.
+                self._record_ingestion_delay(bars)
                 self._publish_bars(bars)
                 self.metrics.inc(
                     "mdgw_collector_bars_ingested_total", amount=count
@@ -340,12 +394,23 @@ class CollectorService:
     def status_payload(self) -> dict:
         health = self.core.health_snapshot()
         sink = self.core.sink.stats()
+        feed_statuses = handler_feed_statuses(self._feed_handler)
         return {
             "service": "collector",
             "role": "collector",
             "ready": self._ready.is_set(),
             "uptime_s": self._uptime_s(),
             "feed": getattr(self._feed_handler, "name", None),
+            # Truthful upstream lifecycle. Venues/feeds come from the
+            # configured/runtime handlers, never from a hardcoded list.
+            "feeds": [status.to_dict() for status in feed_statuses],
+            "venues": sorted(
+                {
+                    status.venue
+                    for status in feed_statuses
+                    if status.venue
+                }
+            ),
             "last_ingest_ts": ns_iso(self.core.last_ingest_ts),
             "last_bar_ts": ns_iso(self._last_bar_ts),
             "bars_ingested": self.core.bars_ingested,
@@ -363,6 +428,20 @@ class CollectorService:
         }
 
     # -- metrics -----------------------------------------------------------
+
+    def _record_ingestion_delay(self, bars: list[Bar]) -> None:
+        """Observe ``ingest_ts - event_ts`` for live base Bars only."""
+        for bar in bars:
+            if bar.aggregation_source == AGGREGATION_INTERNAL:
+                continue
+            delay_s = (bar.ingest_ts - bar.event_ts).total_seconds()
+            self.metrics.observe(
+                "mdgw_collector_ingestion_delay_seconds",
+                delay_s,
+                labels={"feed": bar.feed},
+                help=_INGESTION_DELAY_HELP,
+                buckets=INGESTION_DELAY_BUCKETS,
+            )
 
     def render_metrics(self) -> str:
         self.metrics.set(
@@ -423,9 +502,103 @@ class CollectorService:
             sink.get("last_flush_duration_s") or 0.0,
             help="Duration of the last successful write-buffer flush",
         )
+        with self._storage_metric_lock:
+            if (
+                self.metrics.get(
+                    "mdgw_collector_storage_bytes_written_total"
+                )
+                is None
+            ):
+                # Expose an explicit zero series before the first write.
+                self.metrics.inc(
+                    "mdgw_collector_storage_bytes_written_total",
+                    amount=0,
+                    help=_STORAGE_BYTES_HELP,
+                )
+            self._last_storage_bytes_metric = advance_counter(
+                self.metrics,
+                "mdgw_collector_storage_bytes_written_total",
+                sink.get("bytes_written", 0) or 0.0,
+                self._last_storage_bytes_metric,
+                help=_STORAGE_BYTES_HELP,
+            )
         self._update_quarantine_metrics()
+        self._update_feed_metrics(handler_feed_statuses(self._feed_handler))
         update_dataset_metrics(self.metrics, self.core.store)
         return self.metrics.render()
+
+    def _update_feed_metrics(
+        self, statuses: tuple[FeedConnectionStatus, ...]
+    ) -> None:
+        """Expose upstream lifecycle with bounded ``feed``/``venue`` labels."""
+        with self._feed_metric_lock:
+            for status in statuses:
+                labels = {"feed": status.feed, "venue": status.venue}
+                for state in FEED_STATES:
+                    self.metrics.set(
+                        "mdgw_collector_feed_connection_state",
+                        1 if status.state == state else 0,
+                        labels={**labels, "state": state},
+                        help=(
+                            "Feed Handler connection state from real lifecycle "
+                            "transitions, never inferred from Feed Freshness "
+                            "(1 for the current state)"
+                        ),
+                    )
+                self.metrics.set(
+                    "mdgw_collector_feed_state_since_seconds",
+                    _timestamp_seconds(status.state_since),
+                    labels=labels,
+                    help=(
+                        "Unix time when the current Feed Handler connection "
+                        "state began"
+                    ),
+                )
+                self.metrics.set(
+                    "mdgw_collector_feed_last_event_ts_seconds",
+                    _timestamp_seconds(status.last_event_ts),
+                    labels=labels,
+                    help=(
+                        "Unix time when the last live watch event arrived "
+                        "from the Feed Handler (event arrival; not a protocol "
+                        "heartbeat)"
+                    ),
+                )
+                for code in FEED_ERROR_CODES:
+                    self.metrics.set(
+                        "mdgw_collector_feed_last_error_ts_seconds",
+                        _timestamp_seconds(status.last_error_at)
+                        if status.last_error_code == code
+                        else 0.0,
+                        labels={**labels, "error_code": code},
+                        help=(
+                            "Unix time of the last sanitized Feed Handler "
+                            "error by bounded category (0 = no such error)"
+                        ),
+                    )
+                key = (status.feed, status.venue)
+                if key not in self._last_feed_reconnects:
+                    # Expose an explicit zero series before the first failure.
+                    self.metrics.inc(
+                        "mdgw_collector_feed_reconnects_total",
+                        amount=0,
+                        labels=labels,
+                        help=(
+                            "Feed Handler reconnect attempts after upstream "
+                            "watch failures"
+                        ),
+                    )
+                self._last_feed_reconnects[key] = advance_counter(
+                    self.metrics,
+                    "mdgw_collector_feed_reconnects_total",
+                    status.reconnect_count,
+                    self._last_feed_reconnects.get(key, 0.0),
+                    labels=labels,
+                    help=(
+                        "Feed Handler reconnect attempts after upstream watch "
+                        "failures"
+                    ),
+                )
 
     def _update_quarantine_metrics(self) -> None:
         """Expose Quarantine records and write failures by stable labels."""
@@ -481,6 +654,12 @@ class CollectorService:
         if self._started_at is None:
             return 0.0
         return max(0.0, time.monotonic() - self._started_at)
+
+
+def _timestamp_seconds(value: datetime | None) -> float:
+    if value is None:
+        return 0.0
+    return datetime_to_ns(value) / 1_000_000_000.0
 
 
 __all__ = ["CollectorService"]

@@ -64,15 +64,21 @@ class RequestContextMiddleware:
         started = time.perf_counter()
         status = 500
         response_started = False
+        response_bytes = 0
 
         async def send_with_request_id(
             message: MutableMapping[str, Any],
         ) -> None:
-            nonlocal status, response_started
+            nonlocal status, response_started, response_bytes
             if message["type"] == "http.response.start":
                 status = int(message["status"])
                 response_started = True
                 MutableHeaders(scope=message)["X-Request-ID"] = request_id
+            elif message["type"] == "http.response.body":
+                # Bytes actually written to the ASGI send path, including
+                # every streamed chunk. This is not a measurement of bytes
+                # received by a remote client.
+                response_bytes += len(message.get("body", b"") or b"")
             await send(message)
 
         try:
@@ -102,6 +108,7 @@ class RequestContextMiddleware:
                 status=status,
                 request_id=request_id,
                 started=started,
+                response_bytes=response_bytes,
             )
 
     def _record(
@@ -111,6 +118,7 @@ class RequestContextMiddleware:
         status: int,
         request_id: str,
         started: float,
+        response_bytes: int,
     ) -> None:
         path = _route_label(scope)
         method = str(scope.get("method", ""))
@@ -127,11 +135,24 @@ class RequestContextMiddleware:
                 labels=labels,
                 help="HTTP requests handled by the api role",
             )
+            self.metrics.inc(
+                "mdgw_api_http_response_bytes_total",
+                amount=response_bytes,
+                labels=labels,
+                help=(
+                    "HTTP response body bytes written to the ASGI send path "
+                    "(server-side; not bytes received by the client)"
+                ),
+            )
             self.metrics.observe(
                 "mdgw_api_http_request_duration_seconds",
                 duration_s,
                 labels=labels,
-                help="HTTP request duration in seconds",
+                help=(
+                    "HTTP request duration in seconds from request start "
+                    "through the complete response stream (streamed response "
+                    "bodies included)"
+                ),
                 buckets=DEFAULT_HTTP_DURATION_BUCKETS,
             )
         logger.info(
