@@ -183,14 +183,15 @@ def test_migrations_are_discovered_in_numeric_order(tmp_path: Path) -> None:
 def test_backfill_migration_upgrades_an_existing_schema_8_database(
     tmp_path: Path,
 ) -> None:
-    """009 must reach a database already at schema 8 (the export schema).
+    """009/010 must reach a database already at schema 8 (export schema).
 
     ``migrate`` skips every migration whose version is not greater than the
-    recorded one, so a backfill migration numbered 006 would never apply to
-    an existing schema-8 database; the backfill schema is therefore 009.
+    recorded one, so these migrations must be numbered above 8 to apply to an
+    existing export-era database.
     """
     versions = [version for version, _ in discover_migrations()]
-    assert versions == [1, 2, 3, 4, 5, 8, 9]
+    # Ticket 07 adds 010; migrations remain ordered above the export schema.
+    assert versions == [1, 2, 3, 4, 5, 8, 9, 10]
 
     path = tmp_path / "admin" / "admin.db"
     partial = tmp_path / "migrations"

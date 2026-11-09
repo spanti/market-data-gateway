@@ -82,6 +82,11 @@ NANOS_PER_DAY = 86_400 * 1_000_000_000
 CHUNK_NS = NANOS_PER_DAY
 #: Bars normalized and merged per batch (cooperative cancellation point).
 BATCH_BARS = 500
+#: Bound on gap ranges reported to the API in one status snapshot. A job can
+#: legitimately observe many holes; the control-plane frame is bounded, so a
+#: pathologically fragmented range is reported truncated instead of making the
+#: status response unechoable. Normal outage-shaped gaps are far below this.
+MAX_SNAPSHOT_GAP_RANGES = 512
 _WORKER_POLL_S = 0.05
 _WORKER_JOIN_TIMEOUT_S = 15.0
 _COUNTER_NAMES = (
@@ -123,6 +128,7 @@ class BackfillJobGapLink:
     end_ns: int
     gap_ranges: tuple[tuple[int, int], ...]
     outcome: str
+    feed: str = ""
 
 
 GapLinker = Callable[[BackfillJobGapLink], Iterable[str]]
@@ -174,6 +180,7 @@ class _JobState:
     start_ns: int
     end_ns: int
     mode: str
+    feed: str = ""
     state: str = QUEUED
     counters: dict[str, int] = field(
         default_factory=lambda: dict.fromkeys(_COUNTER_NAMES, 0)
@@ -189,7 +196,16 @@ class _JobState:
     def snapshot(self) -> dict[str, Any]:
         return {
             "job_id": self.job_id,
+            "feed": self.feed,
             "state": self.state,
+            # Ticket 07 linkage: missing 1m ranges observed so far, bounded so
+            # one control-plane frame always fits. Pairs keep frames compact.
+            "gap_ranges": [
+                [start_ns, end_ns]
+                for start_ns, end_ns in self.gap_ranges[
+                    :MAX_SNAPSHOT_GAP_RANGES
+                ]
+            ],
             "counters": dict(self.counters),
             "current_range": (
                 None
@@ -354,6 +370,7 @@ class BackfillJobRunner:
                 start_ns=int(start_ns),
                 end_ns=int(end_ns),
                 mode=mode,
+                feed=str(getattr(self._core.feed_handler, "name", "")),
             )
             self._jobs[job_id] = state
             snapshot = state.snapshot()
@@ -607,6 +624,7 @@ class BackfillJobRunner:
                 end_ns=job.end_ns,
                 gap_ranges=gap_ranges,
                 outcome=state,
+                feed=job.feed,
             )
             try:
                 resolved = list(linker(event) or ())
@@ -638,7 +656,9 @@ def _rejected(job_id: str, reason: str, message: str) -> dict[str, Any]:
 def _unknown(job_id: str) -> dict[str, Any]:
     return {
         "job_id": job_id,
+        "feed": "",
         "state": UNKNOWN,
+        "gap_ranges": [],
         "counters": dict.fromkeys(_COUNTER_NAMES, 0),
         "current_range": None,
         "error": None,

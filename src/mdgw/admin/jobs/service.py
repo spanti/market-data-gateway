@@ -437,6 +437,16 @@ class BackfillJobService:
             now_ns=self.now_ns(),
         )
 
+    def set_resolved_gap_ids(
+        self, job_id: str, gap_ids: tuple[str, ...]
+    ) -> bool:
+        """Persist the Gap ids a successful job resolved (ticket 07)."""
+        if not gap_ids:
+            return False
+        return self.store.set_resolved_gap_ids(
+            job_id, gap_ids, self.now_ns()
+        )
+
     def mark_interrupted(self, job_id: str) -> bool:
         return self.store.mark_interrupted(job_id, self.now_ns())
 

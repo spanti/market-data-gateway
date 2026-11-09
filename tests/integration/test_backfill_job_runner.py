@@ -472,6 +472,54 @@ def test_missing_and_rejected_rows_make_the_job_partially_succeed(dataset) -> No
     assert len(_rows(store, "1m")) == 57
 
 
+def test_terminal_snapshot_exposes_feed_and_observed_one_minute_gap_ranges(
+    dataset,
+) -> None:
+    missing = {10, 11, 20}
+
+    def history(_start_ns: int, _end_ns: int) -> list[RawBar]:
+        return [
+            RawBar(
+                instrument_id=INSTRUMENT,
+                interval="1m",
+                open_ts=_at(minute),
+                open=Decimal(100),
+                high=Decimal(101),
+                low=Decimal(99),
+                close=Decimal(100),
+                volume=Decimal(1),
+                trade_count=1,
+                revision=0,
+            )
+            for minute in range(60)
+            if minute not in missing
+        ]
+
+    feed = ScriptedHistoryFeed(factory=history)
+    runner = _start_runner(_core(feed, dataset))
+    try:
+        runner.start_job(
+            job_id="bf_gap_ranges",
+            instrument_id=INSTRUMENT,
+            interval="1m",
+            start_ns=datetime_to_ns(_at(0)),
+            end_ns=datetime_to_ns(_at(0, hour=1)),
+            mode="native_interval",
+        )
+        snapshot = _wait(runner, "bf_gap_ranges")
+    finally:
+        runner.close()
+
+    assert snapshot["state"] == "partially_succeeded"
+    # Ticket 07 linkage: the terminal snapshot must carry the real Feed name
+    # and the observed missing 1m ranges as half-open [start_ns, end_ns].
+    assert snapshot["feed"] == "scripted"
+    assert snapshot["gap_ranges"] == [
+        [datetime_to_ns(_at(10)), datetime_to_ns(_at(12))],
+        [datetime_to_ns(_at(20)), datetime_to_ns(_at(21))],
+    ]
+
+
 def test_history_unsupported_fails_without_faking_success(dataset) -> None:
     store, _hwm = dataset
     feed = FakeFeedHandler(
