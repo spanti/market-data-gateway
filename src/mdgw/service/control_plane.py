@@ -46,7 +46,13 @@ from collections.abc import Mapping
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+)
 
 from mdgw.admin.control import (
     ActionNotAllowedError,
@@ -67,6 +73,9 @@ ACTION_PING = "ping"
 FEED_SUBSCRIPTION_SYNC_ACTION = "feed.subscription.sync"
 API_RATE_LIMIT_ACTION = "flow_control.api_rate_limit.apply"
 WS_SLOW_CONSUMER_ACTION = "flow_control.ws_slow_consumer.apply"
+BACKFILL_JOB_START_ACTION = "backfill.job.start"
+BACKFILL_JOB_STATUS_ACTION = "backfill.job.status"
+BACKFILL_JOB_CANCEL_ACTION = "backfill.job.cancel"
 
 #: Largest frame accepted or produced by one request/response.
 DEFAULT_MAX_MESSAGE_BYTES = 65_536
@@ -154,6 +163,55 @@ class WsSlowConsumerApplyPayload(BaseModel):
     lag_notice_interval_ms: int = Field(ge=0)
 
 
+class _BackfillJobScopedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    job_id: str = Field(
+        min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    )
+
+
+class BackfillJobStatusPayload(_BackfillJobScopedPayload):
+    """Look up one in-flight Backfill Job in the Collector's live registry."""
+
+
+class BackfillJobCancelPayload(_BackfillJobScopedPayload):
+    """Request cooperative cancellation of one Backfill Job."""
+
+
+class BackfillJobStartPayload(_BackfillJobScopedPayload):
+    """Execute one persisted Backfill Job range.
+
+    The plan mode is validated against the target interval so the Collector
+    can never be asked to fetch a native high-interval history: ``1m`` is the
+    only native interval, everything higher is aggregated from ``1m``.
+    """
+
+    instrument_id: str = Field(min_length=3, max_length=256)
+    interval: Literal["1m", "5m", "15m", "1h", "1d"]
+    start_ns: int = Field(ge=0)
+    end_ns: int = Field(gt=0)
+    mode: Literal["native_interval", "one_minute_plus_aggregation"]
+
+    @model_validator(mode="after")
+    def _range_and_plan_are_consistent(self) -> BackfillJobStartPayload:
+        if self.start_ns >= self.end_ns:
+            msg = "Backfill Job start_ns must be before end_ns"
+            raise ValueError(msg)
+        expected_mode = (
+            "native_interval"
+            if self.interval == "1m"
+            else "one_minute_plus_aggregation"
+        )
+        if self.mode != expected_mode:
+            msg = (
+                "Backfill Job plan mode does not match the target interval: "
+                f"{self.mode!r} for {self.interval!r}"
+            )
+            raise ValueError(msg)
+        return self
+
+
 def collector_control_registry() -> ControlActionRegistry:
     """The allowlist shared by the Collector server and the Admin client.
 
@@ -178,6 +236,21 @@ def collector_control_registry() -> ControlActionRegistry:
         WS_SLOW_CONSUMER_ACTION,
         targets=(ControlTarget.COLLECTOR,),
         payload=WsSlowConsumerApplyPayload,
+    )
+    registry.register(
+        BACKFILL_JOB_START_ACTION,
+        targets=(ControlTarget.COLLECTOR,),
+        payload=BackfillJobStartPayload,
+    )
+    registry.register(
+        BACKFILL_JOB_STATUS_ACTION,
+        targets=(ControlTarget.COLLECTOR,),
+        payload=BackfillJobStatusPayload,
+    )
+    registry.register(
+        BACKFILL_JOB_CANCEL_ACTION,
+        targets=(ControlTarget.COLLECTOR,),
+        payload=BackfillJobCancelPayload,
     )
     return registry
 
@@ -720,12 +793,18 @@ class ControlPlaneClient:
 __all__ = [
     "ACTION_PING",
     "API_RATE_LIMIT_ACTION",
+    "BACKFILL_JOB_CANCEL_ACTION",
+    "BACKFILL_JOB_START_ACTION",
+    "BACKFILL_JOB_STATUS_ACTION",
     "CONTROL_PLANE_PROTOCOL_VERSION",
     "DEFAULT_MAX_MESSAGE_BYTES",
     "DEFAULT_REQUEST_TIMEOUT_S",
     "FEED_SUBSCRIPTION_SYNC_ACTION",
     "WS_SLOW_CONSUMER_ACTION",
     "ApiRateLimitApplyPayload",
+    "BackfillJobCancelPayload",
+    "BackfillJobStartPayload",
+    "BackfillJobStatusPayload",
     "ControlPlaneClient",
     "ControlPlaneServer",
     "ControlRequestError",

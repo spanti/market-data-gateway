@@ -20,8 +20,14 @@ import pytest
 from mdgw.admin.control import ControlTarget
 from mdgw.service.control_plane import (
     API_RATE_LIMIT_ACTION,
+    BACKFILL_JOB_CANCEL_ACTION,
+    BACKFILL_JOB_START_ACTION,
+    BACKFILL_JOB_STATUS_ACTION,
     FEED_SUBSCRIPTION_SYNC_ACTION,
     WS_SLOW_CONSUMER_ACTION,
+    BackfillJobCancelPayload,
+    BackfillJobStartPayload,
+    BackfillJobStatusPayload,
     ControlPlaneClient,
     ControlPlaneServer,
     ControlRequestError,
@@ -91,7 +97,7 @@ def _recv_exact(sock: socket.socket, size: int) -> bytes:
     return bytes(chunks)
 
 
-def test_the_collector_allowlist_contains_the_ticket_04_actions() -> None:
+def test_the_collector_allowlist_contains_the_ticket_04_and_06_actions() -> None:
     registry = collector_control_registry()
 
     assert set(registry.allowed_for("collector")) == {
@@ -99,8 +105,117 @@ def test_the_collector_allowlist_contains_the_ticket_04_actions() -> None:
         FEED_SUBSCRIPTION_SYNC_ACTION,
         API_RATE_LIMIT_ACTION,
         WS_SLOW_CONSUMER_ACTION,
+        BACKFILL_JOB_START_ACTION,
+        BACKFILL_JOB_STATUS_ACTION,
+        BACKFILL_JOB_CANCEL_ACTION,
     }
     assert registry.allowed_for("supervisor") == ()
+
+
+def test_backfill_start_payload_requires_a_consistent_plan() -> None:
+    payload = BackfillJobStartPayload(
+        job_id="bf_0123456789abcdef0123456789abcdef",
+        instrument_id="binance:BTC/USDT",
+        interval="1h",
+        start_ns=1_700_000_000_000_000_000,
+        end_ns=1_700_003_600_000_000_000,
+        mode="one_minute_plus_aggregation",
+    )
+    assert payload.model_dump(mode="json")["interval"] == "1h"
+
+    with pytest.raises(ValueError, match="start_ns must be before end_ns"):
+        BackfillJobStartPayload(
+            job_id="bf_x",
+            instrument_id="binance:BTC/USDT",
+            interval="1h",
+            start_ns=1_700_003_600_000_000_000,
+            end_ns=1_700_000_000_000_000_000,
+            mode="one_minute_plus_aggregation",
+        )
+    with pytest.raises(ValueError, match="plan mode does not match"):
+        BackfillJobStartPayload(
+            job_id="bf_x",
+            instrument_id="binance:BTC/USDT",
+            interval="1h",
+            start_ns=1_700_000_000_000_000_000,
+            end_ns=1_700_003_600_000_000_000,
+            mode="native_interval",
+        )
+    with pytest.raises(ValueError, match="plan mode does not match"):
+        BackfillJobStartPayload(
+            job_id="bf_x",
+            instrument_id="binance:BTC/USDT",
+            interval="1m",
+            start_ns=1_700_000_000_000_000_000,
+            end_ns=1_700_003_600_000_000_000,
+            mode="one_minute_plus_aggregation",
+        )
+
+
+def test_backfill_status_and_cancel_payloads_are_tightly_scoped() -> None:
+    assert BackfillJobStatusPayload(job_id="bf_x").job_id == "bf_x"
+    assert BackfillJobCancelPayload(job_id="bf_x").job_id == "bf_x"
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        BackfillJobStatusPayload(job_id="bf_x", extra=True)  # type: ignore[call-arg]
+
+
+def test_a_backfill_action_is_dispatched_only_after_schema_validation() -> None:
+    registry = collector_control_registry()
+    server = ControlPlaneServer(
+        host="127.0.0.1",
+        port=0,
+        token=TOKEN,
+        registry=registry,
+        max_message_bytes=4096,
+        request_timeout_s=2.0,
+    )
+    received: list[object] = []
+    server.register("ping", lambda _payload: {"pong": True})
+    server.register(
+        BACKFILL_JOB_START_ACTION,
+        lambda payload: received.append(payload)
+        or {"job_id": payload.job_id, "state": "queued", "accepted": True},
+    )
+    server.start()
+    client = ControlPlaneClient(
+        host="127.0.0.1",
+        port=server.port,
+        token=TOKEN,
+        registry=registry,
+        max_message_bytes=4096,
+        timeout_s=2.0,
+    )
+    try:
+        result = client.call(
+            BACKFILL_JOB_START_ACTION,
+            {
+                "job_id": "bf_x",
+                "instrument_id": "binance:BTC/USDT",
+                "interval": "1m",
+                "start_ns": 1_700_000_000_000_000_000,
+                "end_ns": 1_700_003_600_000_000_000,
+                "mode": "native_interval",
+            },
+            correlation_id="corr_backfill",
+        )
+        assert result["accepted"] is True
+        assert len(received) == 1
+
+        with pytest.raises(ControlTransportError):
+            client.call(
+                BACKFILL_JOB_START_ACTION,
+                {
+                    "job_id": "bf_x",
+                    "instrument_id": "binance:BTC/USDT",
+                    "interval": "1m",
+                    "start_ns": 1,
+                    "end_ns": 2,
+                    "mode": "native_interval",
+                    "unexpected": True,
+                },
+            )
+    finally:
+        server.stop()
 
 
 def test_a_valid_request_is_dispatched_and_acknowledged() -> None:

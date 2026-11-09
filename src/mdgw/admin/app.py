@@ -23,6 +23,7 @@ from mdgw.admin.auth.routes import (
 from mdgw.admin.capabilities import build_capabilities_document
 from mdgw.admin.export.routes import create_export_router
 from mdgw.admin.feed.routes import create_feed_router
+from mdgw.admin.jobs.routes import create_backfill_router
 from mdgw.admin.lifecycle.routes import create_lifecycle_router
 from mdgw.admin.monitoring.routes import create_monitoring_router
 
@@ -71,6 +72,9 @@ register_feature(create_export_router)
 
 #: Ticket 05: Service Instance lifecycle + Operation query routes.
 register_feature(create_lifecycle_router)
+
+#: Ticket 06: persistent Backfill Jobs executed by the Collector.
+register_feature(create_backfill_router)
 
 
 def create_admin_router(context: AdminContext) -> APIRouter:
