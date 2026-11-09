@@ -150,7 +150,8 @@ export type DisabledReasonCode =
   | "capabilities-unknown"
   | "requires-role"
   | "backend-unsupported"
-  | "adapter-unavailable";
+  | "adapter-unavailable"
+  | "rate-limited";
 
 export interface DisabledReason {
   code: DisabledReasonCode;

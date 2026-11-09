@@ -2,6 +2,7 @@ import axios, { type AxiosError } from "axios";
 import { normalizeRestFailure } from "./errors";
 import { emitHttpError } from "@/runtime/http-error-bus";
 import { getCsrfCredential } from "@/runtime/csrf";
+import { retryAfterDisabledReason } from "@/runtime/retry-after";
 import { writesAreStopped } from "@/runtime/write-gate";
 import { HttpError, type HeaderMap, type HttpFailure } from "./types";
 
@@ -120,6 +121,21 @@ apiClient.interceptors.request.use((config) => {
         status: null,
         code: "writes_stopped",
         message: "会话已失效，写操作已停止；请重新登录",
+        details: {},
+        requestId: null,
+      }),
+    );
+  }
+  // A server 429 Retry-After blocks writes until it expires; do not send a
+  // request that the server already told us to hold.
+  const retryAfter = retryAfterDisabledReason();
+  if (retryAfter) {
+    return Promise.reject(
+      new HttpError({
+        kind: "rest",
+        status: null,
+        code: "rate_limited",
+        message: retryAfter.message,
         details: {},
         requestId: null,
       }),

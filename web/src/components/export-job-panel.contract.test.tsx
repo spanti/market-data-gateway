@@ -8,11 +8,12 @@
  */
 
 import { QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import type { ComponentProps } from "react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { resetRetryAfter } from "@/runtime/retry-after";
 import type { CapabilityState } from "@/api/capabilities";
 import type { ExportJob, ExportJobStatus } from "@/api/endpoints/admin";
 import { ExportJobPanel } from "@/components/export-job-panel";
@@ -646,5 +647,58 @@ describe("CONTRACT TARGET (Admin API, MSW only — not integrated)", () => {
     expect(
       screen.getByText(/Admin API 契约目标/),
     ).toBeInTheDocument();
+  });
+});
+
+describe("Export Job Retry-After gate", () => {
+  afterEach(() => {
+    resetRetryAfter();
+    vi.useRealTimers();
+  });
+
+  it("disables creation after a 429 Retry-After, sends no write, and re-enables after expiry", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let posts = 0;
+    server.use(
+      http.get("*/api/v1/admin/export-jobs", () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: "rate_limited",
+              message: "too many requests",
+              details: { retry_after_s: 30 },
+              request_id: "list-rate-limited",
+            },
+          },
+          { status: 429, headers: { "Retry-After": "30" } },
+        ),
+      ),
+      http.post("*/api/v1/admin/export-jobs", () => {
+        posts += 1;
+        return HttpResponse.json(exportJob({ status: "queued" }), {
+          status: 202,
+        });
+      }),
+    );
+
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    renderPanel();
+
+    const create = screen.getByRole("button", { name: "创建 Export Job" });
+    await waitFor(() =>
+      expect(
+        screen.getAllByText(/限流中，请在 30 秒后重试/).length,
+      ).toBeGreaterThan(0),
+    );
+    expect(create).toBeDisabled();
+
+    await user.click(create);
+    expect(posts).toBe(0);
+
+    act(() => {
+      vi.advanceTimersByTime(30_000);
+    });
+    await waitFor(() => expect(create).toBeEnabled());
+    expect(screen.queryByText(/限流中，请在/)).not.toBeInTheDocument();
   });
 });

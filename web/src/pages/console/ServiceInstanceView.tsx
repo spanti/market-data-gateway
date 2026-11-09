@@ -67,6 +67,7 @@ import {
 import type { CapabilityState } from "@/api/capabilities";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
 import { usePermissionSubject } from "@/runtime/use-permission";
+import { useRetryAfter } from "@/runtime/use-retry-after";
 
 /**
  * Service Instance console.
@@ -360,6 +361,7 @@ function lifecycleDisabledReason(
   action: ServiceLifecycleAction,
   capability: CapabilityState | null,
   writesStopped: boolean,
+  retryAfterReason: DisabledReasonValue | null,
   row: ServiceRow,
 ): DisabledReasonValue | null {
   if (writesStopped) {
@@ -374,6 +376,9 @@ function lifecycleDisabledReason(
   );
   if (roleReason) {
     return roleReason;
+  }
+  if (retryAfterReason) {
+    return retryAfterReason;
   }
   if (row.availableActions !== null && !row.availableActions.includes(action)) {
     return {
@@ -534,6 +539,7 @@ export function ServiceInstanceView() {
     sessionLoading,
   } = useRuntimeMode();
   const subject = usePermissionSubject();
+  const retryAfter = useRetryAfter();
   const csrfToken = session?.csrfToken ?? null;
   const source = serviceInstanceSource(capability);
   const directEnabled = source.kind === "direct";
@@ -756,6 +762,10 @@ export function ServiceInstanceView() {
     if (!pending || submitLock.current) {
       return;
     }
+    if (retryAfter.reason) {
+      setDialogError(retryAfter.reason.message);
+      return;
+    }
     const validation = validateLifecycleConfirmation({
       action: pending.action,
       instanceId: pending.instanceId,
@@ -938,6 +948,7 @@ export function ServiceInstanceView() {
                             action,
                             capability,
                             writesStopped,
+                            retryAfter.reason,
                             row,
                           );
                           const lockedReason: DisabledReasonValue | null =

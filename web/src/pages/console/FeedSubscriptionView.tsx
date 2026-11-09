@@ -54,6 +54,7 @@ import {
 import type { DisabledReason as DisabledReasonValue } from "@/runtime/permissions";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
 import { useActionReason } from "@/runtime/use-permission";
+import { useRetryAfter } from "@/runtime/use-retry-after";
 
 /**
  * Feed Subscription + flow control console.
@@ -118,6 +119,7 @@ function DisabledArea({
 export function FeedSubscriptionView() {
   const { capability, session, writesStopped } = useRuntimeMode();
   const queryClient = useQueryClient();
+  const retryAfter = useRetryAfter();
   const csrfToken = session?.csrfToken ?? null;
 
   const readReason = useActionReason("feed.subscription.view");
@@ -146,9 +148,9 @@ export function FeedSubscriptionView() {
       }
     : null;
   const feedWriteBlockReason =
-    stoppedWriteReason ?? writeReason ?? feedCapabilityReason;
+    stoppedWriteReason ?? writeReason ?? retryAfter.reason ?? feedCapabilityReason;
   const flowWriteBlockReason =
-    stoppedWriteReason ?? flowWriteReason ?? flowCapabilityReason;
+    stoppedWriteReason ?? flowWriteReason ?? retryAfter.reason ?? flowCapabilityReason;
 
   const subscriptionsQuery = useQuery({
     queryKey: FEED_QUERY_KEY,
@@ -380,10 +382,15 @@ export function FeedSubscriptionView() {
                       version: merge.subscription.desired.version,
                     })
                   }
-                  disabled={updateMutation.isPending}
+                  disabled={updateMutation.isPending || retryAfter.blocked}
                 >
                   应用合并
                 </Button>
+                {retryAfter.reason ? (
+                  <span className="text-[11px] text-status-warning">
+                    {retryAfter.reason.message}
+                  </span>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -600,6 +607,7 @@ export function FeedSubscriptionView() {
               observedVersion={flowView.apiRateLimit.observedVersion}
               inSync={flowView.apiRateLimit.inSync}
               writeReason={flowWriteBlockReason}
+              retryAfterReason={retryAfter.reason}
               csrfToken={csrfToken}
               initial={flow.api_rate_limit}
               onSaved={() => void queryClient.invalidateQueries({ queryKey: FLOW_QUERY_KEY })}
@@ -612,6 +620,7 @@ export function FeedSubscriptionView() {
               observedVersion={flowView.wsSlowConsumer.observedVersion}
               inSync={flowView.wsSlowConsumer.inSync}
               writeReason={flowWriteBlockReason}
+              retryAfterReason={retryAfter.reason}
               csrfToken={csrfToken}
               initial={flow.ws_slow_consumer}
               onSaved={() => void queryClient.invalidateQueries({ queryKey: FLOW_QUERY_KEY })}
@@ -633,6 +642,9 @@ export function FeedSubscriptionView() {
         requireReason={false}
         submitting={deleteMutation.isPending}
         onConfirm={() => {
+          if (retryAfter.blocked) {
+            return;
+          }
           if (deleteTarget) {
             deleteMutation.mutate({ subscription: deleteTarget });
           }
@@ -650,6 +662,7 @@ function FlowControlEditor({
   observedVersion,
   inSync,
   writeReason,
+  retryAfterReason,
   csrfToken,
   initial,
   onSaved,
@@ -661,6 +674,7 @@ function FlowControlEditor({
   observedVersion: number;
   inSync: boolean;
   writeReason: DisabledReasonValue | null;
+  retryAfterReason: DisabledReasonValue | null;
   csrfToken: string | null;
   initial: FlowControlResponse["api_rate_limit"] | FlowControlResponse["ws_slow_consumer"];
   onSaved: () => void;
@@ -696,7 +710,8 @@ function FlowControlEditor({
     onSuccess: onSaved,
   });
 
-  const readOnly = writeReason !== null;
+  const readOnlyReason = writeReason ?? retryAfterReason;
+  const readOnly = readOnlyReason !== null;
   const saving = apiMutation.isPending || wsMutation.isPending;
 
   return (
@@ -826,8 +841,13 @@ function FlowControlEditor({
           size="sm"
           variant="outline"
           disabled={readOnly || saving}
-          aria-describedby={writeReason ? `flow-${resource}-reason` : undefined}
+          aria-describedby={
+            readOnlyReason ? `flow-${resource}-reason` : undefined
+          }
           onClick={() => {
+            if (readOnly) {
+              return;
+            }
             if (resource === "api_rate_limit" && apiForm) {
               apiMutation.mutate(apiForm);
             } else if (wsForm) {
@@ -839,7 +859,10 @@ function FlowControlEditor({
             ? "保存 API Rate Limit"
             : "保存 WebSocket Slow Consumer"}
         </Button>
-        <DisabledReason id={`flow-${resource}-reason`} reason={writeReason} />
+        <DisabledReason
+          id={`flow-${resource}-reason`}
+          reason={readOnlyReason}
+        />
         {(apiMutation.isError || wsMutation.isError) ? (
           <span className="text-xs text-status-critical">
             保存失败，请查看错误与 Request ID。

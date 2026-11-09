@@ -35,6 +35,7 @@ import {
 import type { DisabledReason as DisabledReasonValue } from "@/runtime/permissions";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
 import { CAPABILITY_KEYS } from "@/runtime/capability-gates";
+import { useRetryAfter } from "@/runtime/use-retry-after";
 import { BackfillJobCreateForm } from "./backfill-job-create-form";
 import {
   formatRange,
@@ -223,6 +224,7 @@ function RowAction({
 export function BackfillJobsSection() {
   const { session } = useRuntimeMode();
   const queryClient = useQueryClient();
+  const retryAfter = useRetryAfter();
   const gate = useQualityGate("backfill.job.view", CAPABILITY_KEYS.backfillJob);
   const createGate = useQualityGate(
     "backfill.job.create",
@@ -232,6 +234,7 @@ export function BackfillJobsSection() {
     "backfill.job.cancel",
     CAPABILITY_KEYS.backfillJob,
   );
+  const actionBlockReason = actionGate.reason ?? retryAfter.reason;
   const [cursor, setCursor] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<
     { kind: "cancel" | "retry"; job: BackfillJob } | null
@@ -460,7 +463,7 @@ export function BackfillJobsSection() {
                           {isJobCancellable(job.status) ? (
                             <RowAction
                               label={`取消 Job ${job.job_id}`}
-                              reason={actionGate.reason}
+                              reason={actionBlockReason}
                               onClick={() =>
                                 setPendingAction({ kind: "cancel", job })
                               }
@@ -468,7 +471,7 @@ export function BackfillJobsSection() {
                           ) : isJobRetryable(job.status) ? (
                             <RowAction
                               label={`重试 Job ${job.job_id}`}
-                              reason={actionGate.reason}
+                              reason={actionBlockReason}
                               onClick={() =>
                                 setPendingAction({ kind: "retry", job })
                               }
@@ -539,7 +542,7 @@ export function BackfillJobsSection() {
             }
             onConfirm={(input) => {
               const action = pendingAction;
-              if (!action) {
+              if (!action || retryAfter.blocked) {
                 return;
               }
               if (action.kind === "cancel") {

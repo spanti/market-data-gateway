@@ -4,6 +4,7 @@ import { classifyHttpError } from "@/api/http/errors";
 import type { NormalizedHttpError } from "@/api/http/types";
 import { Button } from "@/components/ui/button";
 import { subscribeHttpErrors } from "@/runtime/http-error-bus";
+import { useRetryAfter } from "@/runtime/use-retry-after";
 
 function directiveMessage(error: NormalizedHttpError): string {
   const directive = classifyHttpError(error);
@@ -31,12 +32,20 @@ function directiveMessage(error: NormalizedHttpError): string {
  */
 export function GlobalHttpNotice() {
   const [error, setError] = useState<NormalizedHttpError | null>(null);
+  const retryAfter = useRetryAfter();
 
   useEffect(() => subscribeHttpErrors(setError), []);
 
   if (!error) {
     return null;
   }
+
+  // Keep the 429 notice counting down with the same shell-level gate that
+  // disables write controls.
+  const message =
+    error.status === 429 && retryAfter.blocked
+      ? `请求过于频繁，请在 ${retryAfter.secondsRemaining} 秒后重试。`
+      : directiveMessage(error);
 
   return (
     <div
@@ -45,7 +54,7 @@ export function GlobalHttpNotice() {
       className="border-b border-border bg-surface-sunken"
     >
       <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-3 px-5 py-2 text-xs lg:px-8">
-        <span className="font-medium">{directiveMessage(error)}</span>
+        <span className="font-medium">{message}</span>
         {error.requestId ? (
           <span className="font-mono text-[11px] text-faint-foreground">
             Request ID: {error.requestId}

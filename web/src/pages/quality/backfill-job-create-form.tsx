@@ -7,7 +7,10 @@ import {
 } from "@/api/endpoints/backfill";
 import { HttpError } from "@/api/http/types";
 import { ConfirmDialog } from "@/components/confirm-dialog";
-import { DisabledAction } from "@/components/disabled-reason";
+import {
+  DisabledAction,
+  DisabledReason as DisabledReasonNotice,
+} from "@/components/disabled-reason";
 import { StatusBadge, type StatusTone } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,6 +25,7 @@ import {
 } from "@/lib/time-range";
 import type { DisabledReason } from "@/runtime/permissions";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
+import { useRetryAfter } from "@/runtime/use-retry-after";
 import { formatRange, planTextForInterval } from "./quality-format";
 
 type FieldErrors = Partial<
@@ -127,6 +131,7 @@ export function BackfillJobCreateForm({
   disabledReason,
 }: BackfillJobCreateFormProps) {
   const { session } = useRuntimeMode();
+  const retryAfter = useRetryAfter();
   const queryClient = useQueryClient();
   const [instrumentId, setInstrumentId] = useState("");
   const [interval, setInterval] = useState<BarInterval | "">("");
@@ -175,6 +180,9 @@ export function BackfillJobCreateForm({
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (retryAfter.blocked) {
+      return;
+    }
     const start = parseDateTimeInput(startInput, "utc");
     const end = parseDateTimeInput(endInput, "utc");
     const nextErrors: FieldErrors = {};
@@ -220,7 +228,7 @@ export function BackfillJobCreateForm({
   }
 
   function handleConfirm() {
-    if (!pendingBody || mutation.isPending) {
+    if (!pendingBody || mutation.isPending || retryAfter.blocked) {
       return;
     }
     mutation.mutate({
@@ -320,9 +328,20 @@ export function BackfillJobCreateForm({
           />
           <FieldError message={errors.reason} />
         </div>
-        <Button type="submit" size="sm" disabled={mutation.isPending}>
+        <Button
+          type="submit"
+          size="sm"
+          disabled={mutation.isPending || retryAfter.blocked}
+          aria-describedby={
+            retryAfter.reason ? "backfill-create-retry-after" : undefined
+          }
+        >
           创建 Backfill Job
         </Button>
+        <DisabledReasonNotice
+          id="backfill-create-retry-after"
+          reason={retryAfter.reason}
+        />
       </div>
 
       {interval ? (

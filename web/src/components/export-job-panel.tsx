@@ -13,6 +13,7 @@ import {
 } from "@/api/endpoints/export-jobs";
 import { HttpError } from "@/api/http/types";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { DisabledReason } from "@/components/disabled-reason";
 import { ErrorState, LoadingState } from "@/components/states";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -28,8 +29,10 @@ import {
 } from "@/runtime/capability-gates";
 import {
   disabledReasonFor,
+  type DisabledReason as DisabledReasonValue,
   type PermissionSubject,
 } from "@/runtime/permissions";
+import { useRetryAfter } from "@/runtime/use-retry-after";
 import { cn } from "@/lib/utils";
 import type { BarInterval } from "@/lib/time-range";
 import { toQueryInstant } from "@/lib/time-range";
@@ -131,11 +134,13 @@ function ExportJobItem({
   job,
   now,
   cancelling,
+  cancelBlockReason,
   onCancel,
 }: {
   job: ExportJob;
   now: Date;
   cancelling: boolean;
+  cancelBlockReason: DisabledReasonValue | null;
   onCancel: (jobId: string) => void;
 }) {
   const status = effectiveExportJobStatus(job, now);
@@ -219,15 +224,26 @@ function ExportJobItem({
           </span>
         ) : null}
         {canCancel ? (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={cancelling}
-            onClick={() => onCancel(job.job_id)}
-          >
-            <XCircle aria-hidden="true" />
-            {cancelling ? "请求取消中…" : "取消任务"}
-          </Button>
+          <>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={cancelling || cancelBlockReason !== null}
+              aria-describedby={
+                cancelBlockReason
+                  ? `export-cancel-${job.job_id}-reason`
+                  : undefined
+              }
+              onClick={() => onCancel(job.job_id)}
+            >
+              <XCircle aria-hidden="true" />
+              {cancelling ? "请求取消中…" : "取消任务"}
+            </Button>
+            <DisabledReason
+              id={`export-cancel-${job.job_id}-reason`}
+              reason={cancelBlockReason}
+            />
+          </>
         ) : null}
         {job.status === "cancelling" ? (
           <span className="text-xs text-muted-foreground">
@@ -254,6 +270,7 @@ export function ExportJobPanel({
   now,
 }: ExportJobPanelProps) {
   const reasonId = useId();
+  const retryAfter = useRetryAfter();
   const role = subject.kind === "role" ? subject.role : null;
   const roleReason = disabledReasonFor(subject, "export.job.create");
   const availability = adminCapabilityAvailability(
@@ -359,6 +376,8 @@ export function ExportJobPanel({
     createDisabledMessage = `超过 366 个 UTC 天：需拆分为 ${decision.chunkCount} 个 Export Job，不能创建单个任务。`;
   } else if (blockedReason) {
     createDisabledMessage = blockedReason.message;
+  } else if (retryAfter.reason) {
+    createDisabledMessage = retryAfter.reason.message;
   } else if (!query) {
     createDisabledMessage = "请先选择 InstrumentId、Bar Interval 与时间范围。";
   } else if (hasActiveJob) {
@@ -367,7 +386,11 @@ export function ExportJobPanel({
   }
 
   const createEnabled =
-    jobsEnabled && decision.kind === "job" && query !== null && !hasActiveJob;
+    jobsEnabled &&
+    decision.kind === "job" &&
+    query !== null &&
+    !hasActiveJob &&
+    !retryAfter.blocked;
 
   /**
    * >366-day ranges may only be created one chunk at a time. The server owns
@@ -378,6 +401,9 @@ export function ExportJobPanel({
   function splitChunkBlockReason(chunk: ExportRangeChunk): string | null {
     if (blockedReason) {
       return blockedReason.message;
+    }
+    if (retryAfter.reason) {
+      return retryAfter.reason.message;
     }
     if (!query) {
       return "请先选择 InstrumentId、Bar Interval 与时间范围。";
@@ -395,7 +421,11 @@ export function ExportJobPanel({
   }
 
   const splitCreateEnabled =
-    jobsEnabled && query !== null && !hasActiveJob && !createMutation.isPending;
+    jobsEnabled &&
+    query !== null &&
+    !hasActiveJob &&
+    !createMutation.isPending &&
+    !retryAfter.blocked;
 
   const createError =
     createMutation.error instanceof HttpError ? createMutation.error : null;
@@ -428,7 +458,7 @@ export function ExportJobPanel({
           disabled={!createEnabled}
           aria-describedby={createDisabledMessage ? reasonId : undefined}
           onClick={() => {
-            if (query) {
+            if (query && !retryAfter.blocked) {
               createMutation.mutate({ start: query.start, end: query.end });
             }
           }}
@@ -582,7 +612,13 @@ export function ExportJobPanel({
                 cancelMutation.isPending &&
                 cancelMutation.variables === job.job_id
               }
-              onCancel={(jobId) => cancelMutation.mutate(jobId)}
+              cancelBlockReason={retryAfter.reason}
+              onCancel={(jobId) => {
+                if (retryAfter.blocked) {
+                  return;
+                }
+                cancelMutation.mutate(jobId);
+              }}
             />
           ))}
           {jobsQuery.hasNextPage ? (
@@ -634,7 +670,7 @@ export function ExportJobPanel({
         submitting={createMutation.isPending}
         requireReason={false}
         onConfirm={() => {
-          if (!pendingChunk) {
+          if (!pendingChunk || retryAfter.blocked) {
             return;
           }
           const chunk = pendingChunk.chunk;

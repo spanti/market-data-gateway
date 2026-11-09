@@ -8,6 +8,10 @@ import {
   setCsrfCredential,
 } from "@/runtime/csrf";
 import {
+  applyHttpErrorRetryAfter,
+  resetRetryAfter,
+} from "@/runtime/retry-after";
+import {
   resetWriteGate,
   stopWrites,
   writesAreStopped,
@@ -15,6 +19,7 @@ import {
 
 beforeEach(() => {
   clearCsrfCredential();
+  resetRetryAfter();
   resetWriteGate();
   window.localStorage.clear();
   window.sessionStorage.clear();
@@ -87,6 +92,46 @@ describe("write stop after 401", () => {
         HttpResponse.json({ ok: true }),
       ),
     );
+
+    await expect(apiClient.get("/api/v1/admin/probe")).resolves.toMatchObject({
+      status: 200,
+    });
+  });
+});
+
+describe("write stop during 429 Retry-After", () => {
+  it("rejects unsafe requests locally without reaching the network, but keeps reads", async () => {
+    let postCalls = 0;
+    server.use(
+      http.post("*/api/v1/admin/probe", () => {
+        postCalls += 1;
+        return HttpResponse.json({ ok: true });
+      }),
+      http.get("*/api/v1/admin/probe", () =>
+        HttpResponse.json({ ok: true }),
+      ),
+    );
+
+    applyHttpErrorRetryAfter(
+      {
+        kind: "rest",
+        status: 429,
+        code: "rate_limited",
+        message: "too many requests",
+        details: { retry_after_s: 30 },
+        requestId: "rate-request-id",
+        headers: { "retry-after": "30" },
+      },
+      Date.now(),
+    );
+
+    await expect(
+      apiClient.post("/api/v1/admin/probe", {}),
+    ).rejects.toMatchObject({
+      code: "rate_limited",
+      message: "限流中，请在 30 秒后重试",
+    });
+    expect(postCalls).toBe(0);
 
     await expect(apiClient.get("/api/v1/admin/probe")).resolves.toMatchObject({
       status: 200,
