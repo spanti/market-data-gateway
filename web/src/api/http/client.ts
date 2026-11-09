@@ -1,7 +1,9 @@
 import axios, { type AxiosError } from "axios";
 import { normalizeRestFailure } from "./errors";
 import { emitHttpError } from "@/runtime/http-error-bus";
-import type { HeaderMap, HttpFailure } from "./types";
+import { getCsrfCredential } from "@/runtime/csrf";
+import { writesAreStopped } from "@/runtime/write-gate";
+import { HttpError, type HeaderMap, type HttpFailure } from "./types";
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -83,11 +85,45 @@ export function toHttpFailure(error: unknown): HttpFailure {
 }
 
 const GLOBAL_NOTICE_STATUSES = new Set([401, 403, 409, 429]);
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/**
+ * Unsafe requests carry the in-memory CSRF token. After a 401 the write gate
+ * rejects them locally: a mutation must not be sent until the server session
+ * is re-established. Reads stay available for the session probe.
+ */
+apiClient.interceptors.request.use((config) => {
+  const method = (config.method ?? "get").toUpperCase();
+  if (!UNSAFE_METHODS.has(method)) {
+    return config;
+  }
+  if (writesAreStopped()) {
+    return Promise.reject(
+      new HttpError({
+        kind: "rest",
+        status: null,
+        code: "writes_stopped",
+        message: "会话已失效，写操作已停止；请重新登录",
+        details: {},
+        requestId: null,
+      }),
+    );
+  }
+  const csrf = getCsrfCredential();
+  if (csrf) {
+    config.headers.set(csrf.header_name, csrf.token);
+  }
+  return config;
+});
 
 apiClient.interceptors.response.use(
   (response) => response,
   (error: unknown) => {
-    const normalized = normalizeRestFailure(toHttpFailure(error));
+    // Request-interceptor rejections are already normalized HttpErrors.
+    const normalized =
+      error instanceof HttpError
+        ? error
+        : normalizeRestFailure(toHttpFailure(error));
     if (
       normalized.status !== null &&
       GLOBAL_NOTICE_STATUSES.has(normalized.status)
