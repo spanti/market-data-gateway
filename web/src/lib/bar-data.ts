@@ -50,14 +50,18 @@ export function compareBarsByOpenTs(
   return aMs - bMs;
 }
 
+function ingestTsMillis(bar: BarMessageEnvelope): number {
+  const parsed = Date.parse(bar.ingest_ts);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
 /**
  * Chart view: one Bar per `(instrument_id, interval, open_ts)`.
  *
- * The highest `revision` wins. On an equal revision the latest record in the
- * received server response order wins. The Data Contract says REST
- * equal-revision tie order is not contractual; "latest in response order" is
- * the observable assumption recorded here and in the UI caption. Raw revision
- * tables and CSV must keep every row instead.
+ * Data Contract §9: the highest `revision` wins; on an equal revision the
+ * latest `ingest_ts` wins; if both are equal the later record in the received
+ * server response order wins. Raw revision tables and CSV must keep every row
+ * instead.
  */
 export function deriveMaxRevisionBars(
   bars: readonly BarMessageEnvelope[],
@@ -66,9 +70,35 @@ export function deriveMaxRevisionBars(
   for (const bar of bars) {
     const key = barGroupKey(bar);
     const existing = byIdentity.get(key);
+    if (existing === undefined) {
+      byIdentity.set(key, bar);
+      continue;
+    }
+
+    if (bar.payload.revision !== existing.payload.revision) {
+      if (bar.payload.revision > existing.payload.revision) {
+        byIdentity.set(key, bar);
+      }
+      continue;
+    }
+
+    const barIngest = ingestTsMillis(bar);
+    const existingIngest = ingestTsMillis(existing);
     if (
-      existing === undefined ||
-      bar.payload.revision >= existing.payload.revision
+      (Number.isFinite(barIngest) && !Number.isFinite(existingIngest)) ||
+      (Number.isFinite(barIngest) &&
+        Number.isFinite(existingIngest) &&
+        barIngest > existingIngest)
+    ) {
+      byIdentity.set(key, bar);
+      continue;
+    }
+    // Equal revision and equal (or both invalid) ingest_ts: keep the later
+    // record in server response order.
+    if (
+      (Number.isFinite(barIngest) && Number.isFinite(existingIngest)
+        ? barIngest === existingIngest
+        : !Number.isFinite(barIngest) && !Number.isFinite(existingIngest))
     ) {
       byIdentity.set(key, bar);
     }

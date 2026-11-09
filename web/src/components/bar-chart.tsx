@@ -250,7 +250,7 @@ export function BarChart({
     <ChartPanel
       className={className}
       title="最大 Revision Bar 图"
-      description="单轴价格 · 2px 线 · 缺失点断开。按 (instrument_id, interval, open_ts) 保留最大 revision；平级按服务端响应顺序取最后一条（Data Contract 假设）。仅图表坐标转为 Number。"
+      description="单轴价格 · 2px 线 · 缺失点断开。按 (instrument_id, interval, open_ts) 保留最大 revision；revision 相同时取最新 ingest_ts，二者都相同才按服务端响应顺序取最后一条（Data Contract §9）。仅图表坐标转为 Number。"
       legend={legend}
       state={effectiveState}
       errorMessage={

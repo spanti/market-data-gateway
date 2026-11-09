@@ -70,14 +70,35 @@ describe("max-revision chart view", () => {
     expect(result[0]?.payload.close).toBe("3.0");
   });
 
-  it("keeps the latest record in server response order on an equal revision", () => {
-    // Assumption tied to the Data Contract: REST equal-revision tie order is
-    // not contractual. The chart uses the last record in the received
-    // response order, which is the closest observable proxy to "latest".
-    const first = envelope({
+  it("breaks equal revisions by the latest ingest_ts even when it appears earlier in the response", () => {
+    // Data Contract §9: Replay keeps the highest revision and breaks equal
+    // revision ties by the latest ingest_ts. The chart follows the same rule,
+    // so server response order must not override a later ingest.
+    const laterIngestButFirstInResponse = envelope({
+      revision: 1,
+      close: "11.0",
+      ingestTs: "2026-11-09T05:00:00.000000000Z",
+    });
+    const earlierIngestButLastInResponse = envelope({
       revision: 1,
       close: "10.0",
       ingestTs: "2026-11-09T04:00:00.000000000Z",
+    });
+
+    const result = deriveMaxRevisionBars([
+      laterIngestButFirstInResponse,
+      earlierIngestButLastInResponse,
+    ]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toBe(laterIngestButFirstInResponse);
+  });
+
+  it("keeps the later response-order record only when revisions and ingest_ts are equal", () => {
+    const first = envelope({
+      revision: 1,
+      close: "10.0",
+      ingestTs: "2026-11-09T05:00:00.000000000Z",
     });
     const second = envelope({
       revision: 1,
