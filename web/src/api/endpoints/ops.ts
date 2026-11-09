@@ -217,3 +217,13 @@ export async function fetchReplayStatus(
   );
   return response.data;
 }
+
+export async function fetchReplayReady(
+  signal?: AbortSignal,
+): Promise<ReadyPayload> {
+  const response = await opsClient.get<ReadyPayload>(
+    `${REPLAY_OPS_BASE}/readyz`,
+    { signal },
+  );
+  return response.data;
+}
