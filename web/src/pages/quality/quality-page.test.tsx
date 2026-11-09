@@ -1003,3 +1003,76 @@ describe("Quality & Backfill — role and capability gating (Admin API contract 
     expect(within(gaps).queryByRole("table")).not.toBeInTheDocument();
   });
 });
+
+describe("Quality & Backfill — source isolation by runtime mode", () => {
+  it("never queries /ops/collector/status in Admin API mode and points to persistent gaps", async () => {
+    useAdminMode("Operator");
+    let collectorRequests = 0;
+    server.use(
+      http.get("*/ops/collector/status", () => {
+        collectorRequests += 1;
+        return HttpResponse.json(collectorStatus([]));
+      }),
+      http.get("*/api/v1/admin/backfill-gaps", () =>
+        HttpResponse.json({ items: [], page: { next_cursor: null, has_more: false } }),
+      ),
+      http.get("*/api/v1/admin/backfill-jobs", () =>
+        HttpResponse.json({ items: [], page: { next_cursor: null, has_more: false } }),
+      ),
+    );
+
+    renderApp({ initialEntries: ["/quality"] });
+
+    const region = await screen.findByRole("region", {
+      name: "Unrecoverable Backfill Gap 当前快照",
+    });
+    expect(
+      await within(region).findByText(/仅在 Current Contract 模式可用/),
+    ).toBeInTheDocument();
+    expect(
+      within(region).getByText(/持久 Unrecoverable Backfill Gap/),
+    ).toBeInTheDocument();
+    expect(
+      within(region).queryByRole("button", { name: "刷新快照" }),
+    ).not.toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(collectorRequests).toBe(0);
+  });
+
+  it("keeps the snapshot unknown without any request when capabilities are unknown", async () => {
+    let collectorRequests = 0;
+    server.use(
+      http.get("*/api/v1/admin/capabilities", () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: "internal_error",
+              message: "discovery failed",
+              details: {},
+              request_id: "cap-500",
+            },
+          },
+          { status: 500 },
+        ),
+      ),
+      http.get("*/ops/collector/status", () => {
+        collectorRequests += 1;
+        return HttpResponse.json(collectorStatus([]));
+      }),
+    );
+
+    renderApp({ initialEntries: ["/quality"] });
+
+    const region = await screen.findByRole("region", {
+      name: "Unrecoverable Backfill Gap 当前快照",
+    });
+    expect(
+      await within(region).findByText(/能力未知，暂不可用/),
+    ).toBeInTheDocument();
+    expect(
+      within(region).queryByRole("button", { name: "刷新快照" }),
+    ).not.toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(collectorRequests).toBe(0);
+  });
+});
