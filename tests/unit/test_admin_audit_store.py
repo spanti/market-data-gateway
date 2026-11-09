@@ -189,7 +189,8 @@ def test_migration_003_upgrades_a_version_2_database_in_place(
             )
 
     with AdminStore(path) as upgraded:
-        assert upgraded.schema_version == 3
+        assert upgraded.schema_version == upgraded.latest_schema_version
+        assert upgraded.schema_version >= 3
         with upgraded.transaction() as connection:
             subject = connection.execute(
                 "SELECT subject FROM admin_sessions"

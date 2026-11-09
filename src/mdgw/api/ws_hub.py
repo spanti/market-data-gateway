@@ -95,6 +95,39 @@ class WebSocketSession:
     def subscriptions(self) -> frozenset[str]:
         return frozenset(self._subscriptions)
 
+    @property
+    def queue_size(self) -> int:
+        return self._queue.maxsize
+
+    @property
+    def lag_notice_interval_s(self) -> float:
+        return self._lag_notice_interval_s
+
+    def apply_flow_control(
+        self, *, queue_size: int, lag_notice_interval_s: float
+    ) -> None:
+        """Hot-apply the Slow Consumer policy to this live session.
+
+        Called on the event loop. Shrinking the queue drops the oldest queued
+        messages immediately (the same policy a full queue already uses) and
+        keeps the writer task waiting on the same queue object.
+        """
+        if queue_size < 1:
+            msg = "queue_size must be >= 1"
+            raise ValueError(msg)
+        if lag_notice_interval_s < 0:
+            msg = "lag_notice_interval_s must be >= 0"
+            raise ValueError(msg)
+        self._lag_notice_interval_s = lag_notice_interval_s
+        queue = self._queue
+        if queue_size == queue.maxsize:
+            return
+        while queue.qsize() > queue_size:
+            queue.get_nowait()
+        # asyncio.Queue exposes `maxsize` read-only; bound the existing queue
+        # in place so the writer task is never stranded on a replaced queue.
+        queue._maxsize = queue_size
+
     def matches(self, topic: str) -> bool:
         # Exact and prefix subscriptions share one rule: a topic is delivered
         # when it starts with a subscribed pattern. Prefixes such as
@@ -231,6 +264,36 @@ class WebSocketHub:
     def dropped_total(self) -> int:
         """Total messages dropped by all sessions for backpressure."""
         return sum(session.dropped_total for session in self._sessions)
+
+    @property
+    def queue_size(self) -> int:
+        return self._queue_size
+
+    @property
+    def lag_notice_interval_ms(self) -> int:
+        return round(self._lag_notice_interval_s * 1000)
+
+    def apply_flow_control(
+        self, *, queue_size: int, lag_notice_interval_ms: int
+    ) -> None:
+        """Hot-apply WebSocket Slow Consumer settings to the hub.
+
+        New sessions use the new defaults and existing sessions are updated in
+        place. Must run on the server event loop.
+        """
+        if queue_size < 1:
+            msg = "queue_size must be >= 1"
+            raise ValueError(msg)
+        if lag_notice_interval_ms < 0:
+            msg = "lag_notice_interval_ms must be >= 0"
+            raise ValueError(msg)
+        self._queue_size = queue_size
+        self._lag_notice_interval_s = lag_notice_interval_ms / 1000.0
+        for session in tuple(self._sessions):
+            session.apply_flow_control(
+                queue_size=queue_size,
+                lag_notice_interval_s=self._lag_notice_interval_s,
+            )
 
     def register(self, ws: WebSocketTransport) -> WebSocketSession:
         if self._closed:

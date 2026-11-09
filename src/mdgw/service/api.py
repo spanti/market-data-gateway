@@ -59,6 +59,25 @@ class ApiService:
                 store=self.store,
                 instrument_store=self.instrument_store,
                 metrics=self.metrics,
+                flow_control_defaults={
+                    "api_rate_limit": {
+                        "enabled": config.rate_limit.enabled,
+                        "requests_per_second": (
+                            config.rate_limit.requests_per_second
+                        ),
+                        "burst": config.rate_limit.burst,
+                        "max_ws_sessions_per_ip": (
+                            config.rate_limit.max_ws_sessions_per_ip
+                        ),
+                    },
+                    "ws_slow_consumer": {
+                        "enabled": True,
+                        "queue_size": config.streaming.queue_size,
+                        "lag_notice_interval_ms": (
+                            config.streaming.lag_notice_interval_ms
+                        ),
+                    },
+                },
             )
             if config.admin.enabled
             else None

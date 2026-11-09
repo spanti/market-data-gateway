@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
+from mdgw.core.instrument import InstrumentId
 from mdgw.ingest.composite import (
     attach_quarantine,
     build_configured_feed_handler,
@@ -15,11 +18,17 @@ from mdgw.metrics import MetricsRegistry
 from mdgw.service.bar_sink import BufferedBarSink
 from mdgw.service.collector_core import CollectorCore
 from mdgw.service.common import iso_to_seconds, ns_iso, update_dataset_metrics
+from mdgw.service.control_plane import (
+    FEED_SUBSCRIPTION_SYNC_ACTION,
+    ControlPlaneServer,
+    FeedSubscriptionSyncPayload,
+)
 from mdgw.service.health_server import ServiceHealthServer
 from mdgw.store.composition import StorageComposition
 from mdgw.streaming import StreamingInterface
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
     from datetime import datetime
     from pathlib import Path
 
@@ -34,6 +43,10 @@ POLL_INTERVAL_S = 0.05
 ERROR_BACKOFF_S = 1.0
 _NOT_STARTED_MESSAGE = "CollectorService.start() must be called first"
 
+REJECT_FEED_UNAVAILABLE = "feed_unavailable"
+REJECT_UNSUPPORTED_INSTRUMENT = "unsupported_instrument"
+REJECT_UNSUPPORTED_INTERVAL = "unsupported_interval"
+
 
 class CollectorService:
     """Owns the collector pipeline and its ZMQ PUB endpoint."""
@@ -45,6 +58,7 @@ class CollectorService:
         data_root: Path | None = None,
         feed_handler: FeedHandler | None = None,
         wait_for_api: bool | None = None,
+        environ: Mapping[str, str] | None = None,
     ) -> None:
         self.config = config
         # One joint composition owns both Store mappings and the effective
@@ -90,6 +104,20 @@ class CollectorService:
 
         self._streaming: StreamingInterface | None = None
         self._health_server: ServiceHealthServer | None = None
+
+        # Ticket 04 control plane: one shared desired subscription set, applied
+        # to the feed handlers and used as a raw/publish filter. Until the
+        # first successful sync the collector keeps its previous behaviour.
+        self.instance_id = f"collector-{uuid4().hex}"
+        self._environ = environ
+        self._control_server: ControlPlaneServer | None = None
+        self._configured_feeds = {
+            feed.name: feed for feed in getattr(config, "feeds", ())
+        }
+        self._subscriptions_synced = False
+        self._active_pairs: set[tuple[str, str]] = set()
+        self._active_instruments: set[str] = set()
+        self.core.subscription_filter = self._allows_raw_subscription
 
         # `None` means "use [service].wait_for_api_ready". The CLI overrides it
         # with --wait-for-api/--no-wait-for-api.
@@ -157,6 +185,8 @@ class CollectorService:
             help="Bar messages published on the collector PUB",
         )
 
+        self._start_control_plane()
+
         self._stop.clear()
         self._started = True
         self._started_at = time.monotonic()
@@ -185,6 +215,7 @@ class CollectorService:
     def stop(self) -> None:
         self._ready.clear()
         self._stop.set()
+        self._stop_control_plane()
 
         # Stop both publishing threads before the Streaming Interface: they
         # must not observe a closed socket (publish is a no-op after stop, but
@@ -229,6 +260,171 @@ class CollectorService:
             raise RuntimeError(_NOT_STARTED_MESSAGE)
         return self._health_server.base_url
 
+    @property
+    def control_port(self) -> int | None:
+        """Bound control-plane port, or ``None`` when not serving."""
+        server = self._control_server
+        return None if server is None else server.port
+
+    # -- control plane -----------------------------------------------------
+
+    def _start_control_plane(self) -> None:
+        if not self.config.admin.adapters.collector_control:
+            return
+        control = self.config.admin.control
+        source = self._environ if self._environ is not None else os.environ
+        token = str(source.get(control.token_env, "") or "")
+        if control.port <= 0 or not token:
+            logger.warning(
+                "collector control plane is enabled but not configured",
+                extra={
+                    "event": "collector.control_plane_not_configured",
+                    "port": control.port,
+                },
+            )
+            return
+        server = ControlPlaneServer(
+            host=control.host,
+            port=control.port,
+            token=token,
+            max_message_bytes=control.max_message_bytes,
+            request_timeout_s=control.timeout_s,
+        )
+        server.register("ping", lambda _payload: {"pong": True})
+        server.register(
+            FEED_SUBSCRIPTION_SYNC_ACTION, self._handle_subscription_sync
+        )
+        server.start()
+        self._control_server = server
+        logger.info(
+            "collector control plane started",
+            extra={
+                "event": "collector.control_plane_started",
+                "port": server.port,
+            },
+        )
+
+    def _stop_control_plane(self) -> None:
+        server = self._control_server
+        self._control_server = None
+        if server is not None:
+            server.stop()
+
+    def _handle_subscription_sync(
+        self, payload: FeedSubscriptionSyncPayload
+    ) -> dict[str, Any]:
+        """Apply one full desired set and acknowledge every entry truthfully."""
+        desired_by_feed: dict[str, set[str]] = {}
+        active_pairs: set[tuple[str, str]] = set()
+        active_instruments: set[str] = set()
+        acknowledgements: list[dict[str, Any]] = []
+        for item in payload.subscriptions:
+            desired_by_feed.setdefault(item.feed, set())
+            if item.deleted:
+                acknowledgements.append(
+                    _ack(item, "applied", None)
+                )
+                continue
+            feed = self._configured_feeds.get(item.feed)
+            if feed is None:
+                acknowledgements.append(
+                    _ack(item, "rejected", REJECT_FEED_UNAVAILABLE)
+                )
+                continue
+            if item.interval not in self.config.aggregation.intervals:
+                acknowledgements.append(
+                    _ack(item, "rejected", REJECT_UNSUPPORTED_INTERVAL)
+                )
+                continue
+            handler = self._handler_for_feed(item.feed)
+            if handler is None:
+                acknowledgements.append(
+                    _ack(item, "rejected", REJECT_FEED_UNAVAILABLE)
+                )
+                continue
+            if not self._supports_item(handler, feed, item):
+                acknowledgements.append(
+                    _ack(item, "rejected", REJECT_UNSUPPORTED_INSTRUMENT)
+                )
+                continue
+            acknowledgements.append(_ack(item, "applied", None))
+            if item.enabled:
+                desired_by_feed[item.feed].add(item.instrument_id)
+                active_pairs.add((item.instrument_id, item.interval))
+                active_instruments.add(item.instrument_id)
+
+        # The sync payload is the full desired set: a configured feed omitted
+        # from it must also be removed from the feed handler's active set.
+        for feed_name in self._configured_feeds:
+            desired_by_feed.setdefault(feed_name, set())
+        self._apply_active_instruments(desired_by_feed)
+        self._active_pairs = active_pairs
+        self._active_instruments = active_instruments
+        self._subscriptions_synced = True
+        return {
+            "collector_instance_id": self.instance_id,
+            "sync_version": payload.sync_version,
+            "subscriptions": acknowledgements,
+        }
+
+    def _handler_for_feed(self, feed_name: str) -> Any:
+        def find(handler: Any) -> Any:
+            if getattr(handler, "name", None) == feed_name:
+                return handler
+            for child in getattr(handler, "_handlers", ()):
+                found = find(child)
+                if found is not None:
+                    return found
+            return None
+
+        return find(self._feed_handler)
+
+    @staticmethod
+    def _supported_instruments(handler: Any) -> frozenset[str]:
+        supported = getattr(handler, "supported_instruments", None)
+        if callable(supported):
+            return frozenset(supported())
+        if supported is not None:
+            return frozenset(supported)
+        return frozenset(getattr(handler, "instrument_ids", ()))
+
+    def _supports_item(self, handler: Any, feed: Any, item: Any) -> bool:
+        try:
+            parsed = InstrumentId.parse(item.instrument_id)
+        except ValueError:
+            return False
+        if parsed.venue != item.venue or parsed.venue != feed.venue:
+            return False
+        supported = self._supported_instruments(handler)
+        return item.instrument_id in supported or parsed.value in supported
+
+    def _apply_active_instruments(
+        self, desired_by_feed: Mapping[str, set[str]]
+    ) -> None:
+        for feed_name, instruments in desired_by_feed.items():
+            handler = self._handler_for_feed(feed_name)
+            apply = getattr(handler, "apply_subscriptions", None)
+            if callable(apply):
+                apply(frozenset(instruments))
+
+    # -- subscription filtering -------------------------------------------
+
+    def _allows_raw_subscription(
+        self, instrument_id: str, _interval: str
+    ) -> bool:
+        if not self._subscriptions_synced:
+            return True
+        return instrument_id in self._active_instruments
+
+    def _publishable_bars(self, bars: Iterable[Bar]) -> list[Bar]:
+        if not self._subscriptions_synced:
+            return list(bars)
+        return [
+            bar
+            for bar in bars
+            if (bar.instrument_id, bar.interval) in self._active_pairs
+        ]
+
     # -- ingest loop -------------------------------------------------------
 
     def _run_ingest_loop(self) -> None:
@@ -266,6 +462,9 @@ class CollectorService:
     def _publish_bars(self, bars: list[Bar]) -> None:
         streaming = self._streaming
         if streaming is None:
+            return
+        bars = self._publishable_bars(bars)
+        if not bars:
             return
         # `publish_bars` groups internally; the counter delta gives the exact
         # number of Bar frames actually sent without re-implementing grouping.
@@ -481,6 +680,15 @@ class CollectorService:
         if self._started_at is None:
             return 0.0
         return max(0.0, time.monotonic() - self._started_at)
+
+
+def _ack(item: Any, state: str, reason: str | None) -> dict[str, Any]:
+    return {
+        "subscription_id": item.subscription_id,
+        "version": item.version,
+        "state": state,
+        "reason": reason,
+    }
 
 
 __all__ = ["CollectorService"]

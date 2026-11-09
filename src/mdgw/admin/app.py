@@ -21,6 +21,7 @@ from mdgw.admin.auth.routes import (
     create_protected_auth_router,
 )
 from mdgw.admin.capabilities import build_capabilities_document
+from mdgw.admin.feed.routes import create_feed_router
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -54,6 +55,8 @@ def register_feature(factory: Callable[[AdminContext], APIRouter]) -> None:
 
 #: Ticket 03: read-only Operator Audit Event query routes.
 register_feature(create_audit_router)
+#: Ticket 04: Feed Subscription and flow-control routes.
+register_feature(create_feed_router)
 
 
 def create_admin_router(context: AdminContext) -> APIRouter:

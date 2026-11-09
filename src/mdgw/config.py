@@ -676,12 +676,52 @@ class AdminExportConfig(_ConfigModel):
         return self
 
 
+_CONTROL_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 class AdminControlConfig(_ConfigModel):
-    """Controlled Collector/Supervisor IPC channel placeholders."""
+    """Controlled Collector/Supervisor IPC channel.
+
+    Windows pyzmq cannot bind ``ipc://``, so the Admin control plane is a
+    loopback TCP listener carrying length-prefixed, token-authenticated,
+    schema-validated envelopes. The token itself is never stored in config:
+    ``token_env`` names the environment variable both sides read.
+    """
 
     socket_path: Path | None = None
+    host: str = "127.0.0.1"
+    # 0 means "not configured": the Collector does not bind a control server
+    # and the API reports the collector_control adapter as unavailable.
+    port: int = Field(default=0, ge=0, le=65535)
+    # This is the environment variable *name*, never the token itself.
+    token_env: str = "MDGW_ADMIN_CONTROL_TOKEN"  # ruff: ignore[hardcoded-password-string]
     timeout_s: float = Field(default=5.0, gt=0)
     max_message_bytes: int = Field(default=65_536, ge=1)
+
+    @field_validator("host")
+    @classmethod
+    def _loopback_only(cls, value: str) -> str:
+        cleaned = value.strip()
+        if cleaned == "localhost":
+            return cleaned
+        try:
+            address = ipaddress.ip_address(cleaned)
+        except ValueError as exc:
+            msg = "control host must be a loopback address"
+            raise ValueError(msg) from exc
+        if not address.is_loopback:
+            msg = "control host must be a loopback address"
+            raise ValueError(msg)
+        return cleaned
+
+    @field_validator("token_env")
+    @classmethod
+    def _valid_env_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if _CONTROL_ENV_RE.match(cleaned) is None:
+            msg = "token_env must be a valid environment variable name"
+            raise ValueError(msg)
+        return cleaned
 
 
 class AdminLimitsConfig(_ConfigModel):

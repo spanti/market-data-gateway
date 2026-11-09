@@ -711,6 +711,7 @@ def test_capabilities_announce_operator_audit_when_enabled(
     with _running_admin(tmp_path) as (_server, client, context):
         document = client.get("/api/v1/admin/capabilities").json()
         schema_version = context.db.schema_version
+        latest_schema_version = context.db.latest_schema_version
 
     adapters = {
         entry["name"]: entry["state"] for entry in document["adapters"]
@@ -722,7 +723,7 @@ def test_capabilities_announce_operator_audit_when_enabled(
         "edit": False,
         "delete": False,
     }
-    assert schema_version == 3
+    assert schema_version == latest_schema_version
 
 
 def test_operator_audit_stays_unsupported_when_the_adapter_is_disabled(

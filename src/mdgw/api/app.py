@@ -10,7 +10,7 @@ leaves the ``/api/v1/admin`` routes absent unless an enabled
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI
 
@@ -64,7 +64,20 @@ def create_app(  # ruff: ignore[too-many-arguments]  # keyword-only app configur
     install_openapi(app)
     install_exception_handlers(app)
 
-    limiter = _build_rate_limiter(rate_limit)
+    # Ticket 04: with Admin enabled, flow-control desired state lives in the
+    # management DB and is hot-applied to this process's limiter/hub. The
+    # runtime is built before the WebSocket router so the middleware is
+    # present even when `[rate_limit].enabled` was false at startup.
+    flow_control = (
+        admin.feed if admin is not None and admin.enabled else None
+    )
+    if flow_control is not None:
+        flow_control.reconcile_runtime_defaults(
+            rate_limit=rate_limit, hub=ws_hub
+        )
+    limiter = _build_rate_limiter(rate_limit, flow_control=flow_control)
+    if flow_control is not None:
+        flow_control.bind_rate_limiter(limiter)
 
     app.include_router(
         ops.create_router(
@@ -85,11 +98,22 @@ def create_app(  # ruff: ignore[too-many-arguments]  # keyword-only app configur
                 ws_hub=ws_hub,
                 ws_path=ws_path,
                 rate_limiter=limiter,
+                client_ip_resolver=(
+                    None
+                    if flow_control is None
+                    else flow_control.resolve_client_ip
+                ),
             )
         )
     # Admin routes are additive and mounted before the rate-limiter middleware
     # captures the route table, so their templates stay bounded in metrics.
     mount_admin(app, admin)
+    if flow_control is not None:
+        flow_control.bind_ws_hub(ws_hub)
+    if admin is not None and admin.enabled:
+        # Restart recovery: persist observed flow-control state and re-send
+        # the persisted desired subscription set to the Collector.
+        admin.run_startup()
 
     if limiter is not None:
         # Starlette prepends each added middleware, so adding the rate limiter
@@ -100,6 +124,11 @@ def create_app(  # ruff: ignore[too-many-arguments]  # keyword-only app configur
             limiter=limiter,
             metrics=metrics,
             routes=app.routes,
+            client_ip_resolver=(
+                None
+                if flow_control is None
+                else flow_control.resolve_client_ip
+            ),
         )
     app.add_middleware(RequestContextMiddleware, metrics=metrics)
     return app
@@ -107,7 +136,17 @@ def create_app(  # ruff: ignore[too-many-arguments]  # keyword-only app configur
 
 def _build_rate_limiter(
     rate_limit: RateLimitConfig | None,
+    *,
+    flow_control: Any = None,
 ) -> RateLimiter | None:
+    if flow_control is not None:
+        policy = flow_control.rate_limit_policy()
+        return RateLimiter(
+            requests_per_second=max(policy.requests_per_second, 1e-9),
+            burst=policy.burst,
+            max_ws_sessions_per_ip=policy.max_ws_sessions_per_ip,
+            policy_source=flow_control.rate_limit_policy,
+        )
     if rate_limit is None or not rate_limit.enabled:
         return None
     return RateLimiter(
