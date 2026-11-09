@@ -102,6 +102,9 @@ class ImmediateBarSink:
         self._last_flush_duration_s: float | None = None
         self._flushes = 0
         self._persisted_bars = 0
+        # Actual Parquet bytes reported by the Store write result (file
+        # sizes), not the cheap `estimate_bar_bytes` trigger.
+        self._bytes_written = 0
 
     def bind(
         self,
@@ -127,25 +130,30 @@ class ImmediateBarSink:
     def write_bars(self, bars: Sequence[Bar]) -> None:
         if not bars:
             return
-        duration = self._write(bars)
+        duration, written_bytes = self._write(bars)
         with self._lock:
             self._last_flush_ts = utc_now()
             self._last_flush_duration_s = duration
             self._flushes += 1
             self._persisted_bars += len(bars)
+            self._bytes_written += written_bytes
         if self._on_persisted is not None:
             self._on_persisted(bars)
 
-    def _write(self, bars: Sequence[Bar]) -> float:
+    def _write(self, bars: Sequence[Bar]) -> tuple[float, int]:
         if self._asset_class_for is None:
             raise RuntimeError(_BIND_REQUIRED_MESSAGE)
         groups: dict[str, list[Bar]] = defaultdict(list)
         for bar in bars:
             groups[self._asset_class_for(bar.instrument_id)].append(bar)
         started = time.monotonic()
+        written_bytes = 0
         for asset_class, group in groups.items():
-            self._store.write_bars(group, asset_class=asset_class)
-        return time.monotonic() - started
+            written = self._store.write_bars(group, asset_class=asset_class)
+            written_bytes += sum(
+                int(entry.get("size_bytes", 0)) for entry in written
+            )
+        return time.monotonic() - started, written_bytes
 
     def flush(self) -> None:  # ruff: ignore[no-self-use] - BarSink Protocol method
         return None
@@ -164,6 +172,7 @@ class ImmediateBarSink:
                 "lag_bars": 0,
                 "flushes": self._flushes,
                 "persisted_bars": self._persisted_bars,
+                "bytes_written": self._bytes_written,
                 "last_flush_ts": ns_iso(self._last_flush_ts),
                 "last_flush_duration_s": self._last_flush_duration_s,
             }
@@ -217,6 +226,7 @@ class BufferedBarSink:
         self._flushes = 0
         self._persisted_bars = 0
         self._flush_failures = 0
+        self._bytes_written = 0
 
     # -- binding -----------------------------------------------------------
 
@@ -442,10 +452,7 @@ class BufferedBarSink:
         try:
             for bar in bars:
                 groups[self._asset_class_for(bar.instrument_id)].append(bar)
-            started = time.monotonic()
-            for asset_class, group in groups.items():
-                self._store.write_bars(group, asset_class=asset_class)
-            duration = time.monotonic() - started
+            duration, written_bytes = self._write_groups(groups)
         except Exception:
             with self._condition:
                 self._last_flush_failed = True
@@ -467,6 +474,7 @@ class BufferedBarSink:
             self._last_flush_duration_s = duration
             self._flushes += 1
             self._persisted_bars += len(bars)
+            self._bytes_written += written_bytes
         if self._on_persisted is not None:
             try:
                 self._on_persisted(bars)
@@ -476,6 +484,17 @@ class BufferedBarSink:
                     extra={"event": "collector.post_persist_failed"},
                 )
         return True
+
+    def _write_groups(self, groups: dict[str, list[Bar]]) -> tuple[float, int]:
+        """Write every asset-class group and return duration + actual bytes."""
+        started = time.monotonic()
+        written_bytes = 0
+        for asset_class, group in groups.items():
+            written = self._store.write_bars(group, asset_class=asset_class)
+            written_bytes += sum(
+                int(entry.get("size_bytes", 0)) for entry in written
+            )
+        return time.monotonic() - started, written_bytes
 
     def _remove_flushed_locked(
         self, snapshot: Sequence[tuple[tuple[str, str, int], tuple[Bar, float]]]
@@ -505,6 +524,7 @@ class BufferedBarSink:
                 "flushes": self._flushes,
                 "flush_failures": self._flush_failures,
                 "persisted_bars": self._persisted_bars,
+                "bytes_written": self._bytes_written,
                 "last_flush_ts": ns_iso(self._last_flush_ts),
                 "last_flush_duration_s": self._last_flush_duration_s,
             }
