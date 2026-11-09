@@ -21,7 +21,7 @@ Status vocabulary:
 | Install | `npm ci` | PASS |
 | Typecheck | `npm run typecheck` | PASS (`tsc --noEmit`, 0 errors) |
 | Lint | `npm run lint` | PASS (`eslint . --max-warnings 0`, 0 errors/warnings) |
-| Unit/component | `npm test` | PASS — **52 test files, 439 tests** |
+| Unit/component | `npm test` | PASS — **54 test files, 458 tests** (the code-review pass added focused cases across bars, WS, quality, console, export and Retry-After) |
 | Production build | `npm run build` | PASS — Vite 6.4.5 build. Non-blocking warning: main chunk `index-CojH4foC.js` 541.80 kB (gzip 162.22 kB) exceeds the 500 kB advisory limit. No build failure. |
 | Browser E2E | `npm run test:e2e` | PASS — **17 tests, 25.9 s**, Chrome channel (installed `C:/Program Files/Google/Chrome/Application/chrome.exe`) |
 | Browser E2E (Edge) | `MDGW_E2E_CHANNEL=msedge npx playwright test e2e/layout-keyboard.spec.ts` | PASS — 4 layout/keyboard tests in Microsoft Edge |
@@ -57,8 +57,17 @@ target and gate it by capability, plus defense-in-depth denial in the Admin Ngin
     (`/api/v1/admin/monitoring/query`); it never falls back to `/prometheus`.
   - Feed Freshness (which depends on `collector /status.health.tracked`) shows the explicit
     capability gap in Admin mode rather than a stale/fabricated value.
-  - Admin WebSocket Debug targets the capability-declared `/api/v1/admin/ws`; it never falls back
-    to the public `/ws` in Admin mode.
+  - **Quality & Backfill** no longer calls the process-local `/ops/collector/status` in Admin
+    mode. It renders a note that the snapshot is Current-Contract-only and points to the
+    persistent Backfill Gap list. With capabilities unknown it renders unknown and issues zero
+    requests. The zero-direct-ops claim therefore covers Monitoring **and** Quality **and**
+    Console.
+  - Admin WebSocket Debug and Live Follow target the capability-declared
+    `/api/v1/admin/ws`; they never fall back to the public `/ws` in Admin mode. When capability
+    discovery is pending/failed, or `ws_admin_session` is unavailable, the target resolves to
+    `null` and no socket is constructed.
+  - An incompatible Admin contract (`compatible === false`) disables every Admin-controlled
+    surface through one shared gate, with **“Admin API 版本不兼容”** as the reason.
 - `GET /api/v1/status` and `GET /api/v1/instruments` remain reachable through `/api` in Admin mode
   because they are public read APIs, not ops management resources.
 
@@ -91,7 +100,7 @@ Evidence:
 | Spec requirement | Status | Evidence |
 |---|---|---|
 | Vitest + Testing Library: Access Role matrix | **PASS** | `src/runtime/permissions.test.ts`, Service Instance role matrix, security capability-gating tests; part of 439 passing tests. |
-| Revision dedupe (max revision, tie-break) | **PASS** | `src/lib/bar-data.test.ts`, `src/components/bar-chart.test.tsx`. |
+| Revision dedupe (max revision, tie-break) | **PASS** | `src/lib/bar-data.test.ts` — highest revision wins; equal revision breaks by latest `ingest_ts` (Data Contract §9), with a case where the later ingest appears earlier in the response; only equal revision **and** equal ingest fall back to response order. `src/components/bar-chart.test.tsx`. |
 | UTC and closed/open interval semantics | **PASS** | `src/lib/time-range.test.ts`; Bars URL uses inclusive start/exclusive end. |
 | Job state machine | **PASS** | `src/lib/export-policy.test.ts`, `src/pages/console/lifecycle.test.ts`, backfill/export contract tests. |
 | Filename parsing (`filename*`, quoted, path cleanup, fallback) | **PASS** | `src/lib/content-disposition.test.ts`. |
@@ -226,14 +235,17 @@ Covered:
 
 | Behaviour | Evidence |
 |---|---|
-| Admin service-instance seam; zero direct `/status` or `/ops/*` requests | E2E test 1; unit tests assert request flags |
-| High-risk confirmation: reason + exact instance name; CSRF + `Idempotency-Key`; accepted ≠ success; no auto-retry | E2E test 1 |
+| Admin service-instance seam; zero direct `/status` or `/ops/*` requests | E2E test 1; unit tests assert request flags; `quality-page.test.tsx` asserts zero `/ops/collector/status` requests in Admin and unknown modes |
+| High-risk confirmation: reason + exact instance name; CSRF + `Idempotency-Key`; accepted ≠ success; no auto-retry | E2E test 1 (dialog now RHF + Zod; same rules) |
 | 401 stops writes and returns to login entry | E2E test 2; unit test in `console-service-instance.test.tsx` |
 | 403 names the missing role without logout | E2E test 3 |
 | 409 manual-merge conflict | E2E test 4 |
-| 429 honours `Retry-After` | E2E test 5 |
+| 429 honours `Retry-After` and disables writes until it expires | E2E test 5 (notice + countdown); `retry-after.test.tsx` (fake timers), `csrf.test.ts` (local rejection, zero network writes), `export-job-panel.contract.test.tsx` (control disabled → no POST → re-enabled) |
 | Missing `service_lifecycle` capability → explicit gap, no fallback rows | E2E test 6; unit test |
 | Admin monitoring proxy only; no direct Prometheus | `MonitoringPage.test.tsx` Admin-mode gating; existing contract tests |
+| Incompatible Admin contract disables controls with the reason and no writes | `capability-gating.test.tsx`; `export-job-panel.contract.test.tsx`; shared `adminCapabilityAvailability` |
+| WS target modes: Current Contract public `/ws`, Admin admin WS only, unknown = no socket | `ws-target.test.ts`, `BarsPage.test.tsx`, `console-websocket-debug.test.tsx`, `console-mode-banner.test.tsx` |
+| >366 days: independent per-chunk Export Jobs with explicit confirmation | `export-job-panel.contract.test.tsx` (confirmation, exact chunk body, one job at a time, quota error) |
 
 These are **not** real backend integration and must not be counted as completed Admin features.
 
@@ -287,9 +299,81 @@ keys, not mock data.
 7. **Docker DNS constraint.** `MDGW_DNS_RESOLVER=127.0.0.11` is Docker's embedded DNS. Use a
    user-defined network/Compose (or IP upstreams/another resolver) for plain `docker run`;
    otherwise absent hostnames log resolver errors and return `502`.
-8. **Build advisory.** The main JS chunk is 541.80 kB (gzip 162.22 kB), above Vite's 500 kB
-   advisory. Build passes; no code-splitting change was made.
+8. **Build advisory.** The main JS chunk is 591.59 kB (gzip 180.57 kB), above Vite's 500 kB
+   advisory (it grew with React Hook Form/Zod form code). Build passes; no code-splitting change
+   was made in this pass.
 9. **Not run:** no mobile viewport acceptance (mobile is out of the desktop design target beyond
    key states); no real Edge run of the full suite (Edge ran the 4 layout/keyboard tests); no
    Docker Compose deployment of the whole gateway (only the web image and its Nginx proxy were
    built/run, because this ticket must not modify Compose).
+
+---
+
+## 9. Code review fixes (two-axis review of `integration/operator-console`)
+
+Scope: `web/` only, plus this report. No Python, Compose, `src/`, root docs or ticket files were
+changed. Branch: `integration/operator-console`.
+
+Final gates after the fixes:
+
+| Gate | Result |
+|---|---|
+| `npm run typecheck` | PASS (0 errors) |
+| `npm run lint` | PASS (`--max-warnings 0`) |
+| `npm test` | PASS — **54 files / 458 tests** |
+| `npm run build` | PASS — Vite 6.4.5; same non-blocking chunk-size advisory (`index-*.js` 591.59 kB / gzip 180.57 kB) |
+| `npm run test:e2e` | PASS — **17 tests / 23.9 s** on the real local stack (Chrome channel), rerun after the final code changes; no flaky retry was needed |
+
+### 9.1 Spec / functional findings
+
+| # | Finding | Fix | Evidence |
+|---|---|---|---|
+| S1 | Max-Revision tie-break ignored `ingest_ts` | `deriveMaxRevisionBars` now keeps highest revision → latest `ingest_ts` → later response order; chart caption/comment updated | `src/lib/bar-data.ts`, `src/lib/bar-data.test.ts` (later-ingest row appears earlier in the response), `src/components/bar-chart.tsx` |
+| S2 | WS target/unknown capabilities and live follow | Current Contract → public `/ws`; Admin → declared `ws_admin_session` path only; unknown/pending → `url: null` + “能力未知，暂不可用” and source `unknown`. Live Follow uses the resolved target and the `ws.session.subscribe` role gate; no socket when unavailable | `src/api/ws/ws-target.ts`, `src/api/ws/ws-target.test.ts`, `src/hooks/use-bar-live-feed.ts`, `src/components/live-follow-panel.tsx`, `src/pages/console/WebSocketDebugView.tsx`, `src/pages/bars/BarsPage.test.tsx`, `src/pages/console/console-websocket-debug.test.tsx` |
+| S3 | Quality always called `/ops/collector/status` | Query enabled only in `current-contract`; Admin mode shows a Current-Contract-only note and points to the persistent Backfill Gap list; unknown renders unknown with no request; Quality header follows the mode | `src/pages/quality/collector-gap-snapshot.tsx`, `src/pages/quality/QualityPage.tsx`, `src/pages/quality/quality-page.test.tsx` (asserts zero requests in Admin/unknown) |
+| S4 | `compatible === false` not enforced everywhere | One `adminCapabilityAvailability` / `adminCompatibilityReason` gate (typed `CAPABILITY_KEYS`) now backs quality gates, export job, monitoring proxy, service-instance source, login, WS target, feed views, lifecycle and Backfill | `src/runtime/capability-gates.ts`, `src/runtime/permissions.ts`, `src/runtime/service-instance-source.ts`, `src/runtime/login-availability.ts`, `src/api/monitoring/admin-proxy.ts`, `src/pages/console/FeedSubscriptionView.tsx`, `src/pages/console/ServiceInstanceView.tsx`, `src/components/export-job-panel.tsx`, `src/components/export-job-panel.contract.test.tsx` |
+| S5 | Console banner was hardcoded to Current Contract | Banner now names Current Contract real status + public `/ws`, Admin service-instance seam + admin WS, or unknown/no-connect | `src/pages/console/ConsolePage.tsx`, `src/pages/console/console-mode-banner.test.tsx` |
+| S6 | >366-day ranges could not be created | Each split chunk gets an independent Export Job control with explicit confirmation; a single combined job stays disabled; created chunks / an active job / an in-flight create disable the rest; quota errors stay visible; no multi-instrument ZIP | `src/components/export-job-panel.tsx`, `src/components/export-job-panel.contract.test.tsx` |
+| S7 | 429 only showed a notice | HTTP-error-bus-fed Retry-After store + ticking `useRetryAfter`; the API client rejects unsafe requests locally while blocked; lifecycle, feed update/delete, flow control, Backfill create/cancel/retry and Export Job create/cancel disable with “限流中，请在 N 秒后重试”; global notice counts down | `src/runtime/retry-after.ts`, `src/runtime/use-retry-after.ts`, `src/api/http/client.ts`, `src/components/global-http-notice.tsx`, `src/runtime/retry-after.test.tsx` (fake timers), `src/runtime/csrf.test.ts` (zero network writes), `src/components/export-job-panel.contract.test.tsx` |
+| S8 | Forms were manually validated | RHF + Zod now backs `ConfirmDialog` (reason + exact instance name + max length), both flow-control editors, Backfill Job create and the split-chunk creation dialog. Submission bodies and accessible messages are unchanged | `src/components/confirm-dialog.tsx`, `src/pages/console/FeedSubscriptionView.tsx`, `src/pages/quality/backfill-job-create-form.tsx`, `src/components/export-job-panel.tsx`, `src/lib/validation.ts`; existing form tests plus `quality-page.test.tsx`/`export-job-panel.contract.test.tsx` cover the preserved behavior |
+
+Notes on S8: feed enable/disable is a single toggle button with no fields, the feed delete dialog
+has no fields, and the 31–366-day “创建 Export Job” action is a single confirm button with no
+fields. These remain direct controls (the delete dialog still runs through the RHF+Zod
+`ConfirmDialog`). The split-chunk dialog is a real RHF+Zod form (chunk select + explicit
+confirmation checkbox).
+
+### 9.2 Standards / refactor findings
+
+| # | Finding | Fix | Evidence |
+|---|---|---|---|
+| T1 | Copied mode → compatibility → capability gates | Single `adminCapabilityAvailability` + typed `CAPABILITY_KEYS` used by quality, export, service-instance, admin proxy, login, WS target, monitoring and feed views; distinct disabled copy is preserved | `src/runtime/capability-gates.ts` and its call sites |
+| T2 | `ROLE_ACTIONS` and `REQUIRED_ROLES` maintained separately | `REQUIRED_ROLES` is derived from the single role matrix; `can`/`disabledReasonFor` behavior unchanged | `src/runtime/permissions.ts`, `src/runtime/permissions.test.ts` |
+| T3 | Duplicated service domain types and gap naming | One `SERVICE_ROLES`/`ServiceRole`, one `ServiceLifecycleAction` source, canonical `ServiceInstanceRowData` shared by Monitoring and Console; `UnrecoverableBackfillGapEvent` and Backfill-prefixed gap identifiers/components | `src/api/endpoints/admin.ts`, `src/api/endpoints/admin-service-instances.ts`, `src/api/endpoints/ops.ts`, `src/pages/console/lifecycle.ts`, `src/pages/console/ServiceInstanceView.tsx`, `src/pages/monitoring/use-monitoring-data.ts`, `src/components/monitoring/service-instance-list.tsx`, `src/pages/quality/*` |
+| T4 | Bare `AuditEvent` / WS `subscriptions` vocabulary | `OperatorAuditEvent`, `OperatorAuditEventPage`, `parseOperatorAuditEventPage`, `fetchOperatorAuditEvent(s)`, `OperatorAuditQuerySection`, `OperatorAuditEventDetail`; files renamed to `operator-audit.ts` / `OperatorAudit*.tsx`; WS-debug snapshot uses `topicPatterns` and the UI says “当前会话 Topic 模式” | `src/api/endpoints/operator-audit.ts`, `src/pages/security/OperatorAuditQuerySection.tsx`, `src/pages/security/OperatorAuditEventDetail.tsx`, `src/pages/console/ws-debug-session.ts`, `src/pages/console/WebSocketDebugView.tsx` |
+| T5 | Duplicated formatters/error helpers/hardcoded polling | One `formatUtcTimestamp` in `src/lib/format.ts` (used by quality format, Identity, Feed, Service Instance and mode banner); one `errorText` and one `queryErrorInfo` in `src/lib/errors.ts`; named `OPERATION_POLL_INTERVAL_MS` / `ACTIVE_JOB_POLL_INTERVAL_MS` and configured copy instead of literal “5 秒轮询”; removed unused `AdminError`/`AdminErrorEnvelope` | `src/lib/format.ts`, `src/lib/errors.ts`, `src/lib/monitoring-config.ts`, `src/pages/monitoring/MonitoringPage.tsx`, `src/pages/console/ServiceInstanceView.tsx`, `src/pages/quality/*`, `src/api/endpoints/admin.ts` |
+| T6 | Duplicated supervisor gate; risky large refactors | Extracted `serviceLifecycleSupervisorState` used by both the Service Instance seam and lifecycle buttons | `src/runtime/service-instance-source.ts`, `src/pages/console/ServiceInstanceView.tsx` |
+
+### 9.3 Deliberately deferred structural refactors
+
+- No wholesale rewrite of `use-monitoring-data.ts`, `MonitoringPage.tsx` or
+  `ServiceInstanceView.tsx`. They are large but their current behavior is covered by real and
+  contract tests; a rewrite would add regression risk without removing a proven duplication beyond
+  the supervisor/row-type consolidation above.
+- The Monitoring view rows (`ServiceInstanceRow` in `service-instance-list.tsx`) and the Console
+  display row (`ServiceRow` in `ServiceInstanceView.tsx`) remain distinct presentation models.
+  Only the parsed Admin source row (`ServiceInstanceRowData`) is shared; merging the presentation
+  models would couple two different layouts for little gain.
+- `validateLifecycleConfirmation` remains as the body-shaping/defense-in-depth check even though
+  the dialog now validates with Zod. It prevents a malformed programmatic call from sending an
+  invalid body; it is not a second form validation path.
+
+### 9.4 Honest limitations of the new behavior
+
+- A 429 on any REST call (including a read) enters the shell Retry-After gate, so write controls
+  stay disabled until it expires. This is deliberately conservative; reads remain available.
+- Export Job, Backfill, Feed Subscription and lifecycle writes are still **CONTRACT-ONLY**: the
+  backend routes do not exist. The new >366 creation and 429 gates are exercised with MSW/Playwright
+  interception, not a real Admin backend.
+- The split-chunk list is rendered in a scrollable container; very large split counts remain
+  usable but were not performance-tested beyond the existing 3-chunk contract fixture.
