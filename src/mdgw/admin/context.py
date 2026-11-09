@@ -26,6 +26,7 @@ from mdgw.admin.auth.service import AdminAuth
 from mdgw.admin.auth.store import AuthStore
 from mdgw.admin.capabilities import AdapterStatus
 from mdgw.admin.db import AdminStore
+from mdgw.admin.export.service import ExportService
 from mdgw.admin.proxy import ClientIpResolver
 from mdgw.config import ensure_admin_store_is_independent
 
@@ -102,6 +103,13 @@ class AdminContext:
         self._environ = environ
         self._client_ip_resolver: ClientIpResolver | None = None
         self._cleanup_callbacks: list[Callable[[], None]] = []
+        self._adapter_status_providers: dict[
+            str, Callable[[], AdapterStatus]
+        ] = {}
+        self._exports: ExportService | None = None
+        # Re-entrant: opening the management store eagerly starts the export
+        # executor, which re-enters this property from the same thread.
+        self._exports_lock = threading.RLock()
         self._built_adapters: set[str] = set(_BUILT_ADAPTERS)
         self._built_capabilities: set[str] = set(_BUILT_CAPABILITIES)
         self._capability_details: dict[str, dict[str, object]] = {
@@ -169,7 +177,52 @@ class AdminContext:
                     )
             return self._audit
 
+    @property
+    def exports(self) -> ExportService:
+        """Export Job service/worker; opening it opens the management DB.
+
+        The executor is an API-process worker: it is started here (and again
+        by a service restart after ``close``) and registered as a cleanup so
+        ``close`` stops the worker and every StoreRead/lease before the Bars
+        Store is released.
+        """
+        existing = self._exports
+        if existing is not None and not existing.closed:
+            return existing
+        with self._exports_lock:
+            existing = self._exports
+            if existing is not None and not existing.closed:
+                return existing
+            if not self.enabled:
+                msg = "Admin API is disabled"
+                raise RuntimeError(msg)
+            self.ensure_open()
+            existing = self._exports
+            if existing is not None and not existing.closed:
+                return existing
+            service = ExportService(
+                config=self.config,
+                storage_root=self.storage_root,
+                db_path=self.db_path,
+                store=self.store,
+                clock=self._clock,
+            )
+            try:
+                service.start()
+            except BaseException:
+                service.close()
+                raise
+            self._exports = service
+            self.register_cleanup(service.close)
+            return service
+
     # -- capability registration ------------------------------------------
+
+    def register_adapter_status_provider(
+        self, name: str, provider: Callable[[], AdapterStatus]
+    ) -> None:
+        """Let a feature report its adapter state without editing this file."""
+        self._adapter_status_providers[name] = provider
 
     def register_capabilities(
         self,
@@ -247,6 +300,17 @@ class AdminContext:
             )
         else:
             statuses["oidc"] = AdapterStatus("available")
+        for name, provider in list(self._adapter_status_providers.items()):
+            try:
+                statuses[name] = provider()
+            except Exception:  # a probe must not break capability discovery
+                logger.exception(
+                    "adapter status probe failed",
+                    extra={"event": "admin.adapter_status_failed"},
+                )
+                statuses[name] = AdapterStatus(
+                    "unavailable", "adapter status probe failed"
+                )
         return statuses
 
     def register_cleanup(self, callback: Callable[[], None]) -> None:
@@ -277,6 +341,19 @@ class AdminContext:
         self._audit = audit
         if self._auth is not None:
             self._auth.security_event_sink = audit.record_security_event
+        if self.config.adapters.export_executor:
+            # The executor is a process worker: start it with the Admin API
+            # so restart recovery and expiry cleanup do not wait for the
+            # first Export request. A broken export adapter must not prevent
+            # the rest of the Admin API from starting; capability discovery
+            # reports it unavailable.
+            try:
+                _ = self.exports
+            except Exception:
+                logger.exception(
+                    "export executor failed to start",
+                    extra={"event": "admin.export.start_failed"},
+                )
 
     def _open_audit_writer(self) -> AuditWriter:
         return AuditWriter(AuditStore(self.db_path), clock=self._clock)
@@ -287,7 +364,8 @@ class AdminContext:
         Idempotent: the ASGI shutdown hook and ``ApiService.stop`` may both
         call it. A later ``ensure_open`` (service restart) reopens the store.
         """
-        for callback in reversed(self._cleanup_callbacks):
+        callbacks, self._cleanup_callbacks = self._cleanup_callbacks, []
+        for callback in reversed(callbacks):
             try:
                 callback()
             except Exception:  # cleanup must not block shutdown
@@ -306,6 +384,7 @@ class AdminContext:
                     "admin auth store close failed",
                     extra={"event": "admin.auth.close_failed"},
                 )
+        self._exports = None
         audit = self._audit
         self._audit = None
         if audit is not None:

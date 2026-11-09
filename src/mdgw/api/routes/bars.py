@@ -11,8 +11,6 @@ body or turned into a normal end of stream.
 from __future__ import annotations
 
 import asyncio
-import csv
-import io
 import logging
 import shutil
 import tempfile
@@ -26,6 +24,7 @@ import pyarrow.parquet as pq
 from fastapi import APIRouter, Query
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
+from mdgw.api.csv_render import batch_to_csv, header_bytes
 from mdgw.api.formats import (
     ARROW_FILE_MEDIA_TYPE,
     ARROW_STREAM_MEDIA_TYPE,
@@ -35,7 +34,7 @@ from mdgw.api.formats import (
     PARQUET_MEDIA_TYPE,
     content_disposition,
 )
-from mdgw.core.envelope import decimal_to_str, table_to_messages
+from mdgw.core.envelope import table_to_messages
 from mdgw.core.errors import (
     INVALID_FORMAT,
     RANGE_TOO_LARGE,
@@ -56,8 +55,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 JSON_ROW_LIMIT = 100_000
-TIMESTAMP_COLUMNS = ("open_ts", "close_ts", "event_ts", "ingest_ts")
-DECIMAL_COLUMNS = ("open", "high", "low", "close", "volume")
 
 _EXPORT_PREFIX = "mdgw-export-"
 _READ_CHUNK_SIZE = 1_048_576
@@ -434,9 +431,9 @@ async def _csv_body(
     try:
         # The header is the first chunk; from then on each bounded DuckDB
         # batch is rendered and yielded as it arrives.
-        yield (",".join(BAR_SCHEMA.names) + "\n").encode("utf-8")
+        yield header_bytes()
         async for batch in _iter_arrow_batches(read, query):
-            text = _batch_to_csv(batch)
+            text = batch_to_csv(batch)
             if text:
                 yield text.encode("utf-8")
     finally:
@@ -471,29 +468,6 @@ async def _pump_batches(
     finally:
         with suppress(ValueError):  # pragma: no cover - generator executing
             iterator.close()
-
-
-def _batch_to_csv(batch: pa.RecordBatch) -> str:
-    """Render one batch as CSV without ever routing a price through float."""
-    columns: dict[str, list[Any]] = {}
-    for name in TIMESTAMP_COLUMNS:
-        columns[name] = [
-            ns_to_iso(value)
-            for value in batch.column(name).cast(pa.int64()).to_pylist()
-        ]
-    for name in DECIMAL_COLUMNS:
-        columns[name] = [
-            decimal_to_str(value) for value in batch.column(name).to_pylist()
-        ]
-    for name in BAR_SCHEMA.names:
-        if name not in columns:
-            columns[name] = batch.column(name).to_pylist()
-
-    buffer = io.StringIO()
-    writer = csv.writer(buffer, lineterminator="\n")
-    for index in range(batch.num_rows):
-        writer.writerow([columns[name][index] for name in BAR_SCHEMA.names])
-    return buffer.getvalue()
 
 
 # -- file export ------------------------------------------------------------
