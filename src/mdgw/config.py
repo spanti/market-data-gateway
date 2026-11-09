@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from pydantic import (
     BaseModel,
@@ -453,6 +455,241 @@ class ReplayConfig(_ConfigModel):
     prefetch_batches: int = Field(default=2, ge=1)
 
 
+class AdminAdaptersConfig(_ConfigModel):
+    """Deployment intent for adapters implemented by later admin tickets.
+
+    Ticket 01 only ships the admin store; every flag defaults to off so a
+    capability is never announced as available before its adapter exists.
+    """
+
+    oidc: bool = False
+    audit_store: bool = False
+    supervisor: bool = False
+    collector_control: bool = False
+    export_executor: bool = False
+    prometheus: bool = False
+
+
+class AdminOidcConfig(_ConfigModel):
+    """Placeholder OIDC client settings; sessions arrive in a later ticket."""
+
+    issuer: str | None = None
+    client_id: str | None = None
+    # The secret itself must come from a controlled secret provider; config
+    # only names the environment variable so it is never logged or audited.
+    client_secret_env: str | None = None
+    roles_claim: str = "groups"
+    scopes: tuple[str, ...] = ("openid", "profile", "email")
+
+    @field_validator("issuer")
+    @classmethod
+    def _http_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        parts = urlsplit(cleaned)
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            msg = "issuer must be an http(s) URL"
+            raise ValueError(msg)
+        return cleaned
+
+    @field_validator("client_id", "client_secret_env", "roles_claim")
+    @classmethod
+    def _non_empty(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            msg = f"{info.field_name} must be a non-empty string"
+            raise ValueError(msg)
+        return cleaned
+
+
+class AdminSessionConfig(_ConfigModel):
+    """Server session lifetimes required by the admin contract."""
+
+    idle_timeout_s: int = Field(default=1800, gt=0)
+    absolute_timeout_s: int = Field(default=28800, gt=0)
+    expiry_warning_s: int = Field(default=300, ge=0)
+
+    @model_validator(mode="after")
+    def _timeouts_are_ordered(self) -> AdminSessionConfig:
+        if self.expiry_warning_s >= self.idle_timeout_s:
+            msg = "expiry_warning_s must be less than idle_timeout_s"
+            raise ValueError(msg)
+        if self.idle_timeout_s > self.absolute_timeout_s:
+            msg = "idle_timeout_s must not exceed absolute_timeout_s"
+            raise ValueError(msg)
+        return self
+
+
+class AdminExportConfig(_ConfigModel):
+    """Placeholder Export Job limits (ticket 08 implements the executor)."""
+
+    root: Path | None = None
+    retention_s: int = Field(default=86400, gt=0)
+    min_days: int = Field(default=31, ge=1)
+    max_days: int = Field(default=366, ge=1)
+    max_running_per_user: int = Field(default=1, ge=1)
+    global_concurrency: int = Field(default=2, ge=1)
+    # 0 means no configured storage cap; the executor still reports usage.
+    storage_quota_bytes: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _range_is_ordered(self) -> AdminExportConfig:
+        if self.min_days > self.max_days:
+            msg = "export min_days must not exceed max_days"
+            raise ValueError(msg)
+        return self
+
+
+class AdminControlConfig(_ConfigModel):
+    """Controlled Collector/Supervisor IPC channel placeholders."""
+
+    socket_path: Path | None = None
+    timeout_s: float = Field(default=5.0, gt=0)
+    max_message_bytes: int = Field(default=65_536, ge=1)
+
+
+class AdminLimitsConfig(_ConfigModel):
+    """Documented admin list/operation limits exposed by capabilities."""
+
+    page_default: int = Field(default=50, ge=1)
+    page_max: int = Field(default=200, ge=1)
+    reason_max_length: int = Field(default=1000, ge=1)
+    operation_retention_s: int = Field(default=604_800, ge=1)
+    backfill_max_range_days: int = Field(default=366, ge=1)
+
+    @model_validator(mode="after")
+    def _pages_are_ordered(self) -> AdminLimitsConfig:
+        if self.page_default > self.page_max:
+            msg = "page_default must not exceed page_max"
+            raise ValueError(msg)
+        return self
+
+
+_HEADER_TOKEN_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
+
+
+class AdminProxyConfig(_ConfigModel):
+    """Explicit same-origin / TLS-terminating-proxy model.
+
+    No CORS middleware is installed anywhere: the console is same-origin, and
+    forwarded client addresses are trusted only from these proxy sources.
+    """
+
+    public_origin: str | None = None
+    trusted_proxies: tuple[str, ...] = ()
+    forwarded_for_header: str = "X-Forwarded-For"
+    max_forwarded_hops: int = Field(default=16, ge=1, le=64)
+
+    @field_validator("public_origin")
+    @classmethod
+    def _valid_origin(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        parts = urlsplit(cleaned)
+        valid_authority = (
+            parts.scheme in {"http", "https"} and bool(parts.netloc)
+        )
+        valid_shape = parts.path in {"", "/"} and not (
+            parts.query
+            or parts.fragment
+            or parts.username
+            or parts.password
+        )
+        if not valid_authority or not valid_shape:
+            msg = (
+                "public_origin must be an http(s) origin such as "
+                "'https://console.example.com'"
+            )
+            raise ValueError(msg)
+        return cleaned
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _valid_trusted_proxies(
+        cls, value: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        cleaned: list[str] = []
+        for entry in value:
+            text = entry.strip()
+            if not text:
+                msg = "trusted_proxies must not contain empty values"
+                raise ValueError(msg)
+            try:
+                ipaddress.ip_network(text, strict=False)
+            except ValueError as exc:
+                msg = (
+                    "trusted_proxies entries must be IP addresses or CIDR "
+                    f"networks: {text!r}"
+                )
+                raise ValueError(msg) from exc
+            cleaned.append(text)
+        if len(set(cleaned)) != len(cleaned):
+            msg = "trusted_proxies must not contain duplicates"
+            raise ValueError(msg)
+        return tuple(cleaned)
+
+    @field_validator("forwarded_for_header")
+    @classmethod
+    def _valid_header_name(cls, value: str) -> str:
+        if _HEADER_TOKEN_RE.match(value) is None:
+            msg = f"invalid forwarded_for_header name: {value!r}"
+            raise ValueError(msg)
+        return value
+
+
+class AdminConfig(_ConfigModel):
+    """Admin API foundation settings; disabled unless a deployment opts in."""
+
+    enabled: bool = False
+    # None resolves to `<storage.root>/admin/admin.db` at app construction.
+    db_path: Path | None = None
+    # Lease that makes the single-API-instance constraint explicit: a second
+    # live instance is rejected, while a crashed instance is taken over after
+    # the lease expires.
+    instance_lease_s: float = Field(default=60.0, gt=0)
+    proxy: AdminProxyConfig = Field(default_factory=AdminProxyConfig)
+    adapters: AdminAdaptersConfig = Field(default_factory=AdminAdaptersConfig)
+    oidc: AdminOidcConfig = Field(default_factory=AdminOidcConfig)
+    sessions: AdminSessionConfig = Field(default_factory=AdminSessionConfig)
+    export: AdminExportConfig = Field(default_factory=AdminExportConfig)
+    control: AdminControlConfig = Field(default_factory=AdminControlConfig)
+    limits: AdminLimitsConfig = Field(default_factory=AdminLimitsConfig)
+
+    def resolved_db_path(self, storage_root: Path) -> Path:
+        """Resolve the management database path against the storage root."""
+        if self.db_path is not None:
+            return Path(self.db_path)
+        return Path(storage_root) / "admin" / "admin.db"
+
+
+def ensure_admin_store_is_independent(
+    db_path: Path,
+    bars_dataset_root: Path,
+    quarantine_root: Path,
+) -> None:
+    """Raise when the management SQLite file lives in a market Dataset.
+
+    Admin records are operational state, not market data: they must never be
+    written into the Bars or Quarantine Datasets (ADR-0016 / ticket 01).
+    """
+    admin_path = Path(db_path).resolve()
+    for label, root in (
+        ("Bars Dataset", bars_dataset_root),
+        ("Quarantine Dataset", quarantine_root),
+    ):
+        resolved = Path(root).resolve()
+        if admin_path == resolved or resolved in admin_path.parents:
+            msg = (
+                "admin.db_path must not be inside the "
+                f"{label} ({resolved})"
+            )
+            raise ValueError(msg)
+
+
 class GatewayConfig(_ConfigModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     bus: BusConfig = Field(default_factory=BusConfig)
@@ -465,7 +702,21 @@ class GatewayConfig(_ConfigModel):
     aggregation: AggregationConfig = Field(default_factory=AggregationConfig)
     collector: CollectorConfig = Field(default_factory=CollectorConfig)
     instruments: InstrumentsConfig = Field(default_factory=InstrumentsConfig)
+    admin: AdminConfig = Field(default_factory=AdminConfig)
     feeds: tuple[FeedConfig, ...] = ()
+
+    @model_validator(mode="after")
+    def _admin_store_is_independent(self) -> GatewayConfig:
+        """The admin SQLite file must never live in a market Dataset."""
+        if self.admin.db_path is None:
+            return self
+        storage_root = Path(self.storage.root)
+        ensure_admin_store_is_independent(
+            Path(self.admin.db_path),
+            storage_root / "bars",
+            self.storage.quarantine.resolved_root(storage_root),
+        )
+        return self
 
     @model_validator(mode="after")
     def _backfill_lookback_within_retention(self) -> GatewayConfig:

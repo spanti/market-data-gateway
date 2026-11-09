@@ -2,9 +2,10 @@
 
 It keeps the retired `mdgw.api.server.create_app` name and every existing
 keyword-only parameter (same names and order), so production call sites stayed
-source-compatible. The one deliberate addition is the keyword-only
-``rate_limit: RateLimitConfig | None = None`` parameter; omitting it preserves
-the previous unthrottled behaviour.
+source-compatible. The deliberate additions are keyword-only with defaults:
+``rate_limit`` preserves the previous unthrottled behaviour, and ``admin``
+leaves the ``/api/v1/admin`` routes absent unless an enabled
+``AdminContext`` is supplied.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
+from mdgw.admin.app import mount_admin
 from mdgw.api.errors import install_exception_handlers
 from mdgw.api.middleware import RequestContextMiddleware
 from mdgw.api.openapi import install_openapi
@@ -23,6 +25,7 @@ from mdgw.core.rate_limit import RateLimiter
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mdgw.admin.context import AdminContext
     from mdgw.api.ws_hub import WebSocketHub
     from mdgw.config import RateLimitConfig
     from mdgw.metrics import MetricsRegistry
@@ -42,12 +45,14 @@ def create_app(  # ruff: ignore[too-many-arguments]  # keyword-only app configur
     ready_provider: Callable[[], dict] | None = None,
     service_role: str | None = None,
     rate_limit: RateLimitConfig | None = None,
+    admin: AdminContext | None = None,
 ) -> FastAPI:
     """Build the FastAPI application.
 
     Bars and ops are always registered; the WebSocket route only when the
     runtime supplies a hub. ``rate_limit=None`` (and a disabled config) leave
-    the app unthrottled.
+    the app unthrottled. ``admin=None`` or a disabled context leaves the
+    ``/api/v1/admin`` subtree absent, which is the Current Contract.
     """
     app = FastAPI(
         title="Market Data Gateway API",
@@ -82,6 +87,9 @@ def create_app(  # ruff: ignore[too-many-arguments]  # keyword-only app configur
                 rate_limiter=limiter,
             )
         )
+    # Admin routes are additive and mounted before the rate-limiter middleware
+    # captures the route table, so their templates stay bounded in metrics.
+    mount_admin(app, admin)
 
     if limiter is not None:
         # Starlette prepends each added middleware, so adding the rate limiter
