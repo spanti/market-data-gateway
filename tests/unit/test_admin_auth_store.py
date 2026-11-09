@@ -68,9 +68,11 @@ def test_migrations_are_discovered_in_numeric_order() -> None:
 
     # 003 is ticket 03's Operator Audit Event schema; 004 is ticket 04's
     # feed schema; 005 is ticket 05's lifecycle schema; 008 is ticket 08's
-    # Export Job schema. Later tickets append higher-numbered migrations.
+    # Export Job schema; 009 is ticket 06's Backfill Job schema (renumbered
+    # above 008 so an existing schema-8 database still applies it). Later
+    # tickets append higher-numbered migrations.
     assert versions[:3] == [1, 2, 3]
-    assert {4, 5, 8} <= set(versions)
+    assert {4, 5, 8, 9} <= set(versions)
     assert versions == sorted(set(versions))
     assert versions[-1] == ADMIN_STORE_SCHEMA_VERSION
 

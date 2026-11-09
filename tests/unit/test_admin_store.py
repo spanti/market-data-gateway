@@ -180,6 +180,41 @@ def test_migrations_are_discovered_in_numeric_order(tmp_path: Path) -> None:
     assert ADMIN_STORE_SCHEMA_VERSION >= 1
 
 
+def test_backfill_migration_upgrades_an_existing_schema_8_database(
+    tmp_path: Path,
+) -> None:
+    """009 must reach a database already at schema 8 (the export schema).
+
+    ``migrate`` skips every migration whose version is not greater than the
+    recorded one, so a backfill migration numbered 006 would never apply to
+    an existing schema-8 database; the backfill schema is therefore 009.
+    """
+    versions = [version for version, _ in discover_migrations()]
+    assert versions == [1, 2, 3, 4, 5, 8, 9]
+
+    path = tmp_path / "admin" / "admin.db"
+    partial = tmp_path / "migrations"
+    partial.mkdir()
+    for version, migration in discover_migrations():
+        if version <= 5 or version == 8:
+            (partial / migration.name).write_text(
+                migration.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+
+    with AdminStore(path, migrations_dir=partial) as legacy:
+        assert legacy.schema_version == 8
+
+    with _store(path) as upgraded:
+        assert upgraded.schema_version == ADMIN_STORE_SCHEMA_VERSION >= 9
+        with upgraded.transaction() as connection:
+            table = connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'backfill_jobs'"
+            ).fetchone()
+
+    assert table == ("backfill_jobs",)
+
+
 def test_migration_file_names_and_versions_are_validated(
     tmp_path: Path,
 ) -> None:

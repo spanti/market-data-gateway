@@ -1,4 +1,4 @@
--- Backfill Job schema, version 6 (ticket 06).
+-- Backfill Job schema, version 9 (ticket 06).
 --
 -- A Backfill Job is operational state, never market data. The Admin API
 -- persists the job and its progress; the Collector is the only process that

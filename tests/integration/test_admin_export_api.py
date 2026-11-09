@@ -28,7 +28,7 @@ from urllib.parse import urlencode
 import pytest
 
 from mdgw.admin.context import AdminContext
-from mdgw.admin.db import AdminStore
+from mdgw.admin.db import ADMIN_STORE_SCHEMA_VERSION, AdminStore
 from mdgw.admin.export.models import (
     CANCELLED,
     CANCELLING,
@@ -376,7 +376,7 @@ def _wait_status(
 # -- create / range policy --------------------------------------------------
 
 
-def test_create_returns_202_queued_job_and_migrates_to_schema_8(
+def test_create_returns_202_queued_job_and_migrates_to_latest_schema(
     tmp_path: Path,
 ) -> None:
     with _running(tmp_path) as (_server, client, context, _store):
@@ -384,7 +384,7 @@ def test_create_returns_202_queued_job_and_migrates_to_schema_8(
         response = _create(client, credential)
 
         assert context.db is not None
-        assert context.db.schema_version == 8
+        assert context.db.schema_version == ADMIN_STORE_SCHEMA_VERSION
 
     assert response.status == 202, response.body
     job = response.json()
@@ -1265,7 +1265,7 @@ def test_capabilities_announce_export_job_details(tmp_path: Path) -> None:
         "retention_s": 86400,
         "max_running_per_user": 1,
     }
-    assert schema_version == 8
+    assert schema_version == ADMIN_STORE_SCHEMA_VERSION
 
 
 def test_export_routes_fail_closed_when_the_adapter_is_disabled(

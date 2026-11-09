@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
 _SQLITE_BUSY_TIMEOUT_MS = 5_000
-MIN_BACKFILL_SCHEMA_VERSION = 6
+MIN_BACKFILL_SCHEMA_VERSION = 9
 
 _COUNTER_COLUMNS = (
     "scanned_bars",
@@ -508,7 +508,7 @@ class BackfillJobStore:
                 f"{MIN_BACKFILL_SCHEMA_VERSION}, found {version}"
             )
             raise AdminStoreError(msg)
-        # A database migrated past 006 (for example by a later ticket before
+        # A database migrated past 009 (for example by a later ticket before
         # this one merged) still needs the table; fail with a clear message
         # instead of an opaque "no such table" later.
         table = self._connection().execute(
