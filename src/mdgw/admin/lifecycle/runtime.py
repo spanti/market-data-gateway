@@ -72,11 +72,11 @@ class AdminLifecycle:
             return None
         control = self._config.control
         token = self.token
-        if control.port <= 0 or not token:
+        if control.supervisor_port <= 0 or not token:
             return None
         return SupervisorControlClient(
-            host=control.host,
-            port=control.port,
+            host=control.supervisor_host,
+            port=control.supervisor_port,
             token=token,
             timeout_s=control.timeout_s,
             max_message_bytes=control.max_message_bytes,
@@ -89,7 +89,7 @@ class AdminLifecycle:
                 "unsupported", "disabled by configuration"
             )
         control = self._config.control
-        if control.port <= 0:
+        if control.supervisor_port <= 0:
             return AdapterStatus("unavailable", _UNAVAILABLE_NOT_CONFIGURED)
         if not self.token:
             return AdapterStatus("unavailable", _UNAVAILABLE_CREDENTIAL)

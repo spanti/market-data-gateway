@@ -154,13 +154,6 @@ class QuotaExceededError(AdminError):
     status = 429
 
 
-class RateLimitedError(AdminError):
-    """The admin request rate limit rejected the request."""
-
-    code = RATE_LIMITED
-    status = 429
-
-
 class AuditUnavailableError(AdminError):
     """The audit store is unavailable; the management action was not executed."""
 
@@ -200,7 +193,6 @@ __all__ = [
     "InvalidParameterError",
     "JobNotFoundError",
     "QuotaExceededError",
-    "RateLimitedError",
     "UnauthenticatedError",
     "admin_error_response",
     "admin_error_status",

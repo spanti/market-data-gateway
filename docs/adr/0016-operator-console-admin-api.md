@@ -7,7 +7,7 @@ Operator Console 作为独立 React 静态前端引入，管理写能力则通�
 ## Consequences
 
 - 浏览器只消费同源 REST/WS；React 不直接访问 ZMQ、Dataset 文件、Docker Socket 或任意 shell。
-- Feed Subscription 与 Backfill Job 的实际执行仍由 Collector 承担，Collector 保持唯一 Dataset 写入方；生命周期动作只允许经过 Supervisor 的受控本地 IPC。
+- Feed Subscription 与 Backfill Job 的实际执行仍由 Collector 承担，Collector 保持唯一 Dataset 写入方；生命周期动作只允许经过 Supervisor 的受控本地控制通道（环回 TCP JSON，见 [ADR-0017](0017-admin-control-loopback-tcp.md)）。
 - Current Contract 部署仍是无认证、内网、匿名只读模式；Admin API 部署必须具备 OIDC、服务端授权、CSRF、防越权和追加写 Operator Audit Event，前端禁用按钮不构成安全边界。
 - Export Job 只读 Dataset 并在 Dataset 之外生成有期限文件，不改变 Manifest、Data Contract 或 Replay 语义。
 - 不采用独立 Node/BFF、直接改 TOML、Docker Socket 通用控制或新建第四个 Service Role；这些替代方案会分别破坏单服务器栈、配置/运行时期望状态边界或最小控制面。

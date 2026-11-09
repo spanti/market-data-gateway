@@ -276,8 +276,8 @@ def _stack(
             oidc=False, audit_store=True, supervisor=supervisor_adapter
         ),
         control=AdminControlConfig(
-            host=HOST,
-            port=port,
+            supervisor_host=HOST,
+            supervisor_port=port,
             token_env=TOKEN_ENV,
             grace_s=0.3,
             timeout_s=2.0,

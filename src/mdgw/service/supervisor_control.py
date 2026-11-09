@@ -19,9 +19,6 @@ The response is one JSON line:
 
 from __future__ import annotations
 
-import hmac
-import ipaddress
-import json
 import logging
 import socketserver
 import threading
@@ -49,6 +46,12 @@ from mdgw.admin.lifecycle.protocol import (
     lifecycle_registry,
     success_response,
 )
+from mdgw.service.control_wire import (
+    decode_json_object,
+    encode_json,
+    require_loopback_host,
+    token_matches,
+)
 from mdgw.service.supervisor import LifecycleRejectedError, Supervisor
 
 if TYPE_CHECKING:
@@ -58,7 +61,6 @@ logger = logging.getLogger(__name__)
 
 _MAX_AUTH_BYTES = 512
 _DEFAULT_REQUEST_TIMEOUT_S = 5.0
-_LOOPBACK_HOSTS = frozenset({"localhost"})
 _UNKNOWN_CORRELATION = "unknown"
 
 
@@ -75,7 +77,7 @@ class SupervisorControlServer:
         max_message_bytes: int = 65_536,
         request_timeout_s: float = _DEFAULT_REQUEST_TIMEOUT_S,
     ) -> None:
-        _require_loopback(host)
+        require_loopback_host(host)
         if not isinstance(token, str) or not token:
             msg = "a non-empty control token is required"
             raise ValueError(msg)
@@ -214,7 +216,7 @@ class SupervisorControlServer:
                 "the control token is missing or invalid",
             )
         presented = auth_line.strip()
-        if not hmac.compare_digest(presented, self._token):
+        if not token_matches(self._token, presented):
             logger.warning(
                 "supervisor control authentication failed",
                 extra={"event": "supervisor.control_unauthorized"},
@@ -350,35 +352,15 @@ class _ControlHandler(socketserver.StreamRequestHandler):
 
 
 def _encode(response: dict[str, Any]) -> bytes:
-    return (
-        json.dumps(response, separators=(",", ":"), ensure_ascii=False)
-        .encode("utf-8")
-        + b"\n"
-    )
+    return encode_json(response) + b"\n"
 
 
 def _correlation_hint(message_line: bytes) -> str:
-    try:
-        data = json.loads(message_line.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        return _UNKNOWN_CORRELATION
-    if not isinstance(data, dict):
+    data = decode_json_object(message_line)
+    if data is None:
         return _UNKNOWN_CORRELATION
     value = data.get("correlation_id")
     return value if isinstance(value, str) and value else _UNKNOWN_CORRELATION
-
-
-def _require_loopback(host: str) -> None:
-    if host in _LOOPBACK_HOSTS:
-        return
-    try:
-        address = ipaddress.ip_address(host)
-    except ValueError as exc:
-        msg = "the control host must be a loopback address"
-        raise ValueError(msg) from exc
-    if not address.is_loopback:
-        msg = "the control host must be a loopback address"
-        raise ValueError(msg)
 
 
 __all__ = [

@@ -11,7 +11,6 @@ root. Only export metadata and export files are ever cleaned up.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import re
@@ -44,6 +43,7 @@ from mdgw.admin.export.models import (
 from mdgw.admin.export.store import ExportStore
 from mdgw.admin.export.worker import ExportExecutor
 from mdgw.api.csv_render import batch_to_csv, header_bytes
+from mdgw.core.hashing import canonical_json_sha256
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import iso_to_ns, ns_to_iso
@@ -255,18 +255,15 @@ class ExportService:
     @staticmethod
     def request_hash(request: ExportJobRequest) -> str:
         """Canonical body hash for Idempotency-Key replay detection."""
-        payload = json.dumps(
+        return canonical_json_sha256(
             {
                 "instrument_id": request.instrument_id,
                 "interval": request.interval,
                 "start_ns": request.start_ns,
                 "end_ns": request.end_ns,
                 "format": request.format,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return hashlib.sha256(payload).hexdigest()
+            }
+        )
 
     def lookup_idempotent(
         self, subject: str, idempotency_key: str, request_hash: str

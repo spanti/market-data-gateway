@@ -78,6 +78,7 @@ class ApiService:
                         ),
                     },
                 },
+                feeds=config.feeds,
             )
             if config.admin.enabled
             else None

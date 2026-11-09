@@ -25,10 +25,9 @@ from mdgw.admin.feed.service import (  # ruff: ignore[typing-only-first-party-im
     FeedSubscriptionUpdateBody,
 )
 from mdgw.admin.pagination import (
-    InvalidCursorError,
     cursor_page,
-    decode_cursor,
-    encode_cursor,
+    decode_created_cursor,
+    encode_created_cursor,
     parse_limit,
 )
 from mdgw.api.errors import get_request_id
@@ -39,7 +38,6 @@ if TYPE_CHECKING:
 
 NO_STORE = {"Cache-Control": "no-store"}
 WRITE_ROLES = ("SuperAdmin", "Operator")
-_INVALID_CURSOR_REASON = "invalid_cursor"
 
 
 def create_feed_router(context: AdminContext) -> APIRouter:
@@ -83,11 +81,10 @@ def create_feed_router(context: AdminContext) -> APIRouter:
         has_more = len(rows) > page_limit
         items = rows[:page_limit]
         next_cursor = (
-            encode_cursor(
-                {
-                    "created_at": items[-1].created_at_ns,
-                    "subscription_id": items[-1].subscription_id,
-                }
+            encode_created_cursor(
+                items[-1].created_at_ns,
+                items[-1].subscription_id,
+                id_key="subscription_id",
             )
             if has_more and items
             else None
@@ -258,25 +255,10 @@ def _validate_state(value: str | None) -> None:
 def _cursor(value: str | None) -> tuple[int | None, str | None]:
     if value is None:
         return None, None
-    try:
-        payload = decode_cursor(value)
-    except InvalidCursorError as exc:
-        raise InvalidParameterError(
-            "cursor is invalid",
-            details={"field": "cursor", "reason": _INVALID_CURSOR_REASON},
-        ) from exc
-    created_at = payload.get("created_at")
-    subscription_id = payload.get("subscription_id")
-    if (
-        isinstance(created_at, bool)
-        or not isinstance(created_at, int)
-        or not isinstance(subscription_id, str)
-    ):
-        raise InvalidParameterError(
-            "cursor is invalid",
-            details={"field": "cursor", "reason": _INVALID_CURSOR_REASON},
-        )
-    return created_at, subscription_id
+    created_at_ns, subscription_id = decode_created_cursor(
+        value, id_key="subscription_id"
+    )
+    return created_at_ns, subscription_id
 
 
 __all__ = ["create_feed_router"]

@@ -13,8 +13,6 @@ different body is a stable ``409 conflict``.
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -33,6 +31,7 @@ from mdgw.admin.jobs.models import (
     empty_counters,
 )
 from mdgw.backfill_job_plan import BACKFILL_INTERVALS, plan_for_interval
+from mdgw.core.hashing import canonical_json_sha256
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.time import iso_to_ns
 
@@ -193,27 +192,19 @@ class BackfillJobService:
 
     @staticmethod
     def request_hash(request: BackfillJobRequest) -> str:
-        payload = json.dumps(
+        return canonical_json_sha256(
             {
                 "instrument_id": request.instrument_id,
                 "interval": request.interval,
                 "start_ns": request.start_ns,
                 "end_ns": request.end_ns,
                 "reason": request.reason,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return hashlib.sha256(payload).hexdigest()
+            }
+        )
 
     @staticmethod
     def action_hash(*, job_id: str, reason: str) -> str:
-        payload = json.dumps(
-            {"job_id": job_id, "reason": reason},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return hashlib.sha256(payload).hexdigest()
+        return canonical_json_sha256({"job_id": job_id, "reason": reason})
 
     def replay(
         self,

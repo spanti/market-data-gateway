@@ -54,14 +54,6 @@ def plan_for_interval(interval: str) -> dict[str, object]:
     }
 
 
-def source_interval_for(interval: str) -> str:
-    """The only interval a Backfill Job ever fetches from the Feed Handler."""
-    if interval not in BACKFILL_INTERVALS or interval not in INTERVALS:
-        msg = f"unsupported Backfill target interval: {interval!r}"
-        raise ValueError(msg)
-    return BASE_INTERVAL
-
-
 __all__ = [
     "AGGREGATION_DESCRIPTION",
     "BACKFILL_INTERVALS",
@@ -71,5 +63,4 @@ __all__ = [
     "PLAN_NATIVE_INTERVAL",
     "PLAN_ONE_MINUTE_PLUS_AGGREGATION",
     "plan_for_interval",
-    "source_interval_for",
 ]

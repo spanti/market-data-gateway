@@ -588,8 +588,8 @@ def _run_up(
         token = os.environ.get(config.admin.control.token_env, "")
         control = SupervisorControlServer(
             supervisor,
-            host=config.admin.control.host,
-            port=config.admin.control.port,
+            host=config.admin.control.supervisor_host,
+            port=config.admin.control.supervisor_port,
             token=token,
             max_message_bytes=config.admin.control.max_message_bytes,
             request_timeout_s=config.admin.control.timeout_s,

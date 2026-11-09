@@ -16,7 +16,6 @@ security event or included in an exception message.
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import logging
 import secrets
@@ -170,7 +169,7 @@ class AdminAuth:
         self.store.create_transaction(
             AuthTransaction(
                 state_hash=token_hash(state),
-                nonce_hash=_text_hash(nonce),
+                nonce_hash=token_hash(nonce),
                 code_verifier=verifier,
                 redirect_uri=redirect_uri,
                 return_to=safe_return_to,
@@ -525,10 +524,6 @@ def _bounded_text(value: object, limit: int) -> str | None:
     if not cleaned:
         return None
     return cleaned[:limit]
-
-
-def _text_hash(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 __all__ = [

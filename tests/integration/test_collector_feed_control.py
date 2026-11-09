@@ -174,8 +174,8 @@ def _config(
                 "enabled": False,
                 "adapters": {"collector_control": True},
                 "control": {
-                    "host": HOST,
-                    "port": control_port,
+                    "collector_host": HOST,
+                    "collector_port": control_port,
                     "token_env": TOKEN_ENV,
                     "timeout_s": 2.0,
                 },

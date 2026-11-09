@@ -29,10 +29,9 @@ from mdgw.admin.errors import (
     InvalidParameterError,
 )
 from mdgw.admin.pagination import (
-    InvalidCursorError,
     cursor_page,
-    decode_cursor,
-    encode_cursor,
+    decode_sequence_cursor,
+    encode_sequence_cursor,
     parse_limit,
     parse_order,
 )
@@ -42,7 +41,6 @@ if TYPE_CHECKING:
     from mdgw.admin.context import AdminContext
 
 NO_STORE = {"Cache-Control": "no-store"}
-INVALID_CURSOR_REASON = "invalid_cursor"
 INVALID_TIMESTAMP_REASON = "invalid_timestamp"
 
 
@@ -81,7 +79,7 @@ def create_audit_router(context: AdminContext) -> APIRouter:
             maximum=context.config.limits.page_max,
         )
         after_sequence = (
-            None if cursor is None else _cursor_sequence(cursor)
+            None if cursor is None else decode_sequence_cursor(cursor)
         )
 
         rows = context.audit.store.query(
@@ -106,7 +104,7 @@ def create_audit_router(context: AdminContext) -> APIRouter:
         has_more = len(rows) > page_limit
         items = rows[:page_limit]
         next_cursor = (
-            encode_cursor({"sequence": items[-1].sequence})
+            encode_sequence_cursor(items[-1].sequence)
             if has_more and items
             else None
         )
@@ -154,25 +152,6 @@ def _validate_choice(
     raise InvalidParameterError(
         msg, details={"field": field, "allowed": list(allowed)}
     )
-
-
-def _cursor_sequence(cursor: str) -> int:
-    try:
-        payload = decode_cursor(cursor)
-    except InvalidCursorError as exc:
-        msg = "cursor is invalid"
-        raise InvalidParameterError(
-            msg,
-            details={"field": "cursor", "reason": INVALID_CURSOR_REASON},
-        ) from exc
-    sequence = payload.get("sequence")
-    if isinstance(sequence, bool) or not isinstance(sequence, int):
-        msg = "cursor is invalid"
-        raise InvalidParameterError(
-            msg,
-            details={"field": "cursor", "reason": INVALID_CURSOR_REASON},
-        )
-    return sequence
 
 
 __all__ = ["create_audit_router"]

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import pytest
 
+from mdgw import backfill_job_status
+from mdgw.admin.jobs import models
 from mdgw.admin.jobs.models import (
     QUEUED,
     BackfillJobRecord,
@@ -24,6 +26,7 @@ from mdgw.backfill_job_plan import (
     PLAN_ONE_MINUTE_PLUS_AGGREGATION,
     plan_for_interval,
 )
+from mdgw.service import backfill_jobs
 
 
 def test_one_minute_uses_the_native_interval_plan() -> None:
@@ -116,3 +119,16 @@ def test_job_wire_matches_the_contract_shape() -> None:
         "error": None,
         "resolved_gap_ids": [],
     }
+
+
+def test_the_backfill_status_vocabulary_has_one_source() -> None:
+    assert models.BACKFILL_STATUSES is backfill_job_status.BACKFILL_STATUSES
+    assert models.ACTIVE_STATUSES is backfill_job_status.ACTIVE_STATUSES
+    assert models.TERMINAL_STATUSES is backfill_job_status.TERMINAL_STATUSES
+    assert models.RETRYABLE_STATUSES is backfill_job_status.RETRYABLE_STATUSES
+    assert set(backfill_jobs.ACTIVE_STATES) == set(
+        backfill_job_status.ACTIVE_STATUSES
+    )
+    assert set(backfill_jobs.TERMINAL_STATES) == set(
+        backfill_job_status.TERMINAL_STATUSES
+    )

@@ -35,15 +35,13 @@ from mdgw.admin.errors import (
     ConflictError,
     ControlUnavailableError,
     ExportExpiredError,
-    InvalidParameterError,
     JobNotFoundError,
 )
 from mdgw.admin.export.models import QUEUED, RUNNING
 from mdgw.admin.pagination import (
-    InvalidCursorError,
     cursor_page,
-    decode_cursor,
-    encode_cursor,
+    decode_created_cursor,
+    encode_created_cursor,
     parse_limit,
 )
 from mdgw.api.errors import get_request_id
@@ -179,11 +177,10 @@ def create_export_router(  # ruff: ignore[too-many-statements] - route set
         has_more = len(rows) > page_limit
         items = rows[:page_limit]
         next_cursor = (
-            encode_cursor(
-                {
-                    "created_at_ns": items[-1].created_at_ns,
-                    "job_id": items[-1].job_id,
-                }
+            encode_created_cursor(
+                items[-1].created_at_ns,
+                items[-1].job_id,
+                id_key="job_id",
             )
             if has_more and items
             else None
@@ -389,27 +386,7 @@ def _idempotency_key(request: Request) -> str | None:
 
 
 def _cursor_after(cursor: str) -> tuple[int, str]:
-    msg = "cursor is invalid"
-    try:
-        payload = decode_cursor(cursor)
-    except InvalidCursorError as exc:
-        raise InvalidParameterError(
-            msg,
-            details={"field": "cursor", "reason": INVALID_CURSOR_REASON},
-        ) from exc
-    created_at_ns = payload.get("created_at_ns")
-    job_id = payload.get("job_id")
-    if (
-        isinstance(created_at_ns, bool)
-        or not isinstance(created_at_ns, int)
-        or not isinstance(job_id, str)
-        or not job_id
-    ):
-        raise InvalidParameterError(
-            msg,
-            details={"field": "cursor", "reason": INVALID_CURSOR_REASON},
-        )
-    return created_at_ns, job_id
+    return decode_created_cursor(cursor, id_key="job_id")
 
 
 def _validate_range(value: str | None, size_bytes: int) -> None:

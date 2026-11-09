@@ -38,10 +38,9 @@ from mdgw.admin.jobs.service import (
     ACTION_RETRY,
 )
 from mdgw.admin.pagination import (
-    InvalidCursorError,
     cursor_page,
-    decode_cursor,
-    encode_cursor,
+    decode_created_cursor,
+    encode_created_cursor,
     parse_limit,
 )
 from mdgw.api.errors import get_request_id
@@ -58,7 +57,6 @@ logger = logging.getLogger(__name__)
 
 NO_STORE = {"Cache-Control": "no-store"}
 WRITE_ROLES = ("SuperAdmin", "Operator")
-_INVALID_CURSOR_REASON = "invalid_cursor"
 _CREATE_ACTION = "backfill_job.create"
 _CANCEL_ACTION = "backfill_job.cancel"
 _RETRY_ACTION = "backfill_job.retry"
@@ -162,11 +160,10 @@ def create_backfill_router(context: AdminContext) -> APIRouter:
         has_more = len(rows) > page_limit
         items = rows[:page_limit]
         next_cursor = (
-            encode_cursor(
-                {
-                    "created_at_ns": items[-1].created_at_ns,
-                    "job_id": items[-1].job_id,
-                }
+            encode_created_cursor(
+                items[-1].created_at_ns,
+                items[-1].job_id,
+                id_key="job_id",
             )
             if has_more and items
             else None
@@ -362,27 +359,7 @@ def _validate_interval_filter(value: str | None) -> None:
 
 
 def _cursor_after(cursor: str) -> tuple[int, str]:
-    msg = "cursor is invalid"
-    try:
-        payload = decode_cursor(cursor)
-    except InvalidCursorError as exc:
-        raise InvalidParameterError(
-            msg,
-            details={"field": "cursor", "reason": _INVALID_CURSOR_REASON},
-        ) from exc
-    created_at_ns = payload.get("created_at_ns")
-    job_id = payload.get("job_id")
-    if (
-        isinstance(created_at_ns, bool)
-        or not isinstance(created_at_ns, int)
-        or not isinstance(job_id, str)
-        or not job_id
-    ):
-        raise InvalidParameterError(
-            msg,
-            details={"field": "cursor", "reason": _INVALID_CURSOR_REASON},
-        )
-    return created_at_ns, job_id
+    return decode_created_cursor(cursor, id_key="job_id")
 
 
 def _terminal(

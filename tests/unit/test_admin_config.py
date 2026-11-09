@@ -57,6 +57,15 @@ def test_admin_placeholders_have_contract_defaults() -> None:
 
     assert admin.control.timeout_s == pytest.approx(5.0)
     assert admin.control.max_message_bytes == 65536
+    # Collector and Supervisor control servers have independent endpoints:
+    # both default to loopback and port 0 (= disabled).
+    assert admin.control.collector_host == "127.0.0.1"
+    assert admin.control.collector_port == 0
+    assert admin.control.supervisor_host == "127.0.0.1"
+    assert admin.control.supervisor_port == 0
+    assert not hasattr(admin.control, "host")
+    assert not hasattr(admin.control, "port")
+    assert not hasattr(admin.control, "socket_path")
 
     assert admin.limits.page_default == 50
     assert admin.limits.page_max == 200
@@ -119,7 +128,10 @@ def test_admin_accepts_typed_settings() -> None:
                     "storage_quota_bytes": 10_000,
                 },
                 "control": {
-                    "socket_path": "runtime/control.sock",
+                    "collector_host": "127.0.0.1",
+                    "collector_port": 5004,
+                    "supervisor_host": "::1",
+                    "supervisor_port": 5005,
                     "timeout_s": 2.5,
                     "max_message_bytes": 4096,
                 },
@@ -154,6 +166,10 @@ def test_admin_accepts_typed_settings() -> None:
     assert admin.oidc.client_id == "mdgw-console"
     assert admin.export.max_days == 90
     assert admin.control.timeout_s == pytest.approx(2.5)
+    assert admin.control.collector_host == "127.0.0.1"
+    assert admin.control.collector_port == 5004
+    assert admin.control.supervisor_host == "::1"
+    assert admin.control.supervisor_port == 5005
     assert admin.limits.page_max == 100
     assert admin.monitoring.prometheus_url == "http://127.0.0.1:9090"
     assert admin.monitoring.timeout_s == pytest.approx(2.5)
@@ -305,3 +321,75 @@ def test_admin_database_beside_the_datasets_is_allowed(tmp_path: Path) -> None:
         }
     )
     assert config.admin.db_path == tmp_path / "admin" / "admin.db"
+
+
+# -- control endpoints (S3) --------------------------------------------------
+
+
+def test_collector_and_supervisor_control_endpoints_must_not_collide() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="collector and supervisor control endpoints must differ",
+    ):
+        GatewayConfig.model_validate(
+            {
+                "admin": {
+                    "control": {
+                        "collector_host": "127.0.0.1",
+                        "collector_port": 5100,
+                        "supervisor_host": "127.0.0.1",
+                        "supervisor_port": 5100,
+                    }
+                }
+            }
+        )
+
+
+def test_the_same_port_on_different_loopback_hosts_is_allowed() -> None:
+    config = GatewayConfig.model_validate(
+        {
+            "admin": {
+                "control": {
+                    "collector_host": "127.0.0.1",
+                    "collector_port": 5100,
+                    "supervisor_host": "::1",
+                    "supervisor_port": 5100,
+                }
+            }
+        }
+    )
+    assert config.admin.control.collector_port == 5100
+    assert config.admin.control.supervisor_port == 5100
+
+
+def test_one_endpoint_may_stay_disabled_while_the_other_binds() -> None:
+    config = GatewayConfig.model_validate(
+        {
+            "admin": {
+                "control": {
+                    "collector_host": "127.0.0.1",
+                    "collector_port": 0,
+                    "supervisor_host": "127.0.0.1",
+                    "supervisor_port": 5100,
+                }
+            }
+        }
+    )
+    assert config.admin.control.collector_port == 0
+    assert config.admin.control.supervisor_port == 5100
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["collector_host", "supervisor_host"],
+)
+@pytest.mark.parametrize(
+    "value", ["0.0.0.0", "example.com", ""]  # ruff: ignore[hardcoded-bind-all-interfaces]
+)
+def test_each_control_endpoint_requires_a_loopback_host(
+    field: str, value: str
+) -> None:
+    with pytest.raises(ValidationError, match=field):
+        GatewayConfig.model_validate(
+            {"admin": {"control": {field: value}}}
+        )

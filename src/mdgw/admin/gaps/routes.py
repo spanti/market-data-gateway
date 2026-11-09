@@ -23,10 +23,9 @@ from mdgw.admin.errors import AdminNotFoundError, InvalidParameterError
 from mdgw.admin.gaps.models import GAP_STATUSES
 from mdgw.admin.gaps.service import parse_time_filter
 from mdgw.admin.pagination import (
-    InvalidCursorError,
     cursor_page,
-    decode_cursor,
-    encode_cursor,
+    decode_created_cursor,
+    encode_created_cursor,
     parse_limit,
 )
 from mdgw.core.schema import INTERVALS
@@ -36,7 +35,6 @@ if TYPE_CHECKING:
     from mdgw.admin.context import AdminContext
 
 NO_STORE = {"Cache-Control": "no-store"}
-_INVALID_CURSOR_REASON = "invalid_cursor"
 
 
 def create_gaps_router(context: AdminContext) -> APIRouter:
@@ -96,11 +94,10 @@ def create_gaps_router(context: AdminContext) -> APIRouter:
         has_more = len(rows) > page_limit
         items = rows[:page_limit]
         next_cursor = (
-            encode_cursor(
-                {
-                    "created_at_ns": items[-1].created_at_ns,
-                    "gap_id": items[-1].gap_id,
-                }
+            encode_created_cursor(
+                items[-1].created_at_ns,
+                items[-1].gap_id,
+                id_key="gap_id",
             )
             if has_more and items
             else None
@@ -151,27 +148,7 @@ def _validate_interval(value: str | None) -> None:
 
 
 def _cursor_after(cursor: str) -> tuple[int, str]:
-    msg = "cursor is invalid"
-    try:
-        payload = decode_cursor(cursor)
-    except InvalidCursorError as exc:
-        raise InvalidParameterError(
-            msg,
-            details={"field": "cursor", "reason": _INVALID_CURSOR_REASON},
-        ) from exc
-    created_at_ns = payload.get("created_at_ns")
-    gap_id = payload.get("gap_id")
-    if (
-        isinstance(created_at_ns, bool)
-        or not isinstance(created_at_ns, int)
-        or not isinstance(gap_id, str)
-        or not gap_id
-    ):
-        raise InvalidParameterError(
-            msg,
-            details={"field": "cursor", "reason": _INVALID_CURSOR_REASON},
-        )
-    return created_at_ns, gap_id
+    return decode_created_cursor(cursor, id_key="gap_id")
 
 
 __all__ = ["create_gaps_router"]

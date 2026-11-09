@@ -13,7 +13,6 @@ and it can never move the absolute deadline.
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import secrets
 import time
@@ -21,6 +20,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mdgw.admin.auth.store import SessionRecord
+from mdgw.core.hashing import sha256_hex
+from mdgw.core.redirect import validate_relative_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -30,7 +31,6 @@ if TYPE_CHECKING:
 
 SESSION_TOKEN_BYTES = 32
 CSRF_TOKEN_BYTES = 32
-MAX_RETURN_TO_LENGTH = 2_048
 NANOS_PER_SECOND = 1_000_000_000
 
 
@@ -64,7 +64,7 @@ class IssuedSession:
 
 
 def token_hash(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return sha256_hex(value)
 
 
 def validate_return_to(
@@ -78,21 +78,10 @@ def validate_return_to(
     """
     if value is None:
         return default
-    if not isinstance(value, str):
-        msg = "return_to must be a string"
-        raise InvalidReturnToError(msg)
-    if len(value) > MAX_RETURN_TO_LENGTH:
-        msg = "return_to is too long"
-        raise InvalidReturnToError(msg)
-    if not value.startswith("/") or value.startswith("//"):
-        msg = "return_to must be a same-origin relative path"
-        raise InvalidReturnToError(msg)
-    if "\\" in value or any(
-        ord(character) < 0x20 or ord(character) == 0x7F for character in value
-    ):
-        msg = "return_to must not contain control characters or backslashes"
-        raise InvalidReturnToError(msg)
-    return value
+    try:
+        return validate_relative_path(value, field="return_to")
+    except ValueError as exc:
+        raise InvalidReturnToError(str(exc)) from exc
 
 
 class SessionManager:

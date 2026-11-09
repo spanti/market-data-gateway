@@ -9,9 +9,17 @@ it never invents an acknowledgement or a running state.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any
 
+from mdgw.admin.collector_control import (
+    REASON_COLLECTOR_REJECTED,
+    REASON_COLLECTOR_UNAVAILABLE,
+    REASON_INVALID_RESPONSE,
+    REASON_NOT_CONFIGURED,
+    REASON_TIMEOUT,
+    CollectorControlEndpoint,
+    CollectorControlError,
+)
 from mdgw.service.control_plane import (
     BACKFILL_JOB_CANCEL_ACTION,
     BACKFILL_JOB_START_ACTION,
@@ -19,9 +27,6 @@ from mdgw.service.control_plane import (
     BackfillJobCancelPayload,
     BackfillJobStartPayload,
     BackfillJobStatusPayload,
-    ControlPlaneClient,
-    ControlRequestError,
-    ControlTransportError,
 )
 
 if TYPE_CHECKING:
@@ -29,11 +34,7 @@ if TYPE_CHECKING:
 
     from mdgw.config import AdminControlConfig
 
-REASON_NOT_CONFIGURED = "not_configured"
-REASON_COLLECTOR_UNAVAILABLE = "collector_unavailable"
-REASON_TIMEOUT = "timeout"
-REASON_REJECTED = "collector_rejected"
-REASON_INVALID_RESPONSE = "invalid_response"
+REASON_REJECTED = REASON_COLLECTOR_REJECTED
 
 COLLECTOR_STATES = frozenset(
     {
@@ -68,31 +69,11 @@ class CollectorBackfillClient:
         *,
         environ: Mapping[str, str] | None = None,
     ) -> None:
-        self._config = config
-        self._environ = environ
-
-    def _token(self) -> str:
-        source = self._environ if self._environ is not None else os.environ
-        return str(source.get(self._config.token_env, "") or "")
+        self._endpoint = CollectorControlEndpoint(config, environ=environ)
 
     @property
     def configured(self) -> bool:
-        return self._config.port > 0 and bool(self._token())
-
-    def _transport(self) -> ControlPlaneClient:
-        token = self._token()
-        if self._config.port <= 0 or not token:
-            raise BackfillDispatchError(
-                REASON_NOT_CONFIGURED,
-                "the collector control plane is not configured",
-            )
-        return ControlPlaneClient(
-            host=self._config.host,
-            port=self._config.port,
-            token=token,
-            max_message_bytes=self._config.max_message_bytes,
-            timeout_s=self._config.timeout_s,
-        )
+        return self._endpoint.configured
 
     def start_job(  # ruff: ignore[too-many-arguments] - explicit job identity
         self,
@@ -143,24 +124,12 @@ class CollectorBackfillClient:
         expect_accept: bool = False,
     ) -> dict[str, Any]:
         try:
-            result = self._transport().call(
-                action,
-                payload,
-                correlation_id=correlation_id,
-                timeout_ms=int(self._config.timeout_s * 1000),
+            result = self._endpoint.call(
+                action, payload, correlation_id=correlation_id
             )
-        except ControlTransportError as exc:
-            reason = (
-                REASON_TIMEOUT
-                if exc.reason == "timeout"
-                else REASON_COLLECTOR_UNAVAILABLE
-            )
-            raise BackfillDispatchError(reason, str(exc)) from exc
-        except ControlRequestError as exc:
+        except CollectorControlError as exc:
             raise BackfillDispatchError(
-                REASON_REJECTED,
-                "the collector rejected the backfill request",
-                code=exc.code,
+                exc.reason, exc.message, code=exc.code
             ) from exc
         state = result.get("state")
         job_id = result.get("job_id")

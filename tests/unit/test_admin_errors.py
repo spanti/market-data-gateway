@@ -31,7 +31,6 @@ from mdgw.admin.errors import (
     InvalidParameterError,
     JobNotFoundError,
     QuotaExceededError,
-    RateLimitedError,
     UnauthenticatedError,
     admin_error_status,
 )
@@ -79,7 +78,6 @@ def test_required_admin_codes_have_the_contract_statuses() -> None:
         (JobNotFoundError, "job_not_found", 404),
         (ExportExpiredError, "export_expired", 410),
         (QuotaExceededError, "quota_exceeded", 429),
-        (RateLimitedError, "rate_limited", 429),
     ],
 )
 def test_admin_exceptions_carry_stable_code_and_status(

@@ -263,6 +263,14 @@ class FeedStore:
             )
             return cursor.rowcount == 1
 
+    def has_rows(self) -> bool:
+        """Whether the desired state was ever written (tombstones included)."""
+        with self._store.read() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM feed_subscriptions LIMIT 1"
+            ).fetchone()
+        return row is not None
+
     def all_for_dispatch(self) -> list[FeedSubscription]:
         with self._store.read() as connection:
             rows = connection.execute(
