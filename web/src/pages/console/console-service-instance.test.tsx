@@ -128,6 +128,57 @@ const capabilityDocument = ({
   limits: {},
 });
 
+const adminServiceInstances = {
+  items: [
+    {
+      instance_id: "collector",
+      service_role: "collector",
+      display_name: "Collector primary",
+      desired_state: "running",
+      observed_state: "running",
+      health: "healthy",
+      ready: true,
+      ready_reason: "collector ready",
+      pid: 1001,
+      started_at: "2026-11-09T11:00:00.000000000Z",
+      last_observed_at: "2026-11-09T12:00:00.000000000Z",
+      last_error: null,
+      available_actions: ["start", "stop", "reload"],
+    },
+    {
+      instance_id: "api",
+      service_role: "api",
+      display_name: "API primary",
+      desired_state: "running",
+      observed_state: "running",
+      health: "healthy",
+      ready: true,
+      ready_reason: "collector subscription ready",
+      pid: 1002,
+      started_at: "2026-11-09T11:00:00.000000000Z",
+      last_observed_at: "2026-11-09T12:00:00.000000000Z",
+      last_error: null,
+      available_actions: ["start", "stop", "reload"],
+    },
+    {
+      instance_id: "replay",
+      service_role: "replay",
+      display_name: "Replay primary",
+      desired_state: "running",
+      observed_state: "running",
+      health: "healthy",
+      ready: true,
+      ready_reason: "replay service ready",
+      pid: 1003,
+      started_at: "2026-11-09T11:00:00.000000000Z",
+      last_observed_at: "2026-11-09T12:00:00.000000000Z",
+      last_error: null,
+      available_actions: ["start", "stop", "reload"],
+    },
+  ],
+  page: { next_cursor: null, has_more: false },
+};
+
 function adminHandlers(role: "SuperAdmin" | "Operator" | "Auditor") {
   return [
     http.get("*/api/v1/admin/capabilities", () =>
@@ -146,6 +197,9 @@ function adminHandlers(role: "SuperAdmin" | "Operator" | "Auditor") {
         session: null,
         csrf: { header_name: "X-CSRF-Token", token: "csrf-token" },
       }),
+    ),
+    http.get("*/api/v1/admin/service-instances", () =>
+      HttpResponse.json(adminServiceInstances),
     ),
   ];
 }
@@ -226,6 +280,93 @@ describe("Service Instance — Current Contract", () => {
 });
 
 describe("Service Instance — Admin API lifecycle (contract target)", () => {
+  it("uses the Admin service-instance seam and never reads unauthenticated ops endpoints", async () => {
+    let opsRequested = false;
+    server.use(
+      ...adminHandlers("SuperAdmin"),
+      http.get("*/status", () => {
+        opsRequested = true;
+        return HttpResponse.json(apiStatus);
+      }),
+      http.get("*/ops/*", () => {
+        opsRequested = true;
+        return HttpResponse.json({});
+      }),
+    );
+    await openServiceInstanceTab();
+
+    const apiRow = await screen.findByTestId("service-instance-api");
+    expect(within(apiRow).getByText("API primary")).toBeInTheDocument();
+    expect(within(apiRow).getByText("1002")).toBeInTheDocument();
+    expect(within(apiRow).getByText("PID")).toBeInTheDocument();
+    expect(opsRequested).toBe(false);
+  });
+
+  it("shows an explicit capability gap when the Admin service-instance API is unsupported", async () => {
+    let serviceInstanceRequested = false;
+    server.use(
+      http.get("*/api/v1/admin/capabilities", () =>
+        HttpResponse.json({
+          ...capabilityDocument,
+          capabilities: {
+            ...capabilityDocument.capabilities,
+            service_lifecycle: { state: "unsupported" },
+          },
+        }),
+      ),
+      ...adminHandlers("SuperAdmin"),
+      http.get("*/api/v1/admin/service-instances", () => {
+        serviceInstanceRequested = true;
+        return HttpResponse.json(adminServiceInstances);
+      }),
+    );
+    await openServiceInstanceTab();
+
+    expect(
+      await screen.findByText("需要 Admin API 服务实例接口（未实现）"),
+    ).toBeInTheDocument();
+    expect(serviceInstanceRequested).toBe(false);
+  });
+
+  it("401 from a lifecycle write stops writes and returns to the login entry", async () => {
+    server.use(
+      ...adminHandlers("SuperAdmin"),
+      http.post("*/api/v1/admin/service-instances/api/stop", () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: "unauthenticated",
+              message: "session expired",
+              details: { reason: "idle_timeout" },
+              request_id: "req-401",
+            },
+          },
+          { status: 401, headers: { "X-Request-ID": "req-401" } },
+        ),
+      ),
+    );
+    const user = await openServiceInstanceTab();
+
+    const apiRow = await screen.findByTestId("service-instance-api");
+    await user.click(
+      within(apiRow).getByRole("button", { name: "Graceful Stop" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("操作原因"), "rotate");
+    await user.type(within(dialog).getByLabelText(/输入目标实例名/), "api");
+    await user.click(within(dialog).getByRole("button", { name: "确认执行" }));
+
+    expect(
+      await screen.findByTestId("global-http-notice"),
+    ).toHaveTextContent(/会话已失效或未登录，写操作已停止/);
+    expect(
+      await screen.findByTestId("runtime-mode-banner"),
+    ).toHaveTextContent("会话已失效");
+    expect(await screen.findByTestId("service-instance-gap")).toHaveTextContent(
+      "需要登录",
+    );
+  });
+
   it("requires a reason and the exact instance name before Stop can be submitted", async () => {
     server.use(...adminHandlers("SuperAdmin"), ...statusHandlers());
     const user = await openServiceInstanceTab();
@@ -343,7 +484,7 @@ describe("Service Instance — Admin API lifecycle (contract target)", () => {
     expect(postCount).toBe(1);
   });
 
-  it("disables lifecycle actions when the backend marks service_lifecycle unsupported", async () => {
+  it("shows the explicit Admin service-instance gap and no fallback rows when service_lifecycle is unsupported", async () => {
     server.use(
       http.get("*/api/v1/admin/capabilities", () =>
         HttpResponse.json({
@@ -355,17 +496,13 @@ describe("Service Instance — Admin API lifecycle (contract target)", () => {
         }),
       ),
       ...adminHandlers("SuperAdmin"),
-      ...statusHandlers(),
     );
     await openServiceInstanceTab();
 
-    const apiRow = await screen.findByTestId("service-instance-api");
-    expect(
-      within(apiRow).getByRole("button", { name: "Graceful Stop" }),
-    ).toBeDisabled();
-    expect(
-      within(apiRow).getAllByText("后端未实现").length,
-    ).toBeGreaterThan(0);
+    expect(await screen.findByTestId("service-instance-gap")).toHaveTextContent(
+      "需要 Admin API 服务实例接口（未实现）",
+    );
+    expect(screen.queryByTestId("service-instance-api")).not.toBeInTheDocument();
   });
 
   it.each([

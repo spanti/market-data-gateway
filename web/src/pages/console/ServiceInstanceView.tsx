@@ -5,6 +5,11 @@ import {
   newIdempotencyKey,
   postServiceLifecycle,
 } from "@/api/endpoints/admin-console";
+import {
+  adminServiceInstanceToRow,
+  fetchAdminServiceInstances,
+  type AdminServiceInstanceRow,
+} from "@/api/endpoints/admin-service-instances";
 import type { ServiceLifecycleBody } from "@/api/endpoints/admin";
 import {
   fetchApiReady,
@@ -21,6 +26,7 @@ import {
 import { HttpError } from "@/api/http/types";
 import { ConfirmDialog, type ConfirmDialogInput } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
+import { ErrorState, LoadingState } from "@/components/states";
 import { StatusBadge } from "@/components/status-badge";
 import {
   Panel,
@@ -48,6 +54,7 @@ import {
   type LifecycleOperationState,
   type ServiceLifecycleAction,
 } from "@/pages/console/lifecycle";
+import { serviceInstanceSource } from "@/runtime/service-instance-source";
 import {
   capabilityDisabledReason,
   disabledReasonFor,
@@ -62,8 +69,13 @@ import { usePermissionSubject } from "@/runtime/use-permission";
  * Service Instance console.
  *
  * Current Contract: identity, readiness, uptime and last-observed time come
- * from the real per-role ops endpoints. Lifecycle controls are Admin API
- * contract targets and stay disabled with a visible reason.
+ * from the real per-role ops endpoints.
+ *
+ * Admin API: the unauthenticated per-role `/status` and `/ops/*` endpoints are
+ * not read at all. The view uses only the authenticated
+ * `GET /api/v1/admin/service-instances` seam, gated by `service_lifecycle`.
+ * When that capability is missing or unsupported, it shows the explicit gap
+ * "需要 Admin API 服务实例接口（未实现）" instead of falling back.
  */
 
 export const SERVICE_INSTANCE_ROLES = ["collector", "api", "replay"] as const;
@@ -87,13 +99,19 @@ interface DetailItem {
 }
 
 interface ServiceRow {
+  /** Stable operation/dialog key: role in Current Contract, instance_id in Admin. */
+  key: string;
   role: ServiceInstanceRole;
+  displayName: string | null;
   ready: boolean | null;
   readyReason: string | null;
   uptimeS: number | null;
   lastObservedAt: number | null;
   details: DetailItem[];
   error: string | null;
+  /** null means every role-permitted action is offered (Current Contract). */
+  availableActions: readonly ServiceLifecycleAction[] | null;
+  admin: boolean;
 }
 
 function formatValue(value: string | number | null | undefined): string {
@@ -172,7 +190,9 @@ function buildApiRow(
 ): ServiceRow {
   const readiness = readyFrom(ready, undefined);
   return {
+    key: "api",
     role: "api",
+    displayName: null,
     ready: readiness.ready,
     readyReason: readiness.reason,
     uptimeS: status?.uptime_s ?? null,
@@ -210,6 +230,8 @@ function buildApiRow(
         ]
       : [],
     error: describeError(statusError ?? readyError),
+    availableActions: null,
+    admin: false,
   };
 }
 
@@ -222,7 +244,9 @@ function buildCollectorRow(
 ): ServiceRow {
   const readiness = readyFrom(ready, status?.ready);
   return {
+    key: "collector",
     role: "collector",
+    displayName: null,
     ready: readiness.ready,
     readyReason: readiness.reason,
     uptimeS: status?.uptime_s ?? null,
@@ -243,6 +267,8 @@ function buildCollectorRow(
         ]
       : [],
     error: describeError(statusError ?? readyError),
+    availableActions: null,
+    admin: false,
   };
 }
 
@@ -255,7 +281,9 @@ function buildReplayRow(
 ): ServiceRow {
   const readiness = readyFrom(ready, undefined);
   return {
+    key: "replay",
     role: "replay",
+    displayName: null,
     ready: readiness.ready,
     readyReason: readiness.reason,
     uptimeS: status?.uptime_s ?? null,
@@ -287,6 +315,40 @@ function buildReplayRow(
         ]
       : [],
     error: describeError(statusError ?? readyError),
+    availableActions: null,
+    admin: false,
+  };
+}
+
+function buildAdminRow(instance: AdminServiceInstanceRow): ServiceRow {
+  const observedAt = Date.parse(instance.lastObservedAt);
+  const details: DetailItem[] = [
+    { label: "Instance ID", value: instance.instanceId },
+    { label: "Display Name", value: instance.displayName },
+    { label: "Desired", value: instance.desiredState },
+    { label: "Observed", value: instance.observedState },
+    { label: "Health", value: instance.health },
+    { label: "PID", value: formatValue(instance.pid) },
+    { label: "Started", value: formatValue(instance.startedAt) },
+  ];
+  if (instance.lastError) {
+    details.push({
+      label: "Last Error",
+      value: `${instance.lastError.code}: ${instance.lastError.message}`,
+    });
+  }
+  return {
+    key: instance.instanceId,
+    role: instance.role,
+    displayName: instance.displayName,
+    ready: instance.ready,
+    readyReason: instance.readyReason || null,
+    uptimeS: null,
+    lastObservedAt: Number.isFinite(observedAt) ? observedAt : null,
+    details,
+    error: instance.lastError?.message ?? null,
+    availableActions: instance.availableActions,
+    admin: true,
   };
 }
 
@@ -295,6 +357,7 @@ function lifecycleDisabledReason(
   action: ServiceLifecycleAction,
   capability: CapabilityState | null,
   writesStopped: boolean,
+  row: ServiceRow,
 ): DisabledReasonValue | null {
   if (writesStopped) {
     return {
@@ -308,6 +371,12 @@ function lifecycleDisabledReason(
   );
   if (roleReason) {
     return roleReason;
+  }
+  if (row.availableActions !== null && !row.availableActions.includes(action)) {
+    return {
+      code: "backend-unsupported",
+      message: "该实例不支持此操作",
+    };
   }
   if (capability?.mode !== "admin-api") {
     return null;
@@ -450,43 +519,77 @@ function OperationSummary({
 }
 
 export function ServiceInstanceView() {
-  const { capability, session, writesStopped } = useRuntimeMode();
+  const {
+    capability,
+    session,
+    writesStopped,
+    role,
+    sessionLoading,
+  } = useRuntimeMode();
   const subject = usePermissionSubject();
   const csrfToken = session?.csrfToken ?? null;
+  const source = serviceInstanceSource(capability);
+  const directEnabled = source.kind === "direct";
+  const adminEnabled = source.kind === "admin" && role !== null;
 
   const apiStatus = useQuery({
     queryKey: ["console", "service", "api-status"],
     queryFn: ({ signal }) => fetchApiStatus(signal),
     refetchInterval: 5_000,
+    enabled: directEnabled,
   });
   const apiReady = useQuery({
     queryKey: ["console", "service", "api-ready"],
     queryFn: ({ signal }) => fetchApiReady(signal),
     refetchInterval: 5_000,
+    enabled: directEnabled,
   });
   const collectorStatus = useQuery({
     queryKey: ["console", "service", "collector-status"],
     queryFn: ({ signal }) => fetchCollectorStatus(signal),
     refetchInterval: 5_000,
+    enabled: directEnabled,
   });
   const collectorReady = useQuery({
     queryKey: ["console", "service", "collector-ready"],
     queryFn: ({ signal }) => fetchCollectorReady(signal),
     refetchInterval: 5_000,
+    enabled: directEnabled,
   });
   const replayStatus = useQuery({
     queryKey: ["console", "service", "replay-status"],
     queryFn: ({ signal }) => fetchReplayStatus(signal),
     refetchInterval: 5_000,
+    enabled: directEnabled,
   });
   const replayReady = useQuery({
     queryKey: ["console", "service", "replay-ready"],
     queryFn: ({ signal }) => fetchReplayReady(signal),
     refetchInterval: 5_000,
+    enabled: directEnabled,
+  });
+  const adminInstances = useQuery({
+    queryKey: ["console", "service", "admin-instances"],
+    queryFn: ({ signal }) => fetchAdminServiceInstances(signal),
+    refetchInterval: 5_000,
+    enabled: adminEnabled,
+    retry: false,
   });
 
-  const rows = useMemo<ServiceRow[]>(
-    () => [
+  const gapReason =
+    source.kind === "gap"
+      ? source.reason
+      : source.kind === "admin" && !role
+        ? { code: "requires-login" as const, message: "需要登录" }
+        : null;
+
+  const rows = useMemo<ServiceRow[]>(() => {
+    if (source.kind === "admin") {
+      return (adminInstances.data ?? []).map((instance) =>
+        buildAdminRow(adminServiceInstanceToRow(instance)),
+      );
+    }
+    return [
       buildCollectorRow(
         collectorStatus.data,
         collectorReady.data,
@@ -511,35 +614,36 @@ export function ServiceInstanceView() {
         replayReady.error,
         latestUpdatedAt(replayStatus.dataUpdatedAt, replayReady.dataUpdatedAt),
       ),
-    ],
-    [
-      collectorStatus.data,
-      collectorReady.data,
-      collectorStatus.error,
-      collectorReady.error,
-      collectorStatus.dataUpdatedAt,
-      collectorReady.dataUpdatedAt,
-      apiStatus.data,
-      apiReady.data,
-      apiStatus.error,
-      apiReady.error,
-      apiStatus.dataUpdatedAt,
-      apiReady.dataUpdatedAt,
-      replayStatus.data,
-      replayReady.data,
-      replayStatus.error,
-      replayReady.error,
-      replayStatus.dataUpdatedAt,
-      replayReady.dataUpdatedAt,
-    ],
-  );
+    ];
+  }, [
+    source.kind,
+    adminInstances.data,
+    collectorStatus.data,
+    collectorReady.data,
+    collectorStatus.error,
+    collectorReady.error,
+    collectorStatus.dataUpdatedAt,
+    collectorReady.dataUpdatedAt,
+    apiStatus.data,
+    apiReady.data,
+    apiStatus.error,
+    apiReady.error,
+    apiStatus.dataUpdatedAt,
+    apiReady.dataUpdatedAt,
+    replayStatus.data,
+    replayReady.data,
+    replayStatus.error,
+    replayReady.error,
+    replayStatus.dataUpdatedAt,
+    replayReady.dataUpdatedAt,
+  ]);
 
   const [operations, setOperations] = useState<
     Record<string, LifecycleOperationState>
   >({});
   const [pending, setPending] = useState<{
     action: ServiceLifecycleAction;
-    instanceId: ServiceInstanceRole;
+    instanceId: string;
   } | null>(null);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [online, setOnline] = useState(
@@ -593,7 +697,7 @@ export function ServiceInstanceView() {
   const mutation = useMutation({
     mutationFn: (input: {
       action: ServiceLifecycleAction;
-      instanceId: ServiceInstanceRole;
+      instanceId: string;
       body: ServiceLifecycleBody;
     }) =>
       postServiceLifecycle(
@@ -628,10 +732,7 @@ export function ServiceInstanceView() {
     },
   });
 
-  const openDialog = (
-    instanceId: ServiceInstanceRole,
-    action: ServiceLifecycleAction,
-  ) => {
+  const openDialog = (instanceId: string, action: ServiceLifecycleAction) => {
     const current = operations[instanceId];
     if (
       current &&
@@ -684,6 +785,13 @@ export function ServiceInstanceView() {
     setPending(null);
   };
 
+  const sourceBadge =
+    source.kind === "direct"
+      ? "结果来自各角色 /status 与 /readyz；生命周期为 Admin API 契约目标"
+      : source.kind === "admin"
+        ? "数据来自 Admin API service-instances；不读取 Current Contract /status 或 /ops"
+        : "Admin 模式不暴露无认证 ops 资源；需要 Admin API 服务实例接口";
+
   return (
     <Panel className="mt-6 p-5" aria-label="Service Instance 状态">
       <PanelHeader>
@@ -695,152 +803,190 @@ export function ServiceInstanceView() {
             提交中 / 已接受 / 执行中 / 成功 / 失败 / 状态未知。
           </PanelDescription>
         </div>
-        <StatusBadge tone="unknown">
-          结果来自各角色 /status 与 /readyz；生命周期为 Admin API 契约目标
+        <StatusBadge tone={source.kind === "gap" ? "warning" : "unknown"}>
+          {sourceBadge}
         </StatusBadge>
       </PanelHeader>
 
-      <div className="mt-3">
-        <Table>
-          <caption className="sr-only">
-            Service Instance real status and lifecycle controls
-          </caption>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Instance</TableHead>
-              <TableHead>Ready</TableHead>
-              <TableHead>Uptime</TableHead>
-              <TableHead>Last Observed</TableHead>
-              <TableHead>Details</TableHead>
-              <TableHead>Lifecycle</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((row) => {
-              const operation = operations[row.role];
-              const operationActive =
-                operation !== undefined &&
-                operation.phase !== "pending" &&
-                operation.phase !== "failed";
-              const readyLabel =
-                row.ready === null ? "未知" : row.ready ? "Ready" : "未就绪";
-              const readyTone =
-                row.ready === null
-                  ? "unknown"
-                  : row.ready
-                    ? "good"
-                    : "critical";
-              return (
-                <TableRow
-                  key={row.role}
-                  data-testid={`service-instance-${row.role}`}
-                >
-                  <TableCell className="align-top">
-                    <span className="font-mono text-sm">{row.role}</span>
-                    <div className="text-[11px] text-faint-foreground">
-                      Service Role
-                    </div>
-                  </TableCell>
-                  <TableCell className="align-top">
-                    <StatusBadge tone={readyTone} live>
-                      {readyLabel}
-                    </StatusBadge>
-                    {row.readyReason ? (
-                      <div className="mt-1 text-[11px] text-faint-foreground">
-                        {row.readyReason}
+      {gapReason ? (
+        <div
+          data-testid="service-instance-gap"
+          role="note"
+          className="mt-4 border-l-2 border-status-warning pl-3 text-sm"
+        >
+          <p className="font-medium">{gapReason.message}</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Admin API 模式不读取无认证 <code>/status</code>、<code>/ops/*</code>{" "}
+            或 <code>/prometheus</code>。请由后端提供
+            <code> GET /api/v1/admin/service-instances</code> 并声明{" "}
+            <code>service_lifecycle</code> 能力后重试。
+          </p>
+        </div>
+      ) : sessionLoading && source.kind === "admin" ? (
+        <LoadingState className="mt-4" label="正在确认 Admin 会话…" />
+      ) : adminInstances.isError ? (
+        <ErrorState
+          className="mt-4"
+          title="Service Instance 加载失败"
+          description={
+            adminInstances.error instanceof Error
+              ? adminInstances.error.message
+              : "Admin API service-instances 请求失败"
+          }
+          onRetry={() => void adminInstances.refetch()}
+        />
+      ) : adminInstances.isPending && source.kind === "admin" ? (
+        <LoadingState className="mt-4" label="正在读取 Admin service-instances…" showSkeleton />
+      ) : (
+        <div className="mt-3">
+          <Table>
+            <caption className="sr-only">
+              Service Instance real status and lifecycle controls
+            </caption>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Instance</TableHead>
+                <TableHead>Ready</TableHead>
+                <TableHead>Uptime</TableHead>
+                <TableHead>Last Observed</TableHead>
+                <TableHead>Details</TableHead>
+                <TableHead>Lifecycle</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((row) => {
+                const operation = operations[row.key];
+                const operationActive =
+                  operation !== undefined &&
+                  operation.phase !== "pending" &&
+                  operation.phase !== "failed";
+                const readyLabel =
+                  row.ready === null ? "未知" : row.ready ? "Ready" : "未就绪";
+                const readyTone =
+                  row.ready === null
+                    ? "unknown"
+                    : row.ready
+                      ? "good"
+                      : "critical";
+                return (
+                  <TableRow
+                    key={row.key}
+                    data-testid={`service-instance-${row.key}`}
+                    data-instance-id={row.key}
+                  >
+                    <TableCell className="align-top">
+                      <span className="font-mono text-sm">{row.role}</span>
+                      <div className="text-[11px] text-faint-foreground">
+                        {row.admin ? "Admin instance" : "Service Role"}
                       </div>
-                    ) : null}
-                  </TableCell>
-                  <TableCell className="align-top tabular-nums">
-                    {formatUptime(row.uptimeS)}
-                  </TableCell>
-                  <TableCell className="align-top">
-                    <span
-                      data-testid={`last-observed-${row.role}`}
-                      className="tabular-nums"
-                    >
-                      {formatObserved(row.lastObservedAt)}
-                    </span>
-                    {row.error ? (
-                      <div className="mt-1 text-[11px] text-status-critical">
-                        {row.error}
-                      </div>
-                    ) : null}
-                  </TableCell>
-                  <TableCell className="align-top">
-                    <dl className="grid grid-cols-1 gap-x-4 gap-y-0.5">
-                      {row.details.map((detail) => (
-                        <div key={detail.label} className="flex gap-2">
-                          <dt className="text-faint-foreground">
-                            {detail.label}
-                          </dt>
-                          <dd className="font-mono">{detail.value}</dd>
-                        </div>
-                      ))}
-                      {row.details.length === 0 ? (
-                        <div className="text-faint-foreground">
-                          没有可确认的状态数据。
+                    </TableCell>
+                    <TableCell className="align-top">
+                      <StatusBadge tone={readyTone} live>
+                        {readyLabel}
+                      </StatusBadge>
+                      {row.readyReason ? (
+                        <div className="mt-1 text-[11px] text-faint-foreground">
+                          {row.readyReason}
                         </div>
                       ) : null}
-                    </dl>
-                  </TableCell>
-                  <TableCell className="align-top">
-                    <div className="flex flex-col gap-1">
-                      {LIFECYCLE_ACTIONS.map((action) => {
-                        const reason = lifecycleDisabledReason(
-                          subject,
-                          action,
-                          capability,
-                          writesStopped,
-                        );
-                        const lockedReason: DisabledReasonValue | null =
-                          operationActive
-                            ? {
-                                code: "backend-unsupported",
-                                message: "已有进行中的 Operation",
-                              }
-                            : null;
-                        const effectiveReason = reason ?? lockedReason;
-                        const reasonId = `${row.role}-${action}-reason`;
-                        return (
-                          <span
-                            key={action}
-                            className="inline-flex flex-wrap items-center gap-2"
-                          >
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              disabled={effectiveReason !== null}
-                              aria-describedby={
-                                effectiveReason ? reasonId : undefined
-                              }
-                              onClick={() => openDialog(row.role, action)}
+                    </TableCell>
+                    <TableCell className="align-top tabular-nums">
+                      {formatUptime(row.uptimeS)}
+                    </TableCell>
+                    <TableCell className="align-top">
+                      <span
+                        data-testid={`last-observed-${row.key}`}
+                        className="tabular-nums"
+                      >
+                        {formatObserved(row.lastObservedAt)}
+                      </span>
+                      {row.error ? (
+                        <div className="mt-1 text-[11px] text-status-critical">
+                          {row.error}
+                        </div>
+                      ) : null}
+                    </TableCell>
+                    <TableCell className="align-top">
+                      <dl className="grid grid-cols-1 gap-x-4 gap-y-0.5">
+                        {row.details.map((detail) => (
+                          <div key={detail.label} className="flex gap-2">
+                            <dt className="text-faint-foreground">
+                              {detail.label}
+                            </dt>
+                            <dd className="font-mono">{detail.value}</dd>
+                          </div>
+                        ))}
+                        {row.details.length === 0 ? (
+                          <div className="text-faint-foreground">
+                            没有可确认的状态数据。
+                          </div>
+                        ) : null}
+                      </dl>
+                    </TableCell>
+                    <TableCell className="align-top">
+                      <div className="flex flex-col gap-1">
+                        {LIFECYCLE_ACTIONS.map((action) => {
+                          const reason = lifecycleDisabledReason(
+                            subject,
+                            action,
+                            capability,
+                            writesStopped,
+                            row,
+                          );
+                          const lockedReason: DisabledReasonValue | null =
+                            operationActive
+                              ? {
+                                  code: "backend-unsupported",
+                                  message: "已有进行中的 Operation",
+                                }
+                              : null;
+                          const effectiveReason = reason ?? lockedReason;
+                          const reasonId = `${row.key}-${action}-reason`;
+                          return (
+                            <span
+                              key={action}
+                              className="inline-flex flex-wrap items-center gap-2"
                             >
-                              {ACTION_LABELS[action]}
-                            </Button>
-                            <DisabledReason
-                              id={reasonId}
-                              reason={effectiveReason}
-                            />
-                          </span>
-                        );
-                      })}
-                    </div>
-                    {operation ? (
-                      <OperationSummary
-                        operation={operation}
-                        onRequireQuery={() =>
-                          setQueryToken((token) => token + 1)
-                        }
-                      />
-                    ) : null}
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
-      </div>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={effectiveReason !== null}
+                                aria-describedby={
+                                  effectiveReason ? reasonId : undefined
+                                }
+                                onClick={() => openDialog(row.key, action)}
+                              >
+                                {ACTION_LABELS[action]}
+                              </Button>
+                              <DisabledReason
+                                id={reasonId}
+                                reason={effectiveReason}
+                              />
+                            </span>
+                          );
+                        })}
+                      </div>
+                      {operation ? (
+                        <OperationSummary
+                          operation={operation}
+                          onRequireQuery={() =>
+                            setQueryToken((token) => token + 1)
+                          }
+                        />
+                      ) : null}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+          {source.kind === "admin" && rows.length === 0 && !adminInstances.isPending ? (
+            <p className="mt-3 text-xs text-muted-foreground">
+              Admin API 返回了空实例列表。
+            </p>
+          ) : null}
+        </div>
+      )}
 
       {Object.entries(operations).map(([instanceId, operation]) => (
         <OperationTracker

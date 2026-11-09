@@ -1,0 +1,118 @@
+# Current Contract mode.
+#
+# This deployment talks to the existing unauthenticated, read-only gateway:
+# REST, WebSocket, per-Service-Role ops endpoints and a same-origin Prometheus
+# base path. It MUST be deployed on a trusted intranet only.
+#
+# MDGW_RUNTIME_MODE=current-contract (default)
+
+map $http_upgrade $mdgw_connection_upgrade {
+  default upgrade;
+  ''      close;
+}
+
+server {
+  listen 80;
+  server_name _;
+
+  root /usr/share/nginx/html;
+  index index.html;
+  server_tokens off;
+
+  # Upstreams are resolved per request through Docker's embedded DNS, so an
+  # absent optional service (for example Prometheus) does not prevent Nginx
+  # from starting the static console.
+  resolver ${MDGW_DNS_RESOLVER} valid=10s ipv6=off;
+  set $mgdw_api_upstream "${MDGW_API_UPSTREAM}";
+  set $mgdw_collector_upstream "${MDGW_COLLECTOR_OPS_UPSTREAM}";
+  set $mgdw_replay_upstream "${MDGW_REPLAY_OPS_UPSTREAM}";
+  set $mgdw_prometheus_upstream "${MDGW_PROMETHEUS_UPSTREAM}";
+
+  include /etc/nginx/mgdw/security-headers.conf;
+
+  gzip on;
+  gzip_vary on;
+  gzip_min_length 1024;
+  gzip_types text/plain text/css application/json application/javascript
+             application/xml image/svg+xml;
+
+  client_max_body_size 1m;
+
+  # SPA entry point: never cache the shell, so a deploy is picked up.
+  location = /index.html {
+    expires -1;
+  }
+
+  # Vite emits content-hashed files under /assets/.
+  location /assets/ {
+    expires 1y;
+    try_files $uri =404;
+  }
+
+  # REST API (public Bars/Instruments/Status + Admin API paths if present).
+  # Upgrade headers allow an authenticated Admin WebSocket at
+  # /api/v1/admin/ws when that contract exists.
+  location /api/ {
+    include /etc/nginx/mgdw/proxy-headers.conf;
+    include /etc/nginx/mgdw/websocket-upgrade.conf;
+    proxy_pass $mgdw_api_upstream;
+  }
+
+  # Liveness/readiness probes.
+  location = /healthz {
+    include /etc/nginx/mgdw/proxy-headers.conf;
+    proxy_pass $mgdw_api_upstream;
+  }
+  location = /readyz {
+    include /etc/nginx/mgdw/proxy-headers.conf;
+    proxy_pass $mgdw_api_upstream;
+  }
+
+  # API-role operational snapshot and Prometheus exposition.
+  location = /status {
+    include /etc/nginx/mgdw/proxy-headers.conf;
+    proxy_pass $mgdw_api_upstream;
+  }
+  location = /metrics {
+    include /etc/nginx/mgdw/proxy-headers.conf;
+    proxy_pass $mgdw_api_upstream;
+  }
+
+  # Public Streaming Interface (single WebSocket endpoint).
+  location = /ws {
+    include /etc/nginx/mgdw/proxy-headers.conf;
+    include /etc/nginx/mgdw/websocket-upgrade.conf;
+    proxy_pass $mgdw_api_upstream;
+  }
+
+  # Per-Service-Role ops ports. The backend serves these at "/" on its own
+  # port; the console uses the same-origin /ops/<role> prefix.
+  location /ops/collector/ {
+    rewrite ^/ops/collector/(.*)$ /$1 break;
+    include /etc/nginx/mgdw/proxy-headers.conf;
+    proxy_pass $mgdw_collector_upstream;
+  }
+  location /ops/replay/ {
+    rewrite ^/ops/replay/(.*)$ /$1 break;
+    include /etc/nginx/mgdw/proxy-headers.conf;
+    proxy_pass $mgdw_replay_upstream;
+  }
+
+  # Intranet-development Prometheus only. Fixed queries are selected by the
+  # console; no arbitrary PromQL editor is shipped.
+  location /prometheus/ {
+    rewrite ^/prometheus/(.*)$ /$1 break;
+    include /etc/nginx/mgdw/proxy-headers.conf;
+    proxy_pass $mgdw_prometheus_upstream;
+  }
+
+  location ~ /\. {
+    deny all;
+  }
+
+  # SPA history fallback. The index shell is not cached.
+  location / {
+    expires -1;
+    try_files $uri $uri/ /index.html;
+  }
+}
