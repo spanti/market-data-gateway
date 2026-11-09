@@ -901,6 +901,18 @@ def test_cancel_is_cooperative_and_never_retracts_written_revisions(
             assert replay.status == 202
             assert replay.header("Idempotent-Replay") == "true"
 
+            # The 202 records the cancel request; the API poller delivers it
+            # to the Collector asynchronously. Release the blocked feed only
+            # once the Runner has actually observed it, otherwise a fast
+            # completion can legitimately win the race and report
+            # partially_succeeded instead of cancelled.
+            deadline = time.monotonic() + 10.0
+            while collector.runner.status(job_id)["state"] != "cancelling":
+                assert time.monotonic() < deadline, (
+                    "the Collector did not observe the cancellation request"
+                )
+                time.sleep(0.01)
+
             release.set()
             final = _wait_job(
                 client,
