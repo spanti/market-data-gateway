@@ -1,4 +1,5 @@
 import { Network } from "lucide-react";
+import { STATUS_POLL_INTERVAL_MS } from "@/lib/monitoring-config";
 import { SourceStatus, type SourceStatusState } from "@/components/monitoring/source-status";
 import { StatusBadge } from "@/components/status-badge";
 import {
@@ -62,7 +63,7 @@ export function UpstreamTable({
       <div className="mt-2 px-4">
         <SourceStatus
           source="Instrument Reference /api/v1/instruments"
-          window="当前快照（5 秒轮询）"
+          window={`当前快照（${STATUS_POLL_INTERVAL_MS / 1000} 秒轮询）`}
           state={state}
           lastSuccessAt={lastSuccessAt}
           reason={

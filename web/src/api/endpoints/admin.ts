@@ -29,17 +29,6 @@ export const ADMIN_PATHS = {
   wsSession: "/api/v1/admin/ws",
 } as const;
 
-export interface AdminError {
-  code: string;
-  message: string;
-  details: Record<string, unknown>;
-  request_id: string;
-}
-
-export interface AdminErrorEnvelope {
-  error: AdminError;
-}
-
 export type AdminCapabilityDiscoveryResponse = CapabilityDocument;
 
 export interface AdminSessionPayload {
@@ -184,9 +173,13 @@ export interface FlowControlResponse {
   ws_slow_consumer: WsSlowConsumerState;
 }
 
+/** The only three real Service Roles in the contract. */
+export const SERVICE_ROLES = ["collector", "api", "replay"] as const;
+export type ServiceRole = (typeof SERVICE_ROLES)[number];
+
 export interface ServiceInstance {
   instance_id: string;
-  service_role: "collector" | "api" | "replay";
+  service_role: ServiceRole;
   display_name: string;
   desired_state: "running" | "stopped";
   observed_state:
@@ -372,7 +365,7 @@ export interface BackfillGap {
 
 export type AuditResult = "requested" | "succeeded" | "failed" | "denied";
 
-export interface AuditEvent {
+export interface OperatorAuditEvent {
   event_id: string;
   sequence: number;
   occurred_at: string;

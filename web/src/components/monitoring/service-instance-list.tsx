@@ -1,13 +1,12 @@
 import { Activity, Radio } from "lucide-react";
+import type { ServiceRole } from "@/api/endpoints/admin";
 import { StatusBadge } from "@/components/status-badge";
 import { PanelDescription, PanelTitle } from "@/components/ui/panel";
 import { formatDurationSeconds, formatUtcDateTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
-export type ServiceRoleName = "collector" | "api" | "replay";
-
 export interface ServiceInstanceRow {
-  role: ServiceRoleName;
+  role: ServiceRole;
   service: string | null;
   ready: boolean | null;
   readyReason: string | null;

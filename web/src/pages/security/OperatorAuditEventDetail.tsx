@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { fetchAuditEvent } from "@/api/endpoints/audit";
+import { fetchOperatorAuditEvent } from "@/api/endpoints/operator-audit";
 import { HttpError } from "@/api/http/types";
 import { ErrorState, LoadingState } from "@/components/states";
 import { StatusBadge } from "@/components/status-badge";
@@ -96,7 +96,7 @@ function DetailError({
  * Immutable audit event snapshot. Hash-chain fields are metadata only; the UI
  * makes no WORM claim and exposes no edit/delete/export action.
  */
-export function AuditEventDetail({
+export function OperatorAuditEventDetail({
   eventId,
   onClose,
 }: {
@@ -105,7 +105,7 @@ export function AuditEventDetail({
 }) {
   const query = useQuery({
     queryKey: ["admin", "audit-event", eventId],
-    queryFn: () => fetchAuditEvent(eventId),
+    queryFn: () => fetchOperatorAuditEvent(eventId),
   });
 
   return (

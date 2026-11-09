@@ -35,6 +35,7 @@ import {
 import type { DisabledReason as DisabledReasonValue } from "@/runtime/permissions";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
 import { CAPABILITY_KEYS } from "@/runtime/capability-gates";
+import { queryErrorInfo } from "@/lib/errors";
 import { useRetryAfter } from "@/runtime/use-retry-after";
 import { BackfillJobCreateForm } from "./backfill-job-create-form";
 import {
@@ -45,22 +46,6 @@ import {
   jobStatusPresentation,
 } from "./quality-format";
 import { useQualityGate } from "./quality-gates";
-
-function queryErrorText(error: unknown): {
-  message: string;
-  requestId: string | null;
-} {
-  if (error instanceof HttpError) {
-    return {
-      message: `${error.code}: ${error.message}`,
-      requestId: error.requestId,
-    };
-  }
-  return {
-    message: error instanceof Error ? error.message : "未知错误",
-    requestId: null,
-  };
-}
 
 function JobProgress({ job }: { job: BackfillJob }) {
   const presentation = jobStatusPresentation(job.status);
@@ -312,7 +297,7 @@ export function BackfillJobsSection() {
     },
   });
 
-  const errorInfo = query.isError ? queryErrorText(query.error) : null;
+  const errorInfo = query.isError ? queryErrorInfo(query.error) : null;
 
   return (
     <Panel className="mt-6 p-5" aria-label="Backfill Job">

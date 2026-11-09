@@ -38,6 +38,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { formatUtcTimestamp } from "@/lib/format";
 import {
   buildManualMergeDraft,
   conflictFromError,
@@ -74,17 +75,6 @@ function adminCapabilityReason(
 ): DisabledReasonValue | null {
   const availability = adminCapabilityAvailability(capability, key);
   return availability.kind === "disabled" ? availability.reason : null;
-}
-
-function timestamp(value: string | null | undefined): string {
-  if (!value) {
-    return "—";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return `${date.toISOString().replace("T", " ").slice(0, 19)} UTC`;
 }
 
 function DisabledArea({
@@ -465,7 +455,7 @@ export function FeedSubscriptionView() {
                           {view.desired.label} · v{view.desired.version}
                         </div>
                         <div className="text-[11px] text-faint-foreground">
-                          {timestamp(view.desired.updatedAt)} ·{" "}
+                          {formatUtcTimestamp(view.desired.updatedAt)} ·{" "}
                           {view.desired.updatedBy}
                         </div>
                       </TableCell>
@@ -474,7 +464,7 @@ export function FeedSubscriptionView() {
                           {view.observed.label} · v{view.observed.version}
                         </div>
                         <div className="text-[11px] text-faint-foreground">
-                          {timestamp(view.observed.observedAt)} ·{" "}
+                          {formatUtcTimestamp(view.observed.observedAt)} ·{" "}
                           {view.observed.collectorInstanceId}
                         </div>
                       </TableCell>
@@ -503,7 +493,7 @@ export function FeedSubscriptionView() {
                               {view.lastError.message}
                             </div>
                             <div className="text-[11px] text-faint-foreground">
-                              {timestamp(view.lastError.at)} · Request ID{" "}
+                              {formatUtcTimestamp(view.lastError.at)} · Request ID{" "}
                               {view.lastError.requestId}
                             </div>
                           </>

@@ -36,7 +36,7 @@ export interface FeedFreshnessEntry {
   stale: boolean;
 }
 
-export interface UnrecoverableGapEvent {
+export interface UnrecoverableBackfillGapEvent {
   instrument_id: string;
   interval: BarInterval;
   from_ts: string | null;
@@ -49,7 +49,7 @@ export interface CollectorHealth {
   stale: FeedFreshnessEntry[];
   stale_count: number;
   tracked: FeedFreshnessEntry[];
-  gap_unrecoverable: UnrecoverableGapEvent[];
+  gap_unrecoverable: UnrecoverableBackfillGapEvent[];
   gap_unrecoverable_count: number;
 }
 

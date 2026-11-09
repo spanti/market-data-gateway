@@ -1,8 +1,8 @@
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
 import { BackfillJobsSection } from "@/pages/quality/backfill-jobs-section";
-import { CollectorGapSnapshot } from "@/pages/quality/collector-gap-snapshot";
-import { PersistentGapSection } from "@/pages/quality/persistent-gap-section";
+import { CollectorBackfillGapSnapshot } from "@/pages/quality/collector-gap-snapshot";
+import { PersistentBackfillGapSection } from "@/pages/quality/persistent-gap-section";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
 
 function modeBadge(
@@ -45,8 +45,8 @@ export function QualityPage() {
         meta={<span className="text-xs text-faint-foreground">{meta}</span>}
       />
 
-      <CollectorGapSnapshot />
-      <PersistentGapSection />
+      <CollectorBackfillGapSnapshot />
+      <PersistentBackfillGapSection />
       <BackfillJobsSection />
     </>
   );

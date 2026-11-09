@@ -1,9 +1,11 @@
 import { z } from "zod";
 import { apiClient } from "@/api/http/client";
-import type {
-  AdminListResponse,
-  ServiceInstance,
-  ServiceLifecycleAction,
+import {
+  SERVICE_ROLES,
+  type AdminListResponse,
+  type ServiceInstance,
+  type ServiceLifecycleAction,
+  type ServiceRole,
 } from "@/api/endpoints/admin";
 
 /**
@@ -31,7 +33,7 @@ const lastErrorSchema = z
 const serviceInstanceSchema = z
   .object({
     instance_id: z.string(),
-    service_role: z.enum(["collector", "api", "replay"]),
+    service_role: z.enum(SERVICE_ROLES),
     display_name: z.string(),
     desired_state: z.enum(["running", "stopped"]),
     observed_state: z.enum([
@@ -94,9 +96,14 @@ export async function fetchAdminServiceInstances(
   return (parsed.data as AdminListResponse<ServiceInstance>).items;
 }
 
-export interface AdminServiceInstanceRow {
+/**
+ * Canonical parsed service-instance row shared by the Monitoring ledger and
+ * the Gateway Console. Both screens render this shape; they do not define
+ * their own Admin instance types.
+ */
+export interface ServiceInstanceRowData {
   instanceId: string;
-  role: "collector" | "api" | "replay";
+  role: ServiceRole;
   displayName: string;
   desiredState: "running" | "stopped";
   observedState:
@@ -118,7 +125,7 @@ export interface AdminServiceInstanceRow {
 
 export function adminServiceInstanceToRow(
   instance: ServiceInstance,
-): AdminServiceInstanceRow {
+): ServiceInstanceRowData {
   return {
     instanceId: instance.instance_id,
     role: instance.service_role,

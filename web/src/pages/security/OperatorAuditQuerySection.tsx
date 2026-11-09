@@ -4,10 +4,10 @@ import {
   AUDIT_PAGE_DEFAULT,
   AUDIT_RESULTS,
   EMPTY_AUDIT_FILTERS,
-  fetchAuditEvents,
+  fetchOperatorAuditEvents,
   type AuditFilters,
-} from "@/api/endpoints/audit";
-import type { AuditEvent, AuditResult } from "@/api/endpoints/admin";
+} from "@/api/endpoints/operator-audit";
+import type { OperatorAuditEvent, AuditResult } from "@/api/endpoints/admin";
 import { classifyHttpError } from "@/api/http/errors";
 import { HttpError } from "@/api/http/types";
 import { ErrorState, LoadingState } from "@/components/states";
@@ -35,7 +35,7 @@ import {
   parseDateTimeInput,
   toQueryInstant,
 } from "@/lib/time-range";
-import { AuditEventDetail } from "@/pages/security/AuditEventDetail";
+import { OperatorAuditEventDetail } from "@/pages/security/OperatorAuditEventDetail";
 import {
   AUDIT_RESULT_LABEL,
   AUDIT_RESULT_TONE,
@@ -190,7 +190,7 @@ function AuditQueryError({
  * Server-side filtered Operator Audit Event query. No edit, delete or export
  * controls exist in v1; pagination is cursor-based and bounded.
  */
-export function AuditQuerySection() {
+export function OperatorAuditQuerySection() {
   const [form, setForm] = useState<FilterFormState>(EMPTY_FORM);
   const [filters, setFilters] = useState<AuditFilters>(EMPTY_AUDIT_FILTERS);
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
@@ -207,7 +207,7 @@ export function AuditQuerySection() {
   const query = useQuery({
     queryKey,
     queryFn: () =>
-      fetchAuditEvents(filters, {
+      fetchOperatorAuditEvents(filters, {
         cursor,
         limit: AUDIT_PAGE_DEFAULT,
         order: "desc",
@@ -245,7 +245,7 @@ export function AuditQuerySection() {
   }
 
   const page = query.data ?? null;
-  const items: AuditEvent[] = page?.items ?? [];
+  const items: OperatorAuditEvent[] = page?.items ?? [];
 
   return (
     <Panel className="mt-6 p-5" aria-label="Operator Audit Event 查询">
@@ -496,7 +496,7 @@ export function AuditQuerySection() {
       </div>
 
       {selectedEventId ? (
-        <AuditEventDetail
+        <OperatorAuditEventDetail
           eventId={selectedEventId}
           onClose={() => setSelectedEventId(null)}
         />

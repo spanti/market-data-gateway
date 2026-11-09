@@ -35,6 +35,7 @@ import type {
   ExportRangeChunk,
 } from "@/lib/export-policy";
 import { formatBytes } from "@/lib/format";
+import { ACTIVE_JOB_POLL_INTERVAL_MS } from "@/lib/monitoring-config";
 import {
   adminCapabilityAvailability,
   CAPABILITY_KEYS,
@@ -479,7 +480,7 @@ export function ExportJobPanel({
         .some((job) =>
           isActiveExportJob(effectiveExportJobStatus(job, currentTime)),
         );
-      return active ? 3000 : false;
+      return active ? ACTIVE_JOB_POLL_INTERVAL_MS : false;
     },
   });
 

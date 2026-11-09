@@ -27,6 +27,35 @@ function gap(code: DisabledReason["code"], message: string): ServiceInstanceSour
   return { kind: "gap", reason: { code, message } };
 }
 
+export type ServiceLifecycleSupervisorState =
+  | "available"
+  | "unavailable"
+  | "unsupported";
+
+/**
+ * The Supervisor lifecycle adapter gates both the Service Instance seam and
+ * the lifecycle buttons. Modules map its state to their own copy, but they do
+ * not each re-scan the adapter list.
+ */
+export function serviceLifecycleSupervisorState(
+  capability: CapabilityState | null,
+): ServiceLifecycleSupervisorState {
+  if (capability?.mode !== "admin-api" || !capability.document) {
+    return "available";
+  }
+  const supervisor = capability.document.adapters?.find(
+    (adapter) =>
+      adapter.name === "supervisor" && adapter.kind === "service_lifecycle",
+  );
+  if (supervisor?.state === "unavailable") {
+    return "unavailable";
+  }
+  if (supervisor?.state === "unsupported") {
+    return "unsupported";
+  }
+  return "available";
+}
+
 export function serviceInstanceSource(
   capability: CapabilityState | null,
 ): ServiceInstanceSource {
@@ -50,15 +79,11 @@ export function serviceInstanceSource(
     return gap(availability.reason.code, availability.reason.message);
   }
 
-  const document = capability?.mode === "admin-api" ? capability.document : null;
-  const supervisor = document?.adapters?.find(
-    (adapter) =>
-      adapter.name === "supervisor" && adapter.kind === "service_lifecycle",
-  );
-  if (supervisor?.state === "unavailable") {
+  const supervisor = serviceLifecycleSupervisorState(capability);
+  if (supervisor === "unavailable") {
     return gap("adapter-unavailable", "适配器不可用");
   }
-  if (supervisor?.state === "unsupported") {
+  if (supervisor === "unsupported") {
     return gap("backend-unsupported", ADMIN_SERVICE_INSTANCE_GAP);
   }
   return { kind: "admin" };

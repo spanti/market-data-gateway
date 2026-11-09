@@ -1,21 +1,13 @@
 import type { StatusTone } from "@/components/status-badge";
 import type { BackfillJobStatus } from "@/api/endpoints/admin";
+import { formatUtcTimestamp } from "@/lib/format";
 
 /**
  * Quality & Backfill presentation helpers. They never invent values: missing
  * timestamps/ranges render as explicit dashes or "未提供".
  */
 
-export function formatUtcTimestamp(value: string | null | undefined): string {
-  if (!value) {
-    return "—";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return `${date.toISOString().slice(0, 19).replace("T", " ")} UTC`;
-}
+export { formatUtcTimestamp } from "@/lib/format";
 
 export function formatRange(
   start: string | null | undefined,
@@ -41,7 +33,7 @@ export const GAP_REASON_LABELS: Record<string, string> = {
  * Known Collector/Admin reason codes get a localized label; unknown codes stay
  * visible verbatim. The UI never branches on message prose.
  */
-export function gapReasonLabel(reason: string): string {
+export function backfillGapReasonLabel(reason: string): string {
   return GAP_REASON_LABELS[reason] ?? reason;
 }
 

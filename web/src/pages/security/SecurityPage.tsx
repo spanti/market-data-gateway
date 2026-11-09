@@ -1,7 +1,7 @@
 import { ForbiddenState, PermissionGate } from "@/components/permission-gate";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
-import { AuditQuerySection } from "@/pages/security/AuditQuerySection";
+import { OperatorAuditQuerySection } from "@/pages/security/OperatorAuditQuerySection";
 import { IdentityPanel } from "@/pages/security/IdentityPanel";
 import { capabilityDisabledReason } from "@/runtime/permissions";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
@@ -47,7 +47,7 @@ export function SecurityPage() {
         {auditCapabilityReason ? (
           <ForbiddenState message={auditCapabilityReason.message} />
         ) : (
-          <AuditQuerySection />
+          <OperatorAuditQuerySection />
         )}
       </PermissionGate>
     </>

@@ -7,21 +7,11 @@ import {
   PanelHeader,
   PanelTitle,
 } from "@/components/ui/panel";
+import { formatUtcTimestamp } from "@/lib/format";
 import { buildLoginUrl } from "@/runtime/auth";
 import { loginDisabledReason } from "@/runtime/login-availability";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
 import type { DisabledReason } from "@/runtime/permissions";
-
-function formatUtcTimestamp(value: string | null | undefined): string {
-  if (!value) {
-    return "—";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return `${date.toISOString().replace("T", " ").slice(0, 19)} UTC`;
-}
 
 interface IdentityView {
   name: string;

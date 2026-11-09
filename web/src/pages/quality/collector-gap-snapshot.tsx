@@ -24,10 +24,10 @@ import { useRuntimeMode } from "@/runtime/runtime-mode-context";
 import {
   formatRange,
   formatUtcTimestamp,
-  gapReasonLabel,
+  backfillGapReasonLabel,
 } from "./quality-format";
 
-export const COLLECTOR_GAP_SNAPSHOT_QUERY_KEY = [
+export const COLLECTOR_BACKFILL_GAP_SNAPSHOT_QUERY_KEY = [
   "quality",
   "collector-gap-snapshot",
 ] as const;
@@ -45,12 +45,12 @@ const POLL_SECONDS = STATUS_POLL_INTERVAL_MS / 1000;
  * explicit note pointing to the persistent Backfill Gap list; capabilities
  * unknown renders unknown without issuing any request.
  */
-export function CollectorGapSnapshot() {
+export function CollectorBackfillGapSnapshot() {
   const { capability } = useRuntimeMode();
   const mode = capability?.mode ?? null;
   const directEnabled = mode === "current-contract";
   const query = useQuery({
-    queryKey: COLLECTOR_GAP_SNAPSHOT_QUERY_KEY,
+    queryKey: COLLECTOR_BACKFILL_GAP_SNAPSHOT_QUERY_KEY,
     queryFn: ({ signal }) => fetchCollectorStatus(signal),
     refetchInterval: STATUS_POLL_INTERVAL_MS,
     enabled: directEnabled,
@@ -196,7 +196,7 @@ export function CollectorGapSnapshot() {
                       {formatRange(gap.from_ts, gap.to_ts)}
                     </TableCell>
                     <TableCell>
-                      <span>{gapReasonLabel(gap.reason)}</span>{" "}
+                      <span>{backfillGapReasonLabel(gap.reason)}</span>{" "}
                       <span className="font-mono text-[11px] text-faint-foreground">
                         {gap.reason}
                       </span>

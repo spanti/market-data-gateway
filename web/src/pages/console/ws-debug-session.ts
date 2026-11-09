@@ -63,7 +63,7 @@ export interface WsDebugSnapshot {
   serverLagLastAt: string | null;
   lastPongAt: string | null;
   syncState: WsSyncState;
-  subscriptions: readonly string[];
+  topicPatterns: readonly string[];
 }
 
 export type FreeformSendResult = { ok: true } | { ok: false; error: string };
@@ -88,7 +88,7 @@ export class WsDebugSession {
   private serverLagLastAt: string | null = null;
   private lastPongAt: string | null = null;
   private syncState: WsSyncState = "idle";
-  private subscriptions: string[] = [];
+  private topicPatterns: string[] = [];
   private snapshot: WsDebugSnapshot;
 
   constructor(options: WsDebugSessionOptions = {}) {
@@ -138,7 +138,7 @@ export class WsDebugSession {
     if (!validation.valid) {
       return false;
     }
-    if (this.subscriptions.includes(validation.topic)) {
+    if (this.topicPatterns.includes(validation.topic)) {
       // The server subscription container is a set; do not resend a
       // duplicate frame just because the form was submitted twice.
       return this.transport.status.state === "open";
@@ -146,7 +146,7 @@ export class WsDebugSession {
     if (!this.transport.subscribe([validation.topic])) {
       return false;
     }
-    this.subscriptions = [...this.subscriptions, validation.topic];
+    this.topicPatterns = [...this.topicPatterns, validation.topic];
     this.emit();
     return true;
   }
@@ -159,7 +159,7 @@ export class WsDebugSession {
     if (!this.transport.unsubscribe([validation.topic])) {
       return false;
     }
-    this.subscriptions = this.subscriptions.filter(
+    this.topicPatterns = this.topicPatterns.filter(
       (item) => item !== validation.topic,
     );
     this.emit();
@@ -201,12 +201,12 @@ export class WsDebugSession {
     }
 
     if (frame.op === "subscribe") {
-      this.subscriptions = [
-        ...this.subscriptions,
-        ...frame.topics.filter((topic) => !this.subscriptions.includes(topic)),
+      this.topicPatterns = [
+        ...this.topicPatterns,
+        ...frame.topics.filter((topic) => !this.topicPatterns.includes(topic)),
       ];
     } else {
-      this.subscriptions = this.subscriptions.filter(
+      this.topicPatterns = this.topicPatterns.filter(
         (topic) => !frame.topics.includes(topic),
       );
     }
@@ -352,7 +352,7 @@ export class WsDebugSession {
       serverLagLastAt: this.serverLagLastAt,
       lastPongAt: this.lastPongAt,
       syncState: this.syncState,
-      subscriptions: this.subscriptions,
+      topicPatterns: this.topicPatterns,
     };
   }
 

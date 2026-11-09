@@ -3,18 +3,11 @@ import { DisabledAction } from "@/components/disabled-reason";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
+import { formatUtcTimestamp } from "@/lib/format";
 import { buildLoginUrl } from "@/runtime/auth";
 import { loginDisabledReason } from "@/runtime/login-availability";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
 import type { SessionIssueReason } from "@/runtime/session-expiry";
-
-function formatUtcTimestamp(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return `${date.toISOString().replace("T", " ").slice(0, 19)} UTC`;
-}
 
 function sessionIssueDetail(reason: SessionIssueReason): string {
   switch (reason) {

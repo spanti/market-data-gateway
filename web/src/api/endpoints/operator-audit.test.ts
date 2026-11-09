@@ -5,13 +5,13 @@ import {
   AUDIT_PAGE_DEFAULT,
   AUDIT_PAGE_MAX,
   buildAuditQueryParams,
-  fetchAuditEvent,
-  fetchAuditEvents,
+  fetchOperatorAuditEvent,
+  fetchOperatorAuditEvents,
   fetchAuditTimeline,
-  parseAuditEventPage,
+  parseOperatorAuditEventPage,
   MAX_TIMELINE_PAGES,
   type AuditFilters,
-} from "@/api/endpoints/audit";
+} from "@/api/endpoints/operator-audit";
 
 const fullFilters: AuditFilters = {
   from: "2026-11-09T00:00:00.000Z",
@@ -128,7 +128,7 @@ describe("audit query serialization", () => {
 
 describe("audit response parsing", () => {
   it("parses a bounded page of events", () => {
-    const page = parseAuditEventPage({
+    const page = parseOperatorAuditEventPage({
       items: [auditEvent()],
       page: { next_cursor: "cursor-2", has_more: true },
     });
@@ -140,10 +140,10 @@ describe("audit response parsing", () => {
   });
 
   it("fails closed on malformed list payloads", () => {
-    expect(parseAuditEventPage(null)).toBeNull();
-    expect(parseAuditEventPage({ items: "nope", page: {} })).toBeNull();
+    expect(parseOperatorAuditEventPage(null)).toBeNull();
+    expect(parseOperatorAuditEventPage({ items: "nope", page: {} })).toBeNull();
     expect(
-      parseAuditEventPage({
+      parseOperatorAuditEventPage({
         items: [{ not: "an event" }],
         page: { next_cursor: null, has_more: false },
       }),
@@ -162,7 +162,7 @@ describe("audit response parsing", () => {
       }),
     );
 
-    const page = await fetchAuditEvents(fullFilters, { limit: 25 });
+    const page = await fetchOperatorAuditEvents(fullFilters, { limit: 25 });
 
     expect(page.items).toHaveLength(1);
     expect(seen[0]?.searchParams.get("actor_subject")).toBe("oidc-subject-123");
@@ -179,7 +179,7 @@ describe("audit response parsing", () => {
       }),
     );
 
-    const event = await fetchAuditEvent("evt_01JABCXYZ");
+    const event = await fetchOperatorAuditEvent("evt_01JABCXYZ");
 
     expect(event.event_id).toBe("evt_01JABCXYZ");
     expect(seenPath).toBe("/api/v1/admin/audit-events/evt_01JABCXYZ");
@@ -192,7 +192,7 @@ describe("audit response parsing", () => {
       ),
     );
 
-    await expect(fetchAuditEvent("evt_only")).rejects.toMatchObject({
+    await expect(fetchOperatorAuditEvent("evt_only")).rejects.toMatchObject({
       code: "unexpected_audit_payload",
     });
   });

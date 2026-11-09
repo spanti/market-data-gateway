@@ -26,14 +26,15 @@ import {
 } from "@/components/ui/table";
 import { BAR_INTERVALS, type BarInterval } from "@/lib/time-range";
 import { CAPABILITY_KEYS } from "@/runtime/capability-gates";
+import { queryErrorInfo } from "@/lib/errors";
 import {
   formatRange,
   formatUtcTimestamp,
-  gapReasonLabel,
+  backfillGapReasonLabel,
 } from "./quality-format";
 import { useQualityGate } from "./quality-gates";
 
-interface GapFilters {
+interface BackfillGapFilters {
   status: "" | "open" | "resolved";
   feed: string;
   instrumentId: string;
@@ -41,7 +42,7 @@ interface GapFilters {
   reason: string;
 }
 
-const EMPTY_FILTERS: GapFilters = {
+const EMPTY_BACKFILL_GAP_FILTERS: BackfillGapFilters = {
   status: "",
   feed: "",
   instrumentId: "",
@@ -50,7 +51,7 @@ const EMPTY_FILTERS: GapFilters = {
 };
 
 function toQuery(
-  filters: GapFilters,
+  filters: BackfillGapFilters,
   cursor: string | null,
 ): BackfillGapQuery {
   return {
@@ -61,16 +62,6 @@ function toQuery(
     reason: filters.reason || undefined,
     cursor: cursor ?? undefined,
     limit: 50,
-  };
-}
-
-function queryErrorText(error: unknown): { message: string; requestId: string | null } {
-  if (error instanceof HttpError) {
-    return { message: `${error.code}: ${error.message}`, requestId: error.requestId };
-  }
-  return {
-    message: error instanceof Error ? error.message : "未知错误",
-    requestId: null,
   };
 }
 
@@ -93,13 +84,13 @@ function linkedJobs(gap: {
  * no physical delete and no manual resolve: only a successful Job resolves a
  * Gap.
  */
-export function PersistentGapSection() {
+export function PersistentBackfillGapSection() {
   const gate = useQualityGate(
     "backfill.job.view",
     CAPABILITY_KEYS.persistentBackfillGaps,
   );
-  const [draft, setDraft] = useState<GapFilters>(EMPTY_FILTERS);
-  const [applied, setApplied] = useState<GapFilters>(EMPTY_FILTERS);
+  const [draft, setDraft] = useState<BackfillGapFilters>(EMPTY_BACKFILL_GAP_FILTERS);
+  const [applied, setApplied] = useState<BackfillGapFilters>(EMPTY_BACKFILL_GAP_FILTERS);
   const [cursor, setCursor] = useState<string | null>(null);
 
   const query = useQuery({
@@ -120,12 +111,12 @@ export function PersistentGapSection() {
   }
 
   function resetFilters() {
-    setDraft(EMPTY_FILTERS);
-    setApplied(EMPTY_FILTERS);
+    setDraft(EMPTY_BACKFILL_GAP_FILTERS);
+    setApplied(EMPTY_BACKFILL_GAP_FILTERS);
     setCursor(null);
   }
 
-  const errorInfo = query.isError ? queryErrorText(query.error) : null;
+  const errorInfo = query.isError ? queryErrorInfo(query.error) : null;
 
   return (
     <Panel className="mt-6 p-5" aria-label="持久 Unrecoverable Backfill Gap">
@@ -168,7 +159,7 @@ export function PersistentGapSection() {
                 onChange={(event) =>
                   setDraft({
                     ...draft,
-                    status: event.target.value as GapFilters["status"],
+                    status: event.target.value as BackfillGapFilters["status"],
                   })
                 }
               >
@@ -207,7 +198,7 @@ export function PersistentGapSection() {
                 onChange={(event) =>
                   setDraft({
                     ...draft,
-                    interval: event.target.value as GapFilters["interval"],
+                    interval: event.target.value as BackfillGapFilters["interval"],
                   })
                 }
               >
@@ -314,7 +305,7 @@ export function PersistentGapSection() {
                         {formatRange(gap.start, gap.end)}
                       </TableCell>
                       <TableCell>
-                        <span>{gapReasonLabel(gap.reason)}</span>{" "}
+                        <span>{backfillGapReasonLabel(gap.reason)}</span>{" "}
                         <span className="font-mono text-[11px] text-faint-foreground">
                           {gap.reason}
                         </span>

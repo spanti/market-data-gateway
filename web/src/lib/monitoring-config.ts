@@ -9,6 +9,11 @@
 export const DEFAULT_STATUS_POLL_INTERVAL_MS = 5000;
 export const DEFAULT_PROMETHEUS_POLL_INTERVAL_MS = 15000;
 
+/** Console Operation status polling (accepted -> running -> terminal). */
+export const OPERATION_POLL_INTERVAL_MS = 3000;
+/** Active Export Job progress polling while a job is queued/running. */
+export const ACTIVE_JOB_POLL_INTERVAL_MS = 3000;
+
 /** Never poll faster than once per second, even if configured to do so. */
 const MIN_POLL_INTERVAL_MS = 1000;
 

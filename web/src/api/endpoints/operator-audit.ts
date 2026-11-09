@@ -1,6 +1,6 @@
 import { ADMIN_PATHS } from "@/api/endpoints/admin";
 import type {
-  AuditEvent,
+  OperatorAuditEvent,
   AuditResult,
   AdminCursorPage,
 } from "@/api/endpoints/admin";
@@ -125,7 +125,7 @@ function isAuditResult(value: unknown): value is AuditResult {
   );
 }
 
-function parseEvent(value: unknown): AuditEvent | null {
+function parseEvent(value: unknown): OperatorAuditEvent | null {
   if (!isRecord(value)) {
     return null;
   }
@@ -204,16 +204,16 @@ function parseEvent(value: unknown): AuditEvent | null {
   };
 }
 
-export interface AuditEventPage {
-  items: AuditEvent[];
+export interface OperatorAuditEventPage {
+  items: OperatorAuditEvent[];
   page: AdminCursorPage;
 }
 
-export function parseAuditEventPage(data: unknown): AuditEventPage | null {
+export function parseOperatorAuditEventPage(data: unknown): OperatorAuditEventPage | null {
   if (!isRecord(data) || !Array.isArray(data.items) || !isRecord(data.page)) {
     return null;
   }
-  const items: AuditEvent[] = [];
+  const items: OperatorAuditEvent[] = [];
   for (const item of data.items) {
     const parsed = parseEvent(item);
     if (!parsed) {
@@ -252,22 +252,22 @@ function payloadError(message: string): HttpError {
   });
 }
 
-export async function fetchAuditEvents(
+export async function fetchOperatorAuditEvents(
   filters: AuditFilters,
   options: AuditQueryOptions = {},
-): Promise<AuditEventPage> {
+): Promise<OperatorAuditEventPage> {
   const params = buildAuditQueryParams(filters, options);
   const response = await apiClient.get<unknown>(
     `${ADMIN_PATHS.auditEvents}?${params.toString()}`,
   );
-  const page = parseAuditEventPage(response.data);
+  const page = parseOperatorAuditEventPage(response.data);
   if (!page) {
     throw payloadError("Operator Audit Event 响应不符合契约");
   }
   return page;
 }
 
-export async function fetchAuditEvent(eventId: string): Promise<AuditEvent> {
+export async function fetchOperatorAuditEvent(eventId: string): Promise<OperatorAuditEvent> {
   const response = await apiClient.get<unknown>(
     `${ADMIN_PATHS.auditEvents}/${encodeURIComponent(eventId)}`,
   );
@@ -283,8 +283,8 @@ export async function fetchAuditEvent(eventId: string): Promise<AuditEvent> {
  * sequence. A repeated event_id is kept once (first append wins); an event is
  * never rendered as an in-place update of an earlier one.
  */
-export function assembleTimeline(events: readonly AuditEvent[]): AuditEvent[] {
-  const byId = new Map<string, AuditEvent>();
+export function assembleTimeline(events: readonly OperatorAuditEvent[]): OperatorAuditEvent[] {
+  const byId = new Map<string, OperatorAuditEvent>();
   for (const event of events) {
     if (!byId.has(event.event_id)) {
       byId.set(event.event_id, event);
@@ -305,8 +305,8 @@ export function assembleTimeline(events: readonly AuditEvent[]): AuditEvent[] {
  */
 export async function fetchAuditTimeline(
   operationId: string,
-): Promise<AuditEvent[]> {
-  const collected: AuditEvent[] = [];
+): Promise<OperatorAuditEvent[]> {
+  const collected: OperatorAuditEvent[] = [];
   let cursor: string | null = null;
 
   for (let pageIndex = 0; pageIndex < MAX_TIMELINE_PAGES; pageIndex += 1) {
@@ -321,7 +321,7 @@ export async function fetchAuditTimeline(
     const response = await apiClient.get<unknown>(
       `${ADMIN_PATHS.auditEvents}?${params.toString()}`,
     );
-    const page = parseAuditEventPage(response.data);
+    const page = parseOperatorAuditEventPage(response.data);
     if (!page) {
       throw payloadError("Operator Audit Event 时间线响应不符合契约");
     }

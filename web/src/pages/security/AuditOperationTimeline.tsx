@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { fetchAuditTimeline } from "@/api/endpoints/audit";
+import { fetchAuditTimeline } from "@/api/endpoints/operator-audit";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";

@@ -8,9 +8,13 @@ import {
 import {
   adminServiceInstanceToRow,
   fetchAdminServiceInstances,
-  type AdminServiceInstanceRow,
+  type ServiceInstanceRowData,
 } from "@/api/endpoints/admin-service-instances";
-import type { ServiceLifecycleBody } from "@/api/endpoints/admin";
+import {
+  SERVICE_ROLES,
+  type ServiceLifecycleBody,
+  type ServiceRole,
+} from "@/api/endpoints/admin";
 import {
   fetchApiReady,
   fetchApiStatus,
@@ -24,6 +28,12 @@ import {
   type ReplayStatus,
 } from "@/api/endpoints/ops";
 import { HttpError } from "@/api/http/types";
+import { errorText } from "@/lib/errors";
+import {
+  OPERATION_POLL_INTERVAL_MS,
+  STATUS_POLL_INTERVAL_MS,
+} from "@/lib/monitoring-config";
+import { formatUtcTimestamp } from "@/lib/format";
 import { ConfirmDialog, type ConfirmDialogInput } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
 import { ErrorState, LoadingState } from "@/components/states";
@@ -54,7 +64,10 @@ import {
   type LifecycleOperationState,
   type ServiceLifecycleAction,
 } from "@/pages/console/lifecycle";
-import { serviceInstanceSource } from "@/runtime/service-instance-source";
+import {
+  serviceInstanceSource,
+  serviceLifecycleSupervisorState,
+} from "@/runtime/service-instance-source";
 import {
   adminCapabilityAvailability,
   CAPABILITY_KEYS,
@@ -82,8 +95,7 @@ import { useRetryAfter } from "@/runtime/use-retry-after";
  * "需要 Admin API 服务实例接口（未实现）" instead of falling back.
  */
 
-export const SERVICE_INSTANCE_ROLES = ["collector", "api", "replay"] as const;
-type ServiceInstanceRole = (typeof SERVICE_INSTANCE_ROLES)[number];
+export const SERVICE_INSTANCE_ROLES = SERVICE_ROLES;
 
 const ACTION_LABELS: Record<ServiceLifecycleAction, string> = {
   start: "Start",
@@ -105,7 +117,7 @@ interface DetailItem {
 interface ServiceRow {
   /** Stable operation/dialog key: role in Current Contract, instance_id in Admin. */
   key: string;
-  role: ServiceInstanceRole;
+  role: ServiceRole;
   displayName: string | null;
   ready: boolean | null;
   readyReason: string | null;
@@ -146,11 +158,7 @@ function formatObserved(at: number | null): string {
   if (at === null || at === 0) {
     return "—";
   }
-  const date = new Date(at);
-  if (Number.isNaN(date.getTime())) {
-    return "—";
-  }
-  return `${date.toISOString().replace("T", " ").slice(0, 19)} UTC`;
+  return formatUtcTimestamp(at);
 }
 
 function latestUpdatedAt(
@@ -179,10 +187,7 @@ function describeError(error: unknown): string | null {
   if (!error) {
     return null;
   }
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return "加载失败";
+  return errorText(error, "加载失败");
 }
 
 function buildApiRow(
@@ -324,7 +329,7 @@ function buildReplayRow(
   };
 }
 
-function buildAdminRow(instance: AdminServiceInstanceRow): ServiceRow {
+function buildAdminRow(instance: ServiceInstanceRowData): ServiceRow {
   const observedAt = Date.parse(instance.lastObservedAt);
   const details: DetailItem[] = [
     { label: "Instance ID", value: instance.instanceId },
@@ -398,18 +403,11 @@ function lifecycleDisabledReason(
   if (availability.kind === "disabled") {
     return availability.reason;
   }
-  const supervisor =
-    capability?.mode === "admin-api"
-      ? capability.document?.adapters?.find(
-          (adapter) =>
-            adapter.name === "supervisor" &&
-            adapter.kind === "service_lifecycle",
-        )
-      : undefined;
-  if (supervisor?.state === "unavailable") {
+  const supervisor = serviceLifecycleSupervisorState(capability);
+  if (supervisor === "unavailable") {
     return { code: "adapter-unavailable", message: "Supervisor 不可用" };
   }
-  if (supervisor?.state === "unsupported") {
+  if (supervisor === "unsupported") {
     return { code: "backend-unsupported", message: "Supervisor 未实现" };
   }
   return null;
@@ -464,7 +462,7 @@ function OperationTracker({
       fetchAdminOperation(operationId as string, signal),
     enabled: online && operationId !== null && canQueryOperation(operation),
     retry: false,
-    refetchInterval: 3000,
+    refetchInterval: OPERATION_POLL_INTERVAL_MS,
   });
 
   useEffect(() => {
@@ -548,43 +546,43 @@ export function ServiceInstanceView() {
   const apiStatus = useQuery({
     queryKey: ["console", "service", "api-status"],
     queryFn: ({ signal }) => fetchApiStatus(signal),
-    refetchInterval: 5_000,
+    refetchInterval: STATUS_POLL_INTERVAL_MS,
     enabled: directEnabled,
   });
   const apiReady = useQuery({
     queryKey: ["console", "service", "api-ready"],
     queryFn: ({ signal }) => fetchApiReady(signal),
-    refetchInterval: 5_000,
+    refetchInterval: STATUS_POLL_INTERVAL_MS,
     enabled: directEnabled,
   });
   const collectorStatus = useQuery({
     queryKey: ["console", "service", "collector-status"],
     queryFn: ({ signal }) => fetchCollectorStatus(signal),
-    refetchInterval: 5_000,
+    refetchInterval: STATUS_POLL_INTERVAL_MS,
     enabled: directEnabled,
   });
   const collectorReady = useQuery({
     queryKey: ["console", "service", "collector-ready"],
     queryFn: ({ signal }) => fetchCollectorReady(signal),
-    refetchInterval: 5_000,
+    refetchInterval: STATUS_POLL_INTERVAL_MS,
     enabled: directEnabled,
   });
   const replayStatus = useQuery({
     queryKey: ["console", "service", "replay-status"],
     queryFn: ({ signal }) => fetchReplayStatus(signal),
-    refetchInterval: 5_000,
+    refetchInterval: STATUS_POLL_INTERVAL_MS,
     enabled: directEnabled,
   });
   const replayReady = useQuery({
     queryKey: ["console", "service", "replay-ready"],
     queryFn: ({ signal }) => fetchReplayReady(signal),
-    refetchInterval: 5_000,
+    refetchInterval: STATUS_POLL_INTERVAL_MS,
     enabled: directEnabled,
   });
   const adminInstances = useQuery({
     queryKey: ["console", "service", "admin-instances"],
     queryFn: ({ signal }) => fetchAdminServiceInstances(signal),
-    refetchInterval: 5_000,
+    refetchInterval: STATUS_POLL_INTERVAL_MS,
     enabled: adminEnabled,
     retry: false,
   });

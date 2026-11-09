@@ -6,8 +6,10 @@
 
 const UNKNOWN = "—";
 
-function toDate(value: string | number | Date | null): Date | null {
-  if (value === null) {
+function toDate(
+  value: string | number | Date | null | undefined,
+): Date | null {
+  if (value === null || value === undefined) {
     return null;
   }
   const date = value instanceof Date ? value : new Date(value);
@@ -30,6 +32,16 @@ export function formatUtcDateTime(
   )} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(
     date.getUTCSeconds(),
   )} UTC`;
+}
+
+/**
+ * Canonical UTC timestamp formatter used by every screen. Invalid or missing
+ * values render an em dash, never a raw, ambiguous or localized string.
+ */
+export function formatUtcTimestamp(
+  value: string | number | Date | null | undefined,
+): string {
+  return formatUtcDateTime(value ?? null);
 }
 
 export function formatUtcTime(value: string | number | Date | null): string {

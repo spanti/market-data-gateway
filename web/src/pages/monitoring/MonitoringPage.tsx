@@ -130,6 +130,7 @@ export function MonitoringPage() {
   const range = monitoringRangeFromParams(searchParams);
   const sources = useMonitoringSources();
   const trends = useMonitoringTrends(range);
+  const statusPollWindow = `当前快照（${STATUS_POLL_INTERVAL_MS / 1000} 秒轮询）`;
 
   const setRange = (id: string) => {
     const next = new URLSearchParams(searchParams);
@@ -323,7 +324,7 @@ export function MonitoringPage() {
     lastSuccessAtValue: number | null,
   ) => ({
     source,
-    window: "当前快照（5 秒轮询）",
+    window: statusPollWindow,
     state: sources.directOpsEnabled ? state : ("unknown" as const),
     lastSuccessAt: sources.directOpsEnabled ? lastSuccessAtValue : null,
     reason: sources.directOpsEnabled ? null : sources.opsGapReason,
@@ -347,13 +348,13 @@ export function MonitoringPage() {
     ),
     {
       source: "Dataset /api/v1/status",
-      window: "当前快照（5 秒轮询）",
+      window: statusPollWindow,
       state: datasetState,
       lastSuccessAt: lastSuccessAt(sources.dataset),
     },
     {
       source: "Instrument Reference /api/v1/instruments",
-      window: "当前快照（5 秒轮询）",
+      window: statusPollWindow,
       state: instrumentsState,
       lastSuccessAt: lastSuccessAt(sources.instruments),
     },
@@ -569,7 +570,7 @@ export function MonitoringPage() {
           <div className="mt-2 px-4">
             <SourceStatus
               source="Collector /status"
-              window="当前快照（5 秒轮询）"
+              window={statusPollWindow}
               state="error"
               lastSuccessAt={lastSuccessAt(sources.collector)}
               reason={errorText(sources.collector.error)}

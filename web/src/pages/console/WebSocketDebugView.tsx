@@ -479,10 +479,10 @@ export function WebSocketDebugView({
               </ul>
 
               <div className="text-[11px] text-muted-foreground">
-                当前订阅：
-                {snapshot.subscriptions.length === 0
+                当前会话 Topic 模式：
+                {snapshot.topicPatterns.length === 0
                   ? "无"
-                  : snapshot.subscriptions.join("、")}
+                  : snapshot.topicPatterns.join("、")}
               </div>
             </div>
           </section>

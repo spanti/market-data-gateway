@@ -1,3 +1,4 @@
+import { STATUS_POLL_INTERVAL_MS } from "@/lib/monitoring-config";
 import { SourceStatus, type SourceStatusState } from "@/components/monitoring/source-status";
 import {
   EmptyState,
@@ -58,7 +59,7 @@ export function DatasetFreshness({
       <div className="mt-2 px-4">
         <SourceStatus
           source="Dataset /api/v1/status"
-          window="当前快照（5 秒轮询）"
+          window={`当前快照（${STATUS_POLL_INTERVAL_MS / 1000} 秒轮询）`}
           state={state}
           lastSuccessAt={lastSuccessAt}
           reason={

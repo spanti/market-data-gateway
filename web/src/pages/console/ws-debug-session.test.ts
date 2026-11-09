@@ -199,17 +199,17 @@ describe("WS debug session", () => {
     expect(cleared.serverLagDropped).toBe(4);
   });
 
-  it("sends controlled subscriptions, deduplicates them and unsubscribes", () => {
+  it("sends controlled Topic patterns, deduplicates them and unsubscribes", () => {
     const { session, sockets } = setup();
     open(session, sockets);
 
     expect(session.subscribe("market.bar.1m.binance:BTC/USDT")).toBe(true);
     expect(session.subscribe("market.bar.1m.binance:BTC/USDT")).toBe(true);
-    expect(session.getSnapshot().subscriptions).toEqual([
+    expect(session.getSnapshot().topicPatterns).toEqual([
       "market.bar.1m.binance:BTC/USDT",
     ]);
     expect(session.unsubscribe("market.bar.1m.binance:BTC/USDT")).toBe(true);
-    expect(session.getSnapshot().subscriptions).toEqual([]);
+    expect(session.getSnapshot().topicPatterns).toEqual([]);
 
     expect(sockets[0]?.sent).toEqual([
       '{"op":"subscribe","topics":["market.bar.1m.binance:BTC/USDT"]}',

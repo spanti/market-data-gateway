@@ -86,12 +86,9 @@ export function lastSuccessAt<T>(query: UseQueryResult<T>): number | null {
   return query.dataUpdatedAt;
 }
 
-export function errorText(error: unknown): string {
-  if (error instanceof Error && error.message.trim()) {
-    return error.message;
-  }
-  return "数据源不可用";
-}
+import { errorText } from "@/lib/errors";
+
+export { errorText };
 
 function useStatusQuery<T>(
   queryKey: readonly unknown[],
