@@ -228,6 +228,29 @@ describe("WebSocket Debug role matrix", () => {
 
     expect(screen.getByLabelText("自由 JSON")).toBeDisabled();
     expect(screen.getAllByText("后端未实现").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "连接" })).toBeDisabled();
+  });
+
+  it("does not allow connect while capability discovery is unknown", async () => {
+    const user = userEvent.setup();
+    const { sockets } = renderView({
+      subject: { kind: "unknown" },
+      capability: {
+        mode: "capabilities-unknown",
+        lastSuccessAt: null,
+        errorCode: "timeout",
+        message: "timed out",
+      },
+    });
+
+    const connect = screen.getByRole("button", { name: "连接" });
+    expect(connect).toBeDisabled();
+    expect(
+      screen.getAllByText("能力未知，暂不可用").length,
+    ).toBeGreaterThan(0);
+
+    await user.click(connect);
+    expect(sockets).toHaveLength(0);
   });
 });
 

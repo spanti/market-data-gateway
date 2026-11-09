@@ -1,14 +1,21 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useWsFactory } from "@/api/ws/use-ws-factory";
 import { GatewayWsTransport, type WsProtocolIssueCode } from "@/api/ws/transport";
+import { resolveWsTarget } from "@/api/ws/ws-target";
 import { matchesBarQuery, type BarRow } from "@/lib/bar-data";
 import { containsInstant, type BarInterval } from "@/lib/time-range";
+import { useRuntimeMode } from "@/runtime/runtime-mode-context";
+import { useActionReason } from "@/runtime/use-permission";
 
 /**
  * Live Bar append.
  *
  * - The user must explicitly enable it, and the range must include now.
  * - Historical-only ranges never open a WebSocket.
+ * - The transport target is resolved by `resolveWsTarget`: public `/ws` only in
+ *   Current Contract, Admin `/api/v1/admin/ws` only with `ws_admin_session`,
+ *   and no socket while capabilities are pending/unknown.
+ * - The Access Role must allow `ws.session.subscribe`.
  * - There is no resume position: every successful open is a NEW receive
  *   segment; a close marks the current segment interrupted. The UI must never
  *   claim seamless recovery, and REST refetch only backfills persisted
@@ -58,6 +65,10 @@ export interface UseBarLiveFeedOptions {
 export interface BarLiveFeedState {
   enabled: boolean;
   rangeIncludesNow: boolean;
+  /** False when the runtime mode/role/capability forbids a socket at all. */
+  canEnable: boolean;
+  /** Why no socket may be opened, even before the user enables the control. */
+  unavailableReason: string | null;
   blockedReason: string | null;
   status: LiveFeedStatus;
   topic: string | null;
@@ -83,6 +94,11 @@ export function useBarLiveFeed({
   now,
 }: UseBarLiveFeedOptions): BarLiveFeedState {
   const factory = useWsFactory();
+  const { capability } = useRuntimeMode();
+  const subscribeReason = useActionReason("ws.session.subscribe");
+  const wsTarget = useMemo(() => resolveWsTarget(capability), [capability]);
+  const unavailableReason =
+    wsTarget.reason?.message ?? subscribeReason?.message ?? null;
   const [enabled, setEnabled] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<
     "idle" | "connecting" | "receiving" | "interrupted"
@@ -105,11 +121,15 @@ export function useBarLiveFeed({
     containsInstant(new Date(startMs), new Date(endMs), new Date(nowMs));
 
   const identityReady = instrumentId !== null && interval !== null;
+  const targetReady = wsTarget.url !== null && unavailableReason === null;
+  const canEnable = targetReady;
   const canConnect =
-    enabled && identityReady && rangeIncludesNow && rangeAllowed;
+    enabled && identityReady && rangeIncludesNow && rangeAllowed && targetReady;
 
   let blockedReason: string | null = null;
-  if (enabled && !identityReady) {
+  if (enabled && unavailableReason !== null) {
+    blockedReason = unavailableReason;
+  } else if (enabled && !identityReady) {
     blockedReason = "请先选择 InstrumentId 与 Bar Interval。";
   } else if (enabled && !rangeAllowed) {
     blockedReason =
@@ -127,8 +147,15 @@ export function useBarLiveFeed({
         ? "connecting"
         : connectionStatus;
 
+  const targetUrl = wsTarget.url;
+
   useEffect(() => {
-    if (!canConnect || instrumentId === null || interval === null) {
+    if (
+      !canConnect ||
+      targetUrl === null ||
+      instrumentId === null ||
+      interval === null
+    ) {
       setConnectionStatus("idle");
       return;
     }
@@ -159,6 +186,7 @@ export function useBarLiveFeed({
     };
 
     const transport = new GatewayWsTransport({
+      url: targetUrl,
       ...(factory ? { createSocket: factory } : {}),
       onOpen: () => {
         if (!active) {
@@ -248,7 +276,7 @@ export function useBarLiveFeed({
       markReceivingInterrupted(new Date().toISOString());
       setConnectionStatus("idle");
     };
-  }, [canConnect, instrumentId, interval, startMs, endMs, factory]);
+  }, [canConnect, targetUrl, instrumentId, interval, startMs, endMs, factory]);
 
   const enable = useCallback(() => setEnabled(true), []);
   const disable = useCallback(() => setEnabled(false), []);
@@ -259,6 +287,8 @@ export function useBarLiveFeed({
   return {
     enabled,
     rangeIncludesNow,
+    canEnable,
+    unavailableReason,
     blockedReason,
     status,
     topic:

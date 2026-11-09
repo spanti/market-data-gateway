@@ -565,7 +565,7 @@ describe("Bars page live follow", () => {
 
   function setupLivePage() {
     const sockets: FakeSocket[] = [];
-    const factory = vi.fn(() => {
+    const factory = vi.fn((_url: string) => {
       const socket = new FakeSocket();
       sockets.push(socket);
       return socket;
@@ -611,7 +611,7 @@ describe("Bars page live follow", () => {
       await screen.findByRole("checkbox", { name: "实时跟随" }),
     ).toBeDisabled();
     expect(
-      screen.getByText(/当前范围不包含现在，不能开启实时跟随/),
+      await screen.findByText(/当前范围不包含现在，不能开启实时跟随/),
     ).toBeInTheDocument();
     expect(factory).not.toHaveBeenCalled();
   });
@@ -668,5 +668,121 @@ describe("Bars page live follow", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("接收段 #1")).toBeInTheDocument();
     expect(screen.getByText("接收段 #2")).toBeInTheDocument();
+  });
+
+  it("never opens a socket while capability discovery is unknown", async () => {
+    server.use(
+      http.get("*/api/v1/admin/capabilities", () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: "internal_error",
+              message: "discovery failed",
+              details: {},
+              request_id: "cap-500",
+            },
+          },
+          { status: 500 },
+        ),
+      ),
+      http.get("*/api/v1/bars", () => pageResponse([envelope()])),
+    );
+    const factory = vi.fn();
+    const now = new Date();
+    renderApp({
+      initialEntries: [
+        barsUrl({
+          instrument_id: INSTRUMENT,
+          interval: "1m",
+          start: new Date(now.getTime() - 60 * 60 * 1000).toISOString(),
+          end: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+        }),
+      ],
+      wsFactory: factory,
+    });
+
+    const toggle = await screen.findByRole("checkbox", {
+      name: "实时跟随",
+    });
+    expect(toggle).toBeDisabled();
+    expect(
+      screen.getByText(/实时跟随不可用：能力未知，暂不可用/),
+    ).toBeInTheDocument();
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  function installAdminCapability(wsState: "enabled" | "unsupported") {
+    const now = Date.now();
+    const serverTime = new Date(now).toISOString();
+    server.use(
+      http.get("*/api/v1/admin/capabilities", () =>
+        HttpResponse.json({
+          schema_version: 1,
+          server_time: serverTime,
+          version: { admin_api: "1.0.0", contract: 1, supported_contracts: [1] },
+          auth: {
+            required: true,
+            mode: "oidc",
+            state: "available",
+            roles: ["SuperAdmin", "Operator", "Auditor"],
+          },
+          adapters: [],
+          capabilities: {
+            oidc_session: { state: "enabled" },
+            ws_admin_session: { state: wsState },
+          },
+        }),
+      ),
+      http.get("*/api/v1/admin/auth/session", () =>
+        HttpResponse.json({
+          authenticated: true,
+          server_time: serverTime,
+          user: {
+            subject: "oidc-subject-1",
+            display_name: "Ada Admin",
+            email: null,
+          },
+          access_role: "SuperAdmin",
+          session: {
+            issued_at: new Date(now - 60_000).toISOString(),
+            last_activity_at: serverTime,
+            idle_expires_at: new Date(now + 30 * 60_000).toISOString(),
+            absolute_expires_at: new Date(now + 8 * 3_600_000).toISOString(),
+          },
+          csrf: { header_name: "X-CSRF-Token", token: "csrf" },
+        }),
+      ),
+    );
+  }
+
+  it("uses only the Admin WebSocket target in Admin API mode", async () => {
+    installAdminCapability("enabled");
+    const { sockets, factory } = setupLivePage();
+    const user = userEvent.setup();
+
+    await screen.findByTestId("history-summary");
+    const toggle = screen.getByRole("checkbox", { name: "实时跟随" });
+    await waitFor(() => expect(toggle).toBeEnabled());
+    await user.click(toggle);
+    await waitFor(() => expect(sockets).toHaveLength(1));
+
+    expect(factory).toHaveBeenCalledTimes(1);
+    const url = new URL(factory.mock.calls[0]?.[0] as string);
+    expect(url.pathname).toBe("/api/v1/admin/ws");
+    expect(url.protocol).toBe("ws:");
+  });
+
+  it("opens no socket in Admin mode when ws_admin_session is unsupported", async () => {
+    installAdminCapability("unsupported");
+    const { factory } = setupLivePage();
+
+    const toggle = await screen.findByRole("checkbox", {
+      name: "实时跟随",
+    });
+    await waitFor(() => expect(toggle).toBeDisabled());
+    expect(
+      await screen.findByText(/实时跟随不可用：后端未实现/),
+    ).toBeInTheDocument();
+    expect(factory).not.toHaveBeenCalled();
   });
 });

@@ -36,10 +36,26 @@ describe("resolveWsTarget", () => {
     });
   });
 
-  it("keeps the public transport while capability discovery is unknown", () => {
-    expect(resolveWsTarget(null, location)).toMatchObject({
-      url: "wss://console.example.internal/ws",
-      source: "current-contract",
+  it("does not open any socket while capability discovery is pending or unknown", () => {
+    expect(resolveWsTarget(null, location)).toEqual({
+      url: null,
+      reason: { code: "capabilities-unknown", message: "能力未知，暂不可用" },
+      source: "unknown",
+    });
+    expect(
+      resolveWsTarget(
+        {
+          mode: "capabilities-unknown",
+          lastSuccessAt: null,
+          errorCode: "timeout",
+          message: "timed out",
+        },
+        location,
+      ),
+    ).toEqual({
+      url: null,
+      reason: { code: "capabilities-unknown", message: "能力未知，暂不可用" },
+      source: "unknown",
     });
   });
 

@@ -220,8 +220,8 @@ export function WebSocketDebugView({
             {connectionLabel(snapshot)}
           </StatusBadge>
           <span className="text-[11px] text-faint-foreground">
-            目标 {wsTarget.url ?? "—（Admin WS 能力不可用）"} · 连接时间{" "}
-            {formatClock(snapshot.connectedAt)}
+            目标 {wsTarget.url ?? `—（${wsTarget.reason?.message ?? "不可用"}）`}{" "}
+            · 连接时间 {formatClock(snapshot.connectedAt)}
           </span>
         </div>
       </PanelHeader>

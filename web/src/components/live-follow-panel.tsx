@@ -34,8 +34,8 @@ export function LiveFollowPanel({
 }: LiveFollowPanelProps) {
   const toggleId = useId();
   const statusCopy = STATUS_COPY[feed.status];
-  const toggleDisabled = !feed.rangeIncludesNow;
-  const canReconnect = feed.status === "interrupted";
+  const toggleDisabled = !feed.rangeIncludesNow || !feed.canEnable;
+  const canReconnect = feed.status === "interrupted" && feed.canEnable;
   const multiSegment = feed.segments.length > 1;
 
   return (
@@ -70,7 +70,11 @@ export function LiveFollowPanel({
           />
           实时跟随
         </label>
-        {toggleDisabled && !feed.enabled ? (
+        {!feed.canEnable ? (
+          <span className="text-xs text-status-warning">
+            实时跟随不可用：{feed.unavailableReason ?? "能力未知，暂不可用"}
+          </span>
+        ) : toggleDisabled && !feed.enabled ? (
           <span className="text-xs text-faint-foreground">
             当前范围不包含现在，不能开启实时跟随；历史范围不连接 WS。
           </span>
