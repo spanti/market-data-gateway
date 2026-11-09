@@ -8,11 +8,12 @@
  */
 
 import { QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import type { ComponentProps } from "react";
 import { describe, expect, it } from "vitest";
+import type { CapabilityState } from "@/api/capabilities";
 import type { ExportJob, ExportJobStatus } from "@/api/endpoints/admin";
 import { ExportJobPanel } from "@/components/export-job-panel";
 import { createQueryClient } from "@/api/query-client";
@@ -28,7 +29,7 @@ const OPERATOR: PermissionSubject = { kind: "role", role: "Operator" };
 const SUPERADMIN: PermissionSubject = { kind: "role", role: "SuperAdmin" };
 const ANONYMOUS: PermissionSubject = { kind: "anonymous" };
 
-const ENABLED_CAPABILITY = {
+const ENABLED_EXPORT_JOB = {
   state: "enabled" as const,
   formats: ["csv"],
   min_days: 31,
@@ -36,6 +37,31 @@ const ENABLED_CAPABILITY = {
   retention_s: 86400,
   max_running_per_user: 1,
 };
+
+function adminCapability(
+  compatible = true,
+  exportJob: Record<string, unknown> = ENABLED_EXPORT_JOB,
+): CapabilityState {
+  return {
+    mode: "admin-api",
+    compatible,
+    lastSuccessAt: "2026-11-09T12:00:00.000000000Z",
+    document: {
+      server_time: "2026-11-09T12:00:00.000000000Z",
+      version: {
+        admin_api: "1.0.0",
+        contract: 1,
+        supported_contracts: compatible ? [1] : [2],
+      },
+      auth: {
+        required: true,
+        roles: ["SuperAdmin", "Operator", "Auditor"],
+      },
+      adapters: [],
+      capabilities: { export_job: exportJob },
+    } as never,
+  };
+}
 
 function exportJob(overrides: Partial<ExportJob> = {}): ExportJob {
   return {
@@ -111,7 +137,7 @@ function renderPanel(
           }}
           decision={decision}
           subject={OPERATOR}
-          capability={ENABLED_CAPABILITY}
+          capability={adminCapability()}
           currentSubject="oidc-subject-123"
           now={NOW}
           {...props}
@@ -438,7 +464,7 @@ describe("CONTRACT TARGET (Admin API, MSW only — not integrated)", () => {
     expect(screen.getByText(/conflict-request-id/)).toBeInTheDocument();
   });
 
-  it("shows split guidance for >366 days and creates nothing", async () => {
+  it("shows split guidance for >366 days and blocks a single combined job", async () => {
     const splitDecision = classifyExportRange(
       START,
       new Date(START.getTime() + 800 * 24 * 60 * 60 * 1000),
@@ -447,12 +473,133 @@ describe("CONTRACT TARGET (Admin API, MSW only — not integrated)", () => {
     renderPanel({ decision: splitDecision });
 
     expect(
-      screen.getByText(/需要拆分为 3 个 Export Job/),
+      await screen.findByText(/需要拆分为 3 个 Export Job/),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "创建 Export Job" }),
     ).toBeDisabled();
     expect(screen.getByText(/不能创建单个任务/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/不会合并为多 Instrument ZIP/),
+    ).toBeInTheDocument();
+  });
+
+  it("creates a split chunk as an independent Export Job only after explicit confirmation", async () => {
+    const splitDecision = classifyExportRange(
+      START,
+      new Date(START.getTime() + 800 * 24 * 60 * 60 * 1000),
+    );
+    let created = false;
+    let postCount = 0;
+    let postBody: Record<string, unknown> | null = null;
+    server.use(
+      listHandler(() =>
+        created ? [exportJob({ status: "queued" })] : [],
+      ),
+      http.post("*/api/v1/admin/export-jobs", async ({ request }) => {
+        postCount += 1;
+        postBody = (await request.json()) as Record<string, unknown>;
+        created = true;
+        return HttpResponse.json(exportJob({ status: "queued" }), {
+          status: 202,
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderPanel({ decision: splitDecision });
+    await screen.findByText("当前没有可见的 Export Job。");
+
+    const chunkButtons = screen.getAllByRole("button", {
+      name: /创建第 \d+ 段 Export Job/,
+    });
+    expect(chunkButtons).toHaveLength(3);
+
+    // Cancel sends no admin write.
+    await user.click(chunkButtons[0]!);
+    let dialog = screen.getByRole("dialog");
+    expect(
+      within(dialog).getByText(/2026-01-01T00:00:00.000Z/),
+    ).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(postCount).toBe(0);
+
+    // Explicit confirmation creates exactly one chunk, not the combined range.
+    await user.click(chunkButtons[0]!);
+    dialog = screen.getByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", { name: "确认创建该段" }),
+    );
+
+    await waitFor(() => expect(postBody).not.toBeNull());
+    expect(postBody).toEqual({
+      instrument_id: "binance:BTC/USDT",
+      interval: "1m",
+      start: "2026-01-01T00:00:00.000Z",
+      end: "2027-01-02T00:00:00.000Z",
+      format: "csv",
+    });
+    expect(postCount).toBe(1);
+    expect(postBody).not.toHaveProperty("instrument_ids");
+    expect(postBody).not.toHaveProperty("zip");
+
+    // The refetched running job blocks the remaining chunks.
+    expect(
+      (await screen.findAllByText(/已有运行中的 Export Job/)).length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getByRole("button", { name: "创建第 2 段 Export Job" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "创建第 3 段 Export Job" }),
+    ).toBeDisabled();
+  });
+
+  it("surfaces a quota error when creating a split chunk", async () => {
+    const splitDecision = classifyExportRange(
+      START,
+      new Date(START.getTime() + 800 * 24 * 60 * 60 * 1000),
+    );
+    server.use(
+      listHandler([]),
+      http.post("*/api/v1/admin/export-jobs", () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: "quota_exceeded",
+              message: "too many running jobs",
+              details: {
+                quota: "running_jobs",
+                limit: 1,
+                current: 1,
+                retry_after_s: 30,
+              },
+              request_id: "quota-split-request-id",
+            },
+          },
+          { status: 429, headers: { "Retry-After": "30" } },
+        ),
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderPanel({ decision: splitDecision });
+    await screen.findByText("当前没有可见的 Export Job。");
+    await user.click(
+      screen.getByRole("button", { name: "创建第 1 段 Export Job" }),
+    );
+    await user.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "确认创建该段",
+      }),
+    );
+
+    expect(
+      (await screen.findAllByText(/配额已用尽（running_jobs，上限 1）/)).length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText(/quota-split-request-id/).length,
+    ).toBeGreaterThan(0);
   });
 
   it("fails closed when the export_job capability is unsupported", async () => {
@@ -464,13 +611,32 @@ describe("CONTRACT TARGET (Admin API, MSW only — not integrated)", () => {
     );
     renderPanel({
       subject: OPERATOR,
-      capability: { state: "unsupported" },
+      capability: adminCapability(true, { state: "unsupported" }),
     });
 
     expect(
       screen.getByRole("button", { name: "创建 Export Job" }),
     ).toBeDisabled();
     expect(screen.getAllByText("后端未实现").length).toBeGreaterThan(0);
+    expect(requests).toBe(0);
+  });
+
+  it("disables job creation and listing when the Admin contract is incompatible", async () => {
+    let requests = 0;
+    server.use(
+      listHandler([], () => {
+        requests += 1;
+      }),
+    );
+    renderPanel({ subject: OPERATOR, capability: adminCapability(false) });
+
+    expect(
+      screen.getByRole("button", { name: "创建 Export Job" }),
+    ).toBeDisabled();
+    expect(screen.getAllByText("Admin API 版本不兼容").length).toBeGreaterThan(
+      0,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
     expect(requests).toBe(0);
   });
 

@@ -126,10 +126,6 @@ export function BarsPage() {
   );
 
   const { subject, capability, session } = useRuntimeMode();
-  const exportJobCapability =
-    capability?.mode === "admin-api"
-      ? (capability.document?.capabilities.export_job ?? null)
-      : null;
 
   const csvQuery =
     applied.instrumentId !== null && applied.interval !== null
@@ -426,7 +422,7 @@ export function BarsPage() {
         query={exportQuery}
         decision={decision}
         subject={subject}
-        capability={exportJobCapability}
+        capability={capability}
         currentSubject={session?.user?.subject ?? null}
         now={now}
       />

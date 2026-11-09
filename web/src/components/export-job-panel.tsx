@@ -1,7 +1,7 @@
 import { useInfiniteQuery, useMutation } from "@tanstack/react-query";
 import { Download, RefreshCw, XCircle } from "lucide-react";
-import { useId } from "react";
-import type { CapabilityEntry } from "@/api/capabilities";
+import { useId, useState } from "react";
+import type { CapabilityState } from "@/api/capabilities";
 import type { ExportJob, ExportJobStatus } from "@/api/endpoints/admin";
 import {
   cancelExportJob,
@@ -12,14 +12,21 @@ import {
   listExportJobs,
 } from "@/api/endpoints/export-jobs";
 import { HttpError } from "@/api/http/types";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ErrorState, LoadingState } from "@/components/states";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Panel, PanelDescription, PanelHeader, PanelTitle } from "@/components/ui/panel";
-import type { ExportPathDecision } from "@/lib/export-policy";
+import type {
+  ExportPathDecision,
+  ExportRangeChunk,
+} from "@/lib/export-policy";
 import { formatBytes } from "@/lib/format";
 import {
-  capabilityDisabledReason,
+  adminCapabilityAvailability,
+  CAPABILITY_KEYS,
+} from "@/runtime/capability-gates";
+import {
   disabledReasonFor,
   type PermissionSubject,
 } from "@/runtime/permissions";
@@ -47,8 +54,8 @@ export interface ExportJobPanelProps {
   query: ExportJobQuery | null;
   decision: ExportPathDecision;
   subject: PermissionSubject;
-  /** `capabilities.export_job`; undefined means fail closed. */
-  capability?: CapabilityEntry | null;
+  /** Full runtime capability state; the shared gate reads mode/version/key. */
+  capability?: CapabilityState | null;
   /** Session subject; used only for the per-user "one running job" hint. */
   currentSubject?: string | null;
   className?: string;
@@ -249,8 +256,14 @@ export function ExportJobPanel({
   const reasonId = useId();
   const role = subject.kind === "role" ? subject.role : null;
   const roleReason = disabledReasonFor(subject, "export.job.create");
+  const availability = adminCapabilityAvailability(
+    capability ?? null,
+    CAPABILITY_KEYS.exportJob,
+  );
   const capabilityReason =
-    subject.kind === "role" ? capabilityDisabledReason(capability) : null;
+    subject.kind === "role" && availability.kind === "disabled"
+      ? availability.reason
+      : null;
   const blockedReason = roleReason ?? capabilityReason;
   const jobsEnabled = role !== null && blockedReason === null;
   const currentTime = now ?? new Date();
@@ -296,20 +309,35 @@ export function ExportJobPanel({
         job.created_by.subject === currentSubject),
   );
 
+  const [pendingChunk, setPendingChunk] = useState<{
+    index: number;
+    chunk: ExportRangeChunk;
+  } | null>(null);
+  const [createdChunkStarts, setCreatedChunkStarts] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
+
   const createMutation = useMutation({
-    mutationFn: () => {
+    mutationFn: (range: ExportRangeChunk) => {
       if (!query) {
         throw new Error("missing query");
       }
       return createExportJob({
         instrument_id: query.instrumentId,
         interval: query.interval,
-        start: toQueryInstant(query.start),
-        end: toQueryInstant(query.end),
+        start: toQueryInstant(range.start),
+        end: toQueryInstant(range.end),
         format: "csv",
       });
     },
-    onSuccess: () => {
+    onSuccess: (_job, range) => {
+      if (decision.kind === "split") {
+        setCreatedChunkStarts((previous) => {
+          const next = new Set(previous);
+          next.add(range.start.toISOString());
+          return next;
+        });
+      }
       void jobsQuery.refetch();
     },
   });
@@ -341,6 +369,34 @@ export function ExportJobPanel({
   const createEnabled =
     jobsEnabled && decision.kind === "job" && query !== null && !hasActiveJob;
 
+  /**
+   * >366-day ranges may only be created one chunk at a time. The server owns
+   * the per-user one-running-job quota; this gate avoids a second request
+   * while one is in flight, one is running, or the chunk was already created
+   * in this session.
+   */
+  function splitChunkBlockReason(chunk: ExportRangeChunk): string | null {
+    if (blockedReason) {
+      return blockedReason.message;
+    }
+    if (!query) {
+      return "请先选择 InstrumentId、Bar Interval 与时间范围。";
+    }
+    if (hasActiveJob) {
+      return "已有运行中的 Export Job；每个用户默认最多 1 个（queued / running / cancelling）。";
+    }
+    if (createMutation.isPending) {
+      return "正在创建 Export Job；请等待当前任务进入运行状态后再创建下一段。";
+    }
+    if (createdChunkStarts.has(chunk.start.toISOString())) {
+      return "该段已创建 Export Job；不会重复创建。";
+    }
+    return null;
+  }
+
+  const splitCreateEnabled =
+    jobsEnabled && query !== null && !hasActiveJob && !createMutation.isPending;
+
   const createError =
     createMutation.error instanceof HttpError ? createMutation.error : null;
   const cancelError =
@@ -371,7 +427,11 @@ export function ExportJobPanel({
         <Button
           disabled={!createEnabled}
           aria-describedby={createDisabledMessage ? reasonId : undefined}
-          onClick={() => createMutation.mutate()}
+          onClick={() => {
+            if (query) {
+              createMutation.mutate({ start: query.start, end: query.end });
+            }
+          }}
         >
           {createMutation.isPending ? "创建中…" : "创建 Export Job"}
         </Button>
@@ -396,20 +456,50 @@ export function ExportJobPanel({
       {decision.kind === "split" ? (
         <div className="mt-3 border-l-2 border-status-warning pl-2 text-xs">
           <p className="font-medium text-status-warning">
-            需要拆分为 {decision.chunkCount} 个 Export Job（每段 ≤366 天）：
+            需要拆分为 {decision.chunkCount} 个 Export Job（每段 ≤366 天）。
+            逐段创建；一次只能有一个运行中的 Job，配额由服务端执行。
           </p>
-          <ul className="mt-1 flex flex-col gap-0.5 font-mono text-muted-foreground">
-            {decision.chunks.slice(0, 3).map((chunk) => (
-              <li key={chunk.start.toISOString()}>
-                {chunk.start.toISOString()} → {chunk.end.toISOString()}
-              </li>
-            ))}
+          <p className="mt-1 text-muted-foreground">
+            每段是独立的单 Instrument Export Job；不会合并为多 Instrument
+            ZIP，也不会自动拼接 CSV。
+          </p>
+          <ul
+            data-testid="export-split-chunks"
+            className="mt-2 flex max-h-72 flex-col gap-1 overflow-auto pr-1"
+          >
+            {decision.chunks.map((chunk, index) => {
+              const blockReason = splitChunkBlockReason(chunk);
+              const reasonId = `export-chunk-${index}-reason`;
+              return (
+                <li
+                  key={chunk.start.toISOString()}
+                  className="flex flex-wrap items-center gap-2"
+                >
+                  <span className="min-w-0 flex-1 font-mono text-muted-foreground">
+                    第 {index + 1} / {decision.chunkCount} 段：{" "}
+                    {chunk.start.toISOString()} → {chunk.end.toISOString()}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!splitCreateEnabled || blockReason !== null}
+                    aria-describedby={blockReason ? reasonId : undefined}
+                    onClick={() => setPendingChunk({ index, chunk })}
+                  >
+                    创建第 {index + 1} 段 Export Job
+                  </Button>
+                  {blockReason ? (
+                    <span
+                      id={reasonId}
+                      className="w-full text-[11px] text-faint-foreground"
+                    >
+                      {blockReason}
+                    </span>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
-          {decision.chunkCount > 3 ? (
-            <p className="mt-1 text-faint-foreground">
-              其余 {decision.chunkCount - 3} 段未列出。
-            </p>
-          ) : null}
         </div>
       ) : null}
 
@@ -513,6 +603,45 @@ export function ExportJobPanel({
             : blockedReason?.message}
         </p>
       )}
+
+      <ConfirmDialog
+        open={pendingChunk !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setPendingChunk(null);
+          }
+        }}
+        title={
+          pendingChunk
+            ? `确认创建第 ${pendingChunk.index + 1} 段 Export Job`
+            : "确认创建 Export Job"
+        }
+        description={
+          pendingChunk ? (
+            <span>
+              第 {pendingChunk.index + 1} / {decision.chunkCount} 段：
+              <span className="font-mono">
+                {" "}
+                {pendingChunk.chunk.start.toISOString()} →{" "}
+                {pendingChunk.chunk.end.toISOString()}
+              </span>
+              。将创建一个独立的单 Instrument Export Job；不会合并为多
+              Instrument ZIP。每段 ≤366 天，创建后需等待其不再运行才能创建下一段。
+            </span>
+          ) : undefined
+        }
+        confirmLabel="确认创建该段"
+        submitting={createMutation.isPending}
+        requireReason={false}
+        onConfirm={() => {
+          if (!pendingChunk) {
+            return;
+          }
+          const chunk = pendingChunk.chunk;
+          setPendingChunk(null);
+          createMutation.mutate(chunk);
+        }}
+      />
     </Panel>
   );
 }
