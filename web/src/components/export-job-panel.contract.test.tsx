@@ -376,7 +376,7 @@ describe("CONTRACT TARGET (Admin API, MSW only — not integrated)", () => {
     expect(
       screen.getByText(/e3b0c44298fc1c149afbf4c8996fb924abc/),
     ).toBeInTheDocument();
-    expect(screen.getAllByText(/11.8 MiB/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/11.77 MB/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/450,000 行/).length).toBeGreaterThan(0);
     expect(screen.getByText(/2026-11-10T12:00:00.000000000Z/)).toBeInTheDocument();
   });

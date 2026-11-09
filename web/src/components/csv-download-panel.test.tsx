@@ -84,7 +84,7 @@ describe("CSV download progress", () => {
       emitProgress?.({ loadedBytes: 1024, totalBytes: null, percent: null });
     });
     expect(
-      screen.getByText(/已下载 1.0 KiB \/ 总量未知/),
+      screen.getByText(/已下载 1 KB \/ 总量未知/),
     ).toBeInTheDocument();
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
 

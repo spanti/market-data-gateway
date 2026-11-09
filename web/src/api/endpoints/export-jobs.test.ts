@@ -85,9 +85,9 @@ describe("Export Job state helpers (contract target)", () => {
 
   it("formats byte sizes without inventing a value", () => {
     expect(formatBytes(512)).toBe("512 B");
-    expect(formatBytes(1536)).toBe("1.5 KiB");
-    expect(formatBytes(12_345_678)).toBe("11.8 MiB");
-    expect(formatBytes(null)).toBe("未知");
+    expect(formatBytes(1536)).toBe("1.5 KB");
+    expect(formatBytes(12_345_678)).toBe("11.77 MB");
+    expect(formatBytes(null)).toBe("—");
   });
 });
 
