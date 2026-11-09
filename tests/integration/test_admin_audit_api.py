@@ -722,7 +722,8 @@ def test_capabilities_announce_operator_audit_when_enabled(
         "edit": False,
         "delete": False,
     }
-    assert schema_version == 3
+    # The lifecycle migration (ticket 05) advances the shared schema.
+    assert schema_version == 5
 
 
 def test_operator_audit_stays_unsupported_when_the_adapter_is_disabled(

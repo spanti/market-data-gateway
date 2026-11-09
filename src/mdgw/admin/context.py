@@ -26,6 +26,7 @@ from mdgw.admin.auth.service import AdminAuth
 from mdgw.admin.auth.store import AuthStore
 from mdgw.admin.capabilities import AdapterStatus
 from mdgw.admin.db import AdminStore
+from mdgw.admin.lifecycle.runtime import AdminLifecycle
 from mdgw.admin.proxy import ClientIpResolver
 from mdgw.config import ensure_admin_store_is_independent
 
@@ -44,9 +45,16 @@ logger = logging.getLogger(__name__)
 
 #: Adapters/capabilities this build implements. Later tickets extend the
 #: registration through ``register_capabilities``.
-_BUILT_ADAPTERS = frozenset({"admin_store", "oidc", "audit_store"})
+_BUILT_ADAPTERS = frozenset(
+    {"admin_store", "oidc", "audit_store", "supervisor"}
+)
 _BUILT_CAPABILITIES = frozenset(
-    {"oidc_session", "ws_admin_session", "operator_audit"}
+    {
+        "oidc_session",
+        "ws_admin_session",
+        "operator_audit",
+        "service_lifecycle",
+    }
 )
 _CAPABILITY_DETAILS = {
     "ws_admin_session": {
@@ -57,6 +65,9 @@ _CAPABILITY_DETAILS = {
         "export": False,
         "edit": False,
         "delete": False,
+    },
+    "service_lifecycle": {
+        "actions": ["start", "stop", "reload"],
     },
 }
 
@@ -97,6 +108,8 @@ class AdminContext:
         self._auth_lock = threading.Lock()
         self._audit: AuditWriter | None = None
         self._audit_lock = threading.Lock()
+        self._lifecycle: AdminLifecycle | None = None
+        self._lifecycle_lock = threading.Lock()
         self._oidc_transport = oidc_transport
         self._clock = clock
         self._environ = environ
@@ -108,6 +121,7 @@ class AdminContext:
             name: dict(detail)
             for name, detail in _CAPABILITY_DETAILS.items()
         }
+        self.register_cleanup(self._close_lifecycle)
 
     @property
     def enabled(self) -> bool:
@@ -148,6 +162,37 @@ class AdminContext:
                     auth.security_event_sink = audit.record_security_event
                 self._auth = auth
             return self._auth
+
+    @property
+    def lifecycle(self) -> AdminLifecycle:
+        """Service Instance lifecycle adapter; opening it opens the store."""
+        if not self.enabled:
+            msg = "Admin API is disabled"
+            raise RuntimeError(msg)
+        existing = self._lifecycle
+        if existing is not None:
+            return existing
+        self.ensure_open()
+        return self._lifecycle_facade()
+
+    def _lifecycle_facade(self) -> AdminLifecycle:
+        existing = self._lifecycle
+        if existing is not None:
+            return existing
+        with self._lifecycle_lock:
+            if self._lifecycle is None:
+                self._lifecycle = AdminLifecycle(
+                    config=self.config,
+                    db_path=self.db_path,
+                    environ=self._environ,
+                )
+            return self._lifecycle
+
+    def _close_lifecycle(self) -> None:
+        lifecycle = self._lifecycle
+        self._lifecycle = None
+        if lifecycle is not None:
+            lifecycle.close()
 
     @property
     def audit(self) -> AuditWriter:
@@ -247,6 +292,7 @@ class AdminContext:
             )
         else:
             statuses["oidc"] = AdapterStatus("available")
+        statuses["supervisor"] = self._lifecycle_facade().adapter_status()
         return statuses
 
     def register_cleanup(self, callback: Callable[[], None]) -> None:

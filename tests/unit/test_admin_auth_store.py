@@ -66,9 +66,9 @@ def _session(now_ns: int = 1_000 * SECONDS) -> SessionRecord:
 def test_migrations_are_discovered_in_numeric_order() -> None:
     versions = [version for version, _ in discover_migrations()]
 
-    # 003 is ticket 03's Operator Audit Event schema.
-    assert versions == [1, 2, 3]
-    assert ADMIN_STORE_SCHEMA_VERSION == 3
+    # 003 is ticket 03's audit schema; 005 is ticket 05's lifecycle schema.
+    assert versions == [1, 2, 3, 5]
+    assert ADMIN_STORE_SCHEMA_VERSION == 5
 
 
 def test_auth_tables_exist_in_the_management_database(

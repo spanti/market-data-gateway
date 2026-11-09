@@ -21,6 +21,7 @@ from mdgw.admin.auth.routes import (
     create_protected_auth_router,
 )
 from mdgw.admin.capabilities import build_capabilities_document
+from mdgw.admin.lifecycle.routes import create_lifecycle_router
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -54,6 +55,8 @@ def register_feature(factory: Callable[[AdminContext], APIRouter]) -> None:
 
 #: Ticket 03: read-only Operator Audit Event query routes.
 register_feature(create_audit_router)
+#: Ticket 05: Service Instance lifecycle + Operation query routes.
+register_feature(create_lifecycle_router)
 
 
 def create_admin_router(context: AdminContext) -> APIRouter:
