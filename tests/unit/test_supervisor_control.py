@@ -313,6 +313,46 @@ def test_oversized_messages_are_rejected_before_parsing(
         store.close()
 
 
+def test_a_repeated_key_returns_the_original_operation_without_a_new_one(
+    tmp_path: Path,
+) -> None:
+    supervisor, store = _supervisor(tmp_path)
+    server = SupervisorControlServer(
+        supervisor, host=HOST, port=0, token=TOKEN
+    )
+    server.start()
+    try:
+        body_hash = "a" * 64
+        payload = _start_payload(
+            operation_id="op_first",
+            idempotency_key="key-repeat",
+            idempotency_body_hash=body_hash,
+        )
+        first = _call(server.bound_port, CONTROL_ACTION_START, payload)
+        assert first["ok"] is True
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            operation = store.get_operation("op_first")
+            if operation is not None and operation.status == "succeeded":
+                break
+            time.sleep(0.01)
+
+        repeat = _call(
+            server.bound_port,
+            CONTROL_ACTION_START,
+            {
+                **payload,
+                "operation_id": "op_second",
+            },
+        )
+        assert repeat["ok"] is True
+        assert repeat["operation"]["operation_id"] == "op_first"
+        assert store.get_operation("op_second") is None
+    finally:
+        server.stop()
+        store.close()
+
+
 def test_client_disconnect_after_acceptance_does_not_cancel_the_operation(
     tmp_path: Path,
 ) -> None:

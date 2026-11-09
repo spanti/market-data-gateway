@@ -125,6 +125,10 @@ class LifecycleRecorder(Protocol):
         self, operation_id: str
     ) -> OperationRecord | None: ...
 
+    def find_idempotent(
+        self, key: str, actor_subject: str
+    ) -> OperationRecord | None: ...
+
 
 class LifecycleRejectedError(Exception):
     """A lifecycle request was refused before anything was accepted."""
@@ -602,6 +606,26 @@ class Supervisor:
                 msg,
                 details={"field": "action", "allowed": sorted(ACTION_KINDS)},
             )
+        if idempotency_key is not None:
+            # A replay must win over state validation: the original operation
+            # may have changed the instance state (for example start -> running),
+            # and re-applying it must still return the original row.
+            existing = self._lifecycle.find_idempotent(
+                idempotency_key, actor_subject
+            )
+            if existing is not None:
+                if (
+                    existing.idempotency_body_hash
+                    != idempotency_body_hash
+                ):
+                    msg = (
+                        "the idempotency key was already used with a "
+                        "different request body"
+                    )
+                    raise LifecycleRejectedError(
+                        _CODE_IDEMPOTENCY_KEY_REUSE, msg
+                    )
+                return existing
         instance = self._instances.get(instance_id)
         if instance is None:
             msg = "service instance not found"

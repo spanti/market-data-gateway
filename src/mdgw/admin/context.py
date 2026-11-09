@@ -293,6 +293,16 @@ class AdminContext:
         else:
             statuses["oidc"] = AdapterStatus("available")
         statuses["supervisor"] = self._lifecycle_facade().adapter_status()
+        if not self.config.adapters.prometheus:
+            statuses["prometheus"] = AdapterStatus(
+                "unsupported", "disabled by configuration"
+            )
+        elif not self.config.monitoring.prometheus_url:
+            statuses["prometheus"] = AdapterStatus(
+                "unavailable", "prometheus_url is not configured"
+            )
+        else:
+            statuses["prometheus"] = AdapterStatus("available")
         return statuses
 
     def register_cleanup(self, callback: Callable[[], None]) -> None:

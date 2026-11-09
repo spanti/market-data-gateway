@@ -22,6 +22,7 @@ from mdgw.admin.auth.routes import (
 )
 from mdgw.admin.capabilities import build_capabilities_document
 from mdgw.admin.lifecycle.routes import create_lifecycle_router
+from mdgw.admin.monitoring.routes import create_monitoring_router
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -52,6 +53,11 @@ def register_feature(factory: Callable[[AdminContext], APIRouter]) -> None:
     """Register one feature router factory for every admin app."""
     FEATURE_ROUTER_FACTORIES.append(factory)
 
+
+# Ticket 09: the authenticated, fixed-template monitoring proxy. It registers
+# its ``prometheus`` adapter / ``monitoring_proxy`` capability through
+# ``AdminContext.register_capabilities`` when its router is built.
+register_feature(create_monitoring_router)
 
 #: Ticket 03: read-only Operator Audit Event query routes.
 register_feature(create_audit_router)

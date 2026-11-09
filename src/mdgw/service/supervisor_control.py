@@ -293,6 +293,10 @@ class SupervisorControlServer:
         response = success_response(
             correlation, operation=record.to_wire()
         )
+        if record.operation_id != payload.operation_id:
+            # An idempotent replay of an already accepted operation: return
+            # the original row and never schedule another execution.
+            return response, None
         after = _BackgroundExecution(self._supervisor, record)
         return response, after
 
