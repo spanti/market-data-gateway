@@ -101,8 +101,8 @@ def _config(control_port: int, reference: Path) -> GatewayConfig:
                 "enabled": False,
                 "adapters": {"collector_control": True},
                 "control": {
-                    "host": HOST,
-                    "port": control_port,
+                    "collector_host": HOST,
+                    "collector_port": control_port,
                     "token_env": TOKEN_ENV,
                     "timeout_s": 2.0,
                 },

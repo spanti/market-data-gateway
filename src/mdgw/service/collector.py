@@ -343,18 +343,18 @@ class CollectorService:
         control = self.config.admin.control
         source = self._environ if self._environ is not None else os.environ
         token = str(source.get(control.token_env, "") or "")
-        if control.port <= 0 or not token:
+        if control.collector_port <= 0 or not token:
             logger.warning(
                 "collector control plane is enabled but not configured",
                 extra={
                     "event": "collector.control_plane_not_configured",
-                    "port": control.port,
+                    "port": control.collector_port,
                 },
             )
             return
         server = ControlPlaneServer(
-            host=control.host,
-            port=control.port,
+            host=control.collector_host,
+            port=control.collector_port,
             token=token,
             max_message_bytes=control.max_message_bytes,
             request_timeout_s=control.timeout_s,
@@ -457,7 +457,7 @@ class CollectorService:
         def find(handler: Any) -> Any:
             if getattr(handler, "name", None) == feed_name:
                 return handler
-            for child in getattr(handler, "_handlers", ()):
+            for child in getattr(handler, "handlers", ()):
                 found = find(child)
                 if found is not None:
                     return found

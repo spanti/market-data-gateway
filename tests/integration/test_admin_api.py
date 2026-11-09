@@ -427,6 +427,68 @@ def test_a_second_live_context_cannot_claim_the_same_store(
         second.close()
 
 
+# -- live lease heartbeat (S4) ----------------------------------------------
+
+
+def test_heartbeat_keeps_a_live_instance_lease_beyond_the_ttl(
+    tmp_path: Path,
+) -> None:
+    config = _admin_config(tmp_path, instance_lease_s=0.3)
+    first = AdminContext(config=config, storage_root=tmp_path)
+    first.ensure_open()
+    try:
+        assert first._lease_thread is not None
+        assert first._lease_thread.is_alive()
+        # Without a heartbeat the lease would expire after 0.3s and a second
+        # live instance could take over.
+        time.sleep(0.6)
+        probe = AdminStore(first.db_path, lease_ttl_s=0.3)
+        try:
+            with pytest.raises(AdminInstanceLockedError):
+                probe.claim_instance("probe-while-live")
+        finally:
+            probe.close()
+        assert first.db is not None
+        assert first.db.holder() == first.instance_id
+    finally:
+        first.close()
+
+
+def test_a_stopped_heartbeat_lets_another_instance_take_over(
+    tmp_path: Path,
+) -> None:
+    config = _admin_config(tmp_path, instance_lease_s=0.3)
+    first = AdminContext(config=config, storage_root=tmp_path)
+    first.ensure_open()
+    try:
+        first._stop_lease_heartbeat()
+        time.sleep(0.6)
+        second = AdminStore(first.db_path, lease_ttl_s=0.3)
+        try:
+            second.claim_instance("probe-after-stall")
+            assert second.holder() == "probe-after-stall"
+        finally:
+            second.close()
+    finally:
+        first.close()
+
+
+def test_close_stops_the_lease_heartbeat_thread(tmp_path: Path) -> None:
+    context = AdminContext(
+        config=_admin_config(tmp_path, instance_lease_s=0.3),
+        storage_root=tmp_path,
+    )
+    context.ensure_open()
+    thread = context._lease_thread
+    assert thread is not None
+    assert thread.is_alive()
+
+    context.close()
+
+    assert context._lease_thread is None
+    assert not thread.is_alive()
+
+
 def test_api_service_mounts_admin_and_releases_the_lease_on_stop(
     tmp_path: Path,
 ) -> None:

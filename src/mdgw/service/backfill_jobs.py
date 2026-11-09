@@ -47,6 +47,17 @@ from mdgw.backfill_job_plan import (
     BASE_INTERVAL,
     plan_for_interval,
 )
+from mdgw.backfill_job_status import (
+    ACTIVE_STATUSES,
+    CANCELLED,
+    CANCELLING,
+    FAILED,
+    PARTIALLY_SUCCEEDED,
+    QUEUED,
+    RUNNING,
+    SUCCEEDED,
+    TERMINAL_STATUSES,
+)
 from mdgw.core.time import datetime_to_ns, ns_to_datetime, to_utc, utc_now
 from mdgw.normalize.batch import normalize_batch
 
@@ -59,19 +70,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-QUEUED = "queued"
-RUNNING = "running"
-SUCCEEDED = "succeeded"
-PARTIALLY_SUCCEEDED = "partially_succeeded"
-FAILED = "failed"
-CANCELLING = "cancelling"
-CANCELLED = "cancelled"
 UNKNOWN = "unknown"
 
-ACTIVE_STATES = frozenset({QUEUED, RUNNING, CANCELLING})
-TERMINAL_STATES = frozenset(
-    {SUCCEEDED, PARTIALLY_SUCCEEDED, FAILED, CANCELLED}
-)
+ACTIVE_STATES = frozenset(ACTIVE_STATUSES)
+TERMINAL_STATES = frozenset(TERMINAL_STATUSES)
 
 HISTORY_UNSUPPORTED = "history_unsupported"
 BACKFILL_FAILED = "backfill_failed"

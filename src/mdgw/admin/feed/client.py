@@ -9,15 +9,20 @@ failures into an explicit *drift* reason. It never invents an acknowledgement.
 
 from __future__ import annotations
 
-import os
-from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
+from mdgw.admin.collector_control import (
+    REASON_COLLECTOR_REJECTED,
+    REASON_COLLECTOR_UNAVAILABLE,
+    REASON_NOT_APPLIED,
+    REASON_NOT_CONFIGURED,
+    REASON_TIMEOUT,
+    CollectorControlEndpoint,
+    CollectorControlError,
+)
+from mdgw.core.hashing import sha256_hex
 from mdgw.service.control_plane import (
     FEED_SUBSCRIPTION_SYNC_ACTION,
-    ControlPlaneClient,
-    ControlRequestError,
-    ControlTransportError,
     FeedSubscriptionDesired,
     FeedSubscriptionSyncPayload,
 )
@@ -27,12 +32,6 @@ if TYPE_CHECKING:
 
     from mdgw.admin.feed.models import FeedSubscription
     from mdgw.config import AdminControlConfig
-
-REASON_NOT_CONFIGURED = "not_configured"
-REASON_COLLECTOR_UNAVAILABLE = "collector_unavailable"
-REASON_TIMEOUT = "timeout"
-REASON_NOT_APPLIED = "not_applied"
-REASON_COLLECTOR_REJECTED = "collector_rejected"
 
 
 class CollectorDispatchError(RuntimeError):
@@ -60,31 +59,11 @@ class CollectorControlClient:
         *,
         environ: Mapping[str, str] | None = None,
     ) -> None:
-        self._config = config
-        self._environ = environ
-
-    def _token(self) -> str:
-        source = self._environ if self._environ is not None else os.environ
-        return str(source.get(self._config.token_env, "") or "")
+        self._endpoint = CollectorControlEndpoint(config, environ=environ)
 
     @property
     def configured(self) -> bool:
-        return self._config.port > 0 and bool(self._token())
-
-    def _transport(self) -> ControlPlaneClient:
-        token = self._token()
-        if self._config.port <= 0 or not token:
-            raise CollectorDispatchError(
-                REASON_NOT_CONFIGURED,
-                "the collector control plane is not configured",
-            )
-        return ControlPlaneClient(
-            host=self._config.host,
-            port=self._config.port,
-            token=token,
-            max_message_bytes=self._config.max_message_bytes,
-            timeout_s=self._config.timeout_s,
-        )
+        return self._endpoint.configured
 
     def sync_subscriptions(
         self,
@@ -116,26 +95,24 @@ class CollectorControlClient:
         payload = FeedSubscriptionSyncPayload(
             sync_version=sync_version, subscriptions=desired
         )
+        correlation = sha256_hex(request_id)[:40]
         try:
-            correlation = sha256(request_id.encode("utf-8")).hexdigest()[:40]
-            result = self._transport().call(
+            result = self._endpoint.call(
                 FEED_SUBSCRIPTION_SYNC_ACTION,
                 payload,
                 correlation_id=f"corr_{correlation}",
-                timeout_ms=int(self._config.timeout_s * 1000),
             )
-        except ControlTransportError as exc:
-            reason = (
-                REASON_TIMEOUT
-                if exc.reason == "timeout"
-                else REASON_COLLECTOR_UNAVAILABLE
+        except CollectorControlError as exc:
+            # Transport failures keep the stable ``collector_unavailable``
+            # code (the reason distinguishes timeout); a server-side refusal
+            # carries the Collector's own error code.
+            code = (
+                exc.code
+                if exc.reason == REASON_COLLECTOR_REJECTED
+                else "collector_unavailable"
             )
-            raise CollectorDispatchError(reason, str(exc)) from exc
-        except ControlRequestError as exc:
             raise CollectorDispatchError(
-                REASON_NOT_APPLIED,
-                "the collector rejected the subscription sync",
-                code=exc.code,
+                exc.reason, exc.message, code=code
             ) from exc
         collector_instance_id = result.get("collector_instance_id")
         entries = result.get("subscriptions")

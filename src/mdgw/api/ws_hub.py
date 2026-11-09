@@ -5,10 +5,10 @@ The hub lives on the server's event loop and depends only on the
 objects directly: they hand already-encoded messages to the hub with
 `loop.call_soon_threadsafe`.
 
-Each session owns one bounded queue. A producer that outpaces the socket drops
-the oldest queued message, accumulates `dropped`, and the session reports a
-throttled `lag_notice` on its next write. The connection is never closed for
-being slow.
+Each session owns one outbound queue whose Slow Consumer policy is either
+enabled (bounded by ``queue_size``; the oldest message is dropped and a
+throttled ``lag_notice`` is reported) or disabled (nothing is dropped and no
+notice is emitted). The connection is never closed for being slow.
 """
 
 from __future__ import annotations
@@ -53,20 +53,26 @@ def valid_topics(value: Any) -> list[str]:
 
 
 class WebSocketSession:
-    """One client connection with a bounded outbound queue."""
+    """One client connection with a policy-bounded outbound queue."""
 
     def __init__(
         self,
         ws: WebSocketTransport,
         *,
+        enabled: bool,
         queue_size: int,
         lag_notice_interval_s: float,
     ) -> None:
         self.session_id = uuid4().hex
         self._ws = ws
-        self._queue: asyncio.Queue[EventMessage] = asyncio.Queue(maxsize=queue_size)
+        # The queue itself is unbounded: the Slow Consumer policy below is
+        # enforced in ``enqueue`` so a hot apply never mutates asyncio.Queue's
+        # private ``_maxsize`` and never strands the writer task.
+        self._queue: asyncio.Queue[EventMessage] = asyncio.Queue()
         self._subscriptions: set[str] = set()
         self._loop = asyncio.get_running_loop()
+        self._enabled = enabled
+        self._queue_size = queue_size
         self._lag_notice_interval_s = lag_notice_interval_s
 
         self._dropped = 0
@@ -97,20 +103,30 @@ class WebSocketSession:
 
     @property
     def queue_size(self) -> int:
-        return self._queue.maxsize
+        return self._queue_size
+
+    @property
+    def slow_consumer_enabled(self) -> bool:
+        return self._enabled
 
     @property
     def lag_notice_interval_s(self) -> float:
         return self._lag_notice_interval_s
 
     def apply_flow_control(
-        self, *, queue_size: int, lag_notice_interval_s: float
+        self,
+        *,
+        enabled: bool,
+        queue_size: int,
+        lag_notice_interval_s: float,
     ) -> None:
         """Hot-apply the Slow Consumer policy to this live session.
 
-        Called on the event loop. Shrinking the queue drops the oldest queued
-        messages immediately (the same policy a full queue already uses) and
-        keeps the writer task waiting on the same queue object.
+        Called on the event loop. When enabled, shrinking the bound drops the
+        oldest queued messages immediately (the same policy a full queue
+        already uses) and keeps the writer task waiting on the same queue
+        object. When disabled, no message is dropped and any pending
+        ``lag_notice`` is cancelled.
         """
         if queue_size < 1:
             msg = "queue_size must be >= 1"
@@ -118,15 +134,23 @@ class WebSocketSession:
         if lag_notice_interval_s < 0:
             msg = "lag_notice_interval_s must be >= 0"
             raise ValueError(msg)
+        self._enabled = enabled
         self._lag_notice_interval_s = lag_notice_interval_s
+        self._queue_size = queue_size
         queue = self._queue
-        if queue_size == queue.maxsize:
+        if not enabled:
+            self._clear_pending_lag_notice()
             return
         while queue.qsize() > queue_size:
             queue.get_nowait()
-        # asyncio.Queue exposes `maxsize` read-only; bound the existing queue
-        # in place so the writer task is never stranded on a replaced queue.
-        queue._maxsize = queue_size
+
+    def _clear_pending_lag_notice(self) -> None:
+        self._lag_pending = False
+        self._lag_since = None
+        self._dropped = 0
+        if self._lag_handle is not None:
+            self._lag_handle.cancel()
+            self._lag_handle = None
 
     def matches(self, topic: str) -> bool:
         # Exact and prefix subscriptions share one rule: a topic is delivered
@@ -139,7 +163,7 @@ class WebSocketSession:
     def enqueue(self, topic: str, data: dict[str, Any]) -> None:
         if self._closed:
             return
-        if self._queue.full():
+        if self._enabled and self._queue.qsize() >= self._queue_size:
             with suppress(asyncio.QueueEmpty):
                 self._queue.get_nowait()  # drop the oldest message
             self._dropped += 1
@@ -148,14 +172,19 @@ class WebSocketSession:
         self._queue.put_nowait((topic, data))
 
     def _note_lag(self) -> None:
-        if self._lag_pending:
+        if not self._enabled or self._lag_pending:
             return
         self._lag_pending = True
         self._lag_since = ns_to_iso(datetime_to_ns(utc_now()))
         self._schedule_lag_notice()
 
     def _schedule_lag_notice(self) -> None:
-        if self._closed or self._lag_handle is not None or not self._lag_pending:
+        if (
+            not self._enabled
+            or self._closed
+            or self._lag_handle is not None
+            or not self._lag_pending
+        ):
             return
         delay = 0.0
         if self._last_notice_at:
@@ -250,9 +279,11 @@ class WebSocketHub:
         *,
         queue_size: int = 1000,
         lag_notice_interval_ms: int = 1000,
+        slow_consumer_enabled: bool = True,
     ) -> None:
         self._queue_size = queue_size
         self._lag_notice_interval_s = lag_notice_interval_ms / 1000.0
+        self._slow_consumer_enabled = slow_consumer_enabled
         self._sessions: set[WebSocketSession] = set()
         self._closed = False
 
@@ -273,8 +304,16 @@ class WebSocketHub:
     def lag_notice_interval_ms(self) -> int:
         return round(self._lag_notice_interval_s * 1000)
 
+    @property
+    def slow_consumer_enabled(self) -> bool:
+        return self._slow_consumer_enabled
+
     def apply_flow_control(
-        self, *, queue_size: int, lag_notice_interval_ms: int
+        self,
+        *,
+        enabled: bool,
+        queue_size: int,
+        lag_notice_interval_ms: int,
     ) -> None:
         """Hot-apply WebSocket Slow Consumer settings to the hub.
 
@@ -287,10 +326,12 @@ class WebSocketHub:
         if lag_notice_interval_ms < 0:
             msg = "lag_notice_interval_ms must be >= 0"
             raise ValueError(msg)
+        self._slow_consumer_enabled = enabled
         self._queue_size = queue_size
         self._lag_notice_interval_s = lag_notice_interval_ms / 1000.0
         for session in tuple(self._sessions):
             session.apply_flow_control(
+                enabled=enabled,
                 queue_size=queue_size,
                 lag_notice_interval_s=self._lag_notice_interval_s,
             )
@@ -300,6 +341,7 @@ class WebSocketHub:
             raise _HubClosedError
         session = WebSocketSession(
             ws,
+            enabled=self._slow_consumer_enabled,
             queue_size=self._queue_size,
             lag_notice_interval_s=self._lag_notice_interval_s,
         )

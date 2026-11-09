@@ -17,8 +17,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 import time
 from typing import TYPE_CHECKING, Annotated, Any
@@ -59,13 +57,13 @@ from mdgw.admin.lifecycle.protocol import (
     CONTROL_ACTION_STOP,
 )
 from mdgw.admin.pagination import (
-    InvalidCursorError,
     cursor_page,
-    decode_cursor,
-    encode_cursor,
+    decode_sequence_cursor,
+    encode_sequence_cursor,
     parse_limit,
 )
 from mdgw.api.errors import get_request_id
+from mdgw.core.hashing import canonical_json_sha256, sha256_hex
 from mdgw.core.time import iso_to_ns
 
 if TYPE_CHECKING:
@@ -74,7 +72,6 @@ if TYPE_CHECKING:
 NO_STORE = {"Cache-Control": "no-store"}
 NANOS_PER_SECOND = 1_000_000_000
 _KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,256}$")
-_INVALID_CURSOR_REASON = "invalid_cursor"
 _INVALID_TIMESTAMP_REASON = "invalid_timestamp"
 _KEY_REUSE_REASON = "idempotency_key_reuse"
 _CONTROL_SOURCE = "supervisor"
@@ -90,7 +87,7 @@ _ACTION_CONTROL = {
 class LifecycleActionBody(BaseModel):
     """The contract request body; extra fields are rejected."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     reason: str = ""
     confirm: bool = False
@@ -197,7 +194,7 @@ def create_lifecycle_router(context: AdminContext) -> APIRouter:
             maximum=context.config.limits.page_max,
         )
         before_sequence = (
-            None if cursor is None else _cursor_sequence(cursor)
+            None if cursor is None else decode_sequence_cursor(cursor)
         )
         rows = context.lifecycle.store.query_operations(
             OperationQuery(
@@ -213,7 +210,7 @@ def create_lifecycle_router(context: AdminContext) -> APIRouter:
         has_more = len(rows) > page_limit
         items = rows[:page_limit]
         next_cursor = (
-            encode_cursor({"sequence": items[-1].sequence})
+            encode_sequence_cursor(items[-1].sequence)
             if has_more and items
             else None
         )
@@ -319,7 +316,7 @@ def _handle_action(  # ruff: ignore[too-many-arguments, too-many-branches, too-m
     now_ns = int(time.time_ns())
     operation_id = f"op_{request_id.removeprefix('req_')}"
     if len(operation_id) > 128:
-        operation_id = f"op_{hashlib.sha256(request_id.encode()).hexdigest()}"
+        operation_id = f"op_{sha256_hex(request_id)}"
     operation_id = _safe_operation_id(operation_id)
 
     # Fail closed: the requested event is durable before dispatch. If the
@@ -450,17 +447,15 @@ def _body_hash(
     reason: str,
     confirm_instance_name: str | None,
 ) -> str:
-    payload = {
-        "instance_id": instance_id,
-        "action": action,
-        "reason": reason,
-        "confirm": True,
-        "confirm_instance_name": confirm_instance_name,
-    }
-    encoded = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return canonical_json_sha256(
+        {
+            "instance_id": instance_id,
+            "action": action,
+            "reason": reason,
+            "confirm": True,
+            "confirm_instance_name": confirm_instance_name,
+        }
+    )
 
 
 def _safe_operation_id(value: str) -> str:
@@ -492,25 +487,6 @@ def _validate_choice(
     raise InvalidParameterError(
         msg, details={"field": field, "allowed": list(allowed)}
     )
-
-
-def _cursor_sequence(cursor: str) -> int:
-    try:
-        payload = decode_cursor(cursor)
-    except InvalidCursorError as exc:
-        msg = "cursor is invalid"
-        raise InvalidParameterError(
-            msg,
-            details={"field": "cursor", "reason": _INVALID_CURSOR_REASON},
-        ) from exc
-    sequence = payload.get("sequence")
-    if isinstance(sequence, bool) or not isinstance(sequence, int):
-        msg = "cursor is invalid"
-        raise InvalidParameterError(
-            msg,
-            details={"field": "cursor", "reason": _INVALID_CURSOR_REASON},
-        )
-    return sequence
 
 
 __all__ = ["LifecycleActionBody", "create_lifecycle_router"]

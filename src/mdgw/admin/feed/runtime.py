@@ -80,14 +80,12 @@ class FeedAdminRuntime:
             clock=self._clock,
             adapter_enabled=context.config.adapters.collector_control,
             runtime=self,
+            feeds=context.feeds,
         )
         self._rate_limiter: RateLimiter | None = None
         self._ws_hub: WebSocketHub | None = None
         self._rate_policy = _rate_policy_from(
             self.store.get_flow(API_RATE_LIMIT_RESOURCE)
-        )
-        self._ws_settings = _ws_settings_from(
-            self.store.get_flow(WS_SLOW_CONSUMER_RESOURCE)
         )
         self._control_ok: bool | None = None
         self._control_reason: str | None = None
@@ -113,6 +111,10 @@ class FeedAdminRuntime:
     def bind_rate_limiter(self, limiter: RateLimiter | None) -> None:
         self._rate_limiter = limiter
 
+    def ws_rate_limiter(self) -> RateLimiter | None:
+        """The shared limiter whose per-IP WS session cap the Admin WS uses."""
+        return self._rate_limiter
+
     def bind_ws_hub(self, hub: WebSocketHub | None) -> None:
         self._ws_hub = hub
 
@@ -132,10 +134,10 @@ class FeedAdminRuntime:
             return
         if resource == WS_SLOW_CONSUMER_RESOURCE:
             validated = _ws_settings_from_settings(settings)
-            self._ws_settings = validated
             hub = self._ws_hub
             if hub is not None:
                 hub.apply_flow_control(
+                    enabled=bool(validated["enabled"]),
                     queue_size=int(validated["queue_size"]),
                     lag_notice_interval_ms=int(
                         validated["lag_notice_interval_ms"]
@@ -183,9 +185,6 @@ class FeedAdminRuntime:
             )
         self._rate_policy = _rate_policy_from(
             self.store.get_flow(API_RATE_LIMIT_RESOURCE)
-        )
-        self._ws_settings = _ws_settings_from(
-            self.store.get_flow(WS_SLOW_CONSUMER_RESOURCE)
         )
 
     # -- startup -----------------------------------------------------------
@@ -258,15 +257,6 @@ def _rate_policy_from_settings(
         max_ws_sessions_per_ip=max_ws,
         version=max(1, int(version)),
     )
-
-
-def _ws_settings_from(row: Any) -> dict[str, Any]:
-    if row is None:
-        return dict(DEFAULT_WS_SLOW_CONSUMER)
-    try:
-        return _ws_settings_from_settings(row.settings)
-    except ValueError:
-        return dict(DEFAULT_WS_SLOW_CONSUMER)
 
 
 def _ws_settings_from_settings(

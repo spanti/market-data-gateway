@@ -9,6 +9,7 @@ Neither includes a Venue limit, write-queue bound or storage backpressure.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -171,19 +172,17 @@ class FlowControlService:
                 request_id=request_id,
             )
         )
-        updated = FlowControlResource(
-            **{
-                **current.__dict__,
-                "version": version,
-                "settings": settings,
-                "observed_version": version,
-                "observed_state": observed_state,
-                "observed_at_ns": now,
-                "drift_reason": drift_reason,
-                "last_error": last_error,
-                "updated_at_ns": now,
-                "updated_by": actor.subject,
-            }
+        updated = replace(
+            current,
+            version=version,
+            settings=settings,
+            observed_version=version,
+            observed_state=observed_state,
+            observed_at_ns=now,
+            drift_reason=drift_reason,
+            last_error=last_error,
+            updated_at_ns=now,
+            updated_by=actor.subject,
         )
         if not self._store.update_flow(
             resource,

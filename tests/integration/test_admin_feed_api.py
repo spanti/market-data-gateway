@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import socket
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ from mdgw.config import (
     AdminConfig,
     AdminControlConfig,
     AdminProxyConfig,
+    FeedConfig,
 )
 from mdgw.reference import (
     InstrumentStore,
@@ -46,6 +48,8 @@ if TYPE_CHECKING:
     from collections.abc import Generator
     from pathlib import Path
 
+    import pytest
+
 HOST = "127.0.0.1"
 THREAD_NAME = "mdgw-test-admin-feed-api"
 TOKEN_ENV = "MDGW_TEST_CONTROL_TOKEN"
@@ -56,6 +60,13 @@ BTC = "binance:BTC/USDT"
 ETH = "binance:ETH/USDT"
 FEED_PATH = "/api/v1/admin/feed-subscriptions"
 FLOW_PATH = "/api/v1/admin/flow-control"
+#: The configured feeds the Admin validates writes against. SOL/USDT is used
+#: because the default Instrument Reference below contains only BTC and ETH,
+#: so startup never seeds these tests' subject rows; the S1 tests pass their
+#: own feed configuration explicitly.
+DEFAULT_FEEDS: tuple[FeedConfig, ...] = (
+    FeedConfig(name="fake", venue="binance", symbols=("SOL/USDT",)),
+)
 
 
 class Clock:
@@ -262,6 +273,7 @@ def _running_admin(
     control_port: int | None = None,
     db_name: str = "admin.db",
     trusted_proxies: tuple[str, ...] = (),
+    feeds: tuple[FeedConfig, ...] = DEFAULT_FEEDS,
 ) -> Generator[tuple[AsgiServer, Client, AdminContext, WebSocketHub], None, None]:
     port = (
         collector.port
@@ -275,8 +287,8 @@ def _running_admin(
             oidc=False, audit_store=True, collector_control=collector_control
         ),
         control=AdminControlConfig(
-            host=HOST,
-            port=port,
+            collector_host=HOST,
+            collector_port=port,
             token_env=TOKEN_ENV,
             timeout_s=1.0,
         ),
@@ -291,6 +303,7 @@ def _running_admin(
         instrument_store=instruments,
         environ={TOKEN_ENV: TOKEN},
         clock=Clock(),
+        feeds=feeds,
     )
     hub = WebSocketHub()
     app = create_app(
@@ -863,6 +876,7 @@ def test_the_two_flow_control_resources_are_independent_and_hot_applied(
             assert ws_body["drift"]["in_sync"] is True
             assert hub.queue_size == 7
             assert hub.lag_notice_interval_ms == 250
+            assert hub.slow_consumer_enabled is True
 
             stale = client.put(
                 f"{FLOW_PATH}/ws-slow-consumer",
@@ -934,6 +948,35 @@ def test_the_two_flow_control_resources_are_independent_and_hot_applied(
             assert _audit_actions(
                 context, "flow_control.api_rate_limit.update"
             ) == ["requested", "succeeded"]
+    finally:
+        collector.stop()
+
+
+def test_ws_slow_consumer_can_be_disabled_at_runtime(
+    tmp_path: Path,
+) -> None:
+    collector = FakeCollector()
+    try:
+        with _running_admin(
+            tmp_path, collector=collector
+        ) as (_server, client, context, hub):
+            operator = Credential(context, "Operator")
+            disabled = client.put(
+                f"{FLOW_PATH}/ws-slow-consumer",
+                {
+                    "enabled": False,
+                    "queue_size": 7,
+                    "lag_notice_interval_ms": 250,
+                },
+                headers={
+                    **operator.headers(client=client),
+                    "If-Match": '"1"',
+                },
+            )
+            assert disabled.status == 202
+            assert disabled.json()["enabled"] is False
+            assert hub.slow_consumer_enabled is False
+            assert hub.queue_size == 7
     finally:
         collector.stop()
 
@@ -1143,5 +1186,174 @@ def test_filters_keyset_pagination_and_bad_parameters(tmp_path: Path) -> None:
             )
             assert bad_limit.status == 400
             assert bad_limit.json()["error"]["code"] == "invalid_parameter"
+    finally:
+        collector.stop()
+
+
+# -- startup seeding from [[feeds]] (S1) -------------------------------------
+
+
+def _seed_feeds(*symbols: str) -> tuple[FeedConfig, ...]:
+    return (
+        FeedConfig(name="fake", venue="binance", symbols=symbols),
+    )
+
+
+def test_first_admin_start_seeds_desired_state_from_toml_feeds(
+    tmp_path: Path,
+) -> None:
+    collector = FakeCollector()
+    try:
+        with _running_admin(
+            tmp_path, collector=collector, feeds=_seed_feeds("BTC/USDT", "ETH/USDT")
+        ) as (_server, _client, context, _hub):
+            rows = context.feed.store.all_for_dispatch()
+            assert {row.instrument_id for row in rows} == {BTC, ETH}
+            assert {row.feed for row in rows} == {"fake"}
+            assert {row.venue for row in rows} == {"binance"}
+            assert {row.interval for row in rows} == {"1m"}
+            assert {row.created_by for row in rows} == {"config"}
+            assert {row.desired_version for row in rows} == {1}
+            assert all(row.desired_enabled for row in rows)
+            # The full seeded set was dispatched, and the Collector applied it.
+            assert collector.calls
+            assert {
+                item.instrument_id for item in collector.calls[-1].subscriptions
+            } == {BTC, ETH}
+            assert {row.observed_state for row in rows} == {"applied"}
+    finally:
+        collector.stop()
+
+
+def test_operator_delete_survives_restart_without_reseeding(
+    tmp_path: Path,
+) -> None:
+    feeds = _seed_feeds("BTC/USDT", "ETH/USDT")
+    collector = FakeCollector()
+    try:
+        with _running_admin(tmp_path, collector=collector, feeds=feeds) as (
+            _server,
+            client,
+            context,
+            _hub,
+        ):
+            operator = Credential(context, "Operator")
+            btc = next(
+                row
+                for row in context.feed.store.all_for_dispatch()
+                if row.instrument_id == BTC
+            )
+            deleted = client.delete(
+                f"{FEED_PATH}/{btc.subscription_id}",
+                headers=operator.headers(
+                    client=client, idempotency_key=None
+                )
+                | {"If-Match": '"1"'},
+            )
+            assert deleted.status == 202
+            assert deleted.json()["desired"]["deleted"] is True
+    finally:
+        collector.stop()
+
+    restarted = FakeCollector()
+    try:
+        with _running_admin(tmp_path, collector=restarted, feeds=feeds) as (
+            _server,
+            _client,
+            context,
+            _hub,
+        ):
+            rows = context.feed.store.all_for_dispatch()
+            # The tombstone survives; the deleted subscription is not seeded
+            # again, so exactly the two original rows remain.
+            assert len(rows) == 2
+            btc_row = next(row for row in rows if row.instrument_id == BTC)
+            assert btc_row.desired_deleted is True
+            assert btc_row.desired_version == 2
+            assert btc_row.created_by == "config"
+            eth_row = next(row for row in rows if row.instrument_id == ETH)
+            assert eth_row.desired_deleted is False
+            assert eth_row.desired_version == 1
+    finally:
+        restarted.stop()
+
+
+def test_unknown_configured_symbol_is_skipped_and_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    collector = FakeCollector()
+    try:
+        with (
+            caplog.at_level(
+                logging.INFO, logger="mdgw.admin.feed.service"
+            ),
+            _running_admin(
+                tmp_path,
+                collector=collector,
+                feeds=_seed_feeds("BTC/USDT", "DOGE/USDT"),
+            ) as (_server, _client, context, _hub),
+        ):
+            rows = context.feed.store.all_for_dispatch()
+            assert [row.instrument_id for row in rows] == [BTC]
+        assert any(
+            record.getMessage() == "skipped seeding a configured feed symbol"
+            or getattr(record, "event", "") == "admin.feed.seed_skipped"
+            for record in caplog.records
+        )
+    finally:
+        collector.stop()
+
+
+# -- feed identity validation (S2) -------------------------------------------
+
+
+def test_create_rejects_a_feed_that_is_not_configured(
+    tmp_path: Path,
+) -> None:
+    collector = FakeCollector()
+    try:
+        with _running_admin(tmp_path, collector=collector) as (
+            _server,
+            client,
+            context,
+            _hub,
+        ):
+            operator = Credential(context, "Operator")
+
+            response = _create(client, operator, feed="not-configured")
+
+            assert response.status == 400
+            error = response.json()["error"]
+            assert error["code"] == "invalid_parameter"
+            assert error["details"]["field"] == "feed"
+            assert error["details"]["reason"] == "unknown_feed"
+            assert context.feed.store.all_for_dispatch() == []
+    finally:
+        collector.stop()
+
+
+def test_create_rejects_a_feed_whose_venue_does_not_match_the_instrument(
+    tmp_path: Path,
+) -> None:
+    collector = FakeCollector()
+    feeds = (
+        FeedConfig(name="okx_feed", venue="okx", symbols=("BTC/USDT",)),
+    )
+    try:
+        with _running_admin(
+            tmp_path, collector=collector, feeds=feeds
+        ) as (_server, client, context, _hub):
+            operator = Credential(context, "Operator")
+
+            response = _create(
+                client, operator, feed="okx_feed", instrument_id=BTC
+            )
+
+            assert response.status == 400
+            error = response.json()["error"]
+            assert error["code"] == "invalid_parameter"
+            assert error["details"]["field"] == "feed"
+            assert error["details"]["reason"] == "venue_mismatch"
+            assert context.feed.store.all_for_dispatch() == []
     finally:
         collector.stop()

@@ -126,7 +126,7 @@ def test_the_hub_applies_a_new_queue_policy_to_new_and_existing_sessions() -> No
     async def scenario() -> tuple[int, float, int, float]:
         existing = hub.register(FakeTransport())
         hub.apply_flow_control(
-            queue_size=7, lag_notice_interval_ms=250
+            enabled=True, queue_size=7, lag_notice_interval_ms=250
         )
         created = hub.register(FakeTransport())
         result = (
@@ -151,7 +151,7 @@ def test_the_hub_keeps_queued_messages_when_the_queue_shrinks() -> None:
         for index in range(5):
             session.enqueue("market.bar.1m.x", {"index": index})
         hub.apply_flow_control(
-            queue_size=3, lag_notice_interval_ms=1000
+            enabled=True, queue_size=3, lag_notice_interval_ms=1000
         )
         queued = []
         while not session._queue.empty():
@@ -163,3 +163,71 @@ def test_the_hub_keeps_queued_messages_when_the_queue_shrinks() -> None:
 
     # Shrinking drops the oldest messages; the newest ones remain in order.
     assert asyncio.run(scenario()) == [2, 3, 4]
+
+
+# -- explicit slow-consumer policy (S5) --------------------------------------
+
+
+def test_a_disabled_slow_consumer_policy_never_drops_or_notifies() -> None:
+    hub = WebSocketHub(queue_size=1, lag_notice_interval_ms=0)
+
+    async def scenario() -> tuple[list[Any], int]:
+        transport = FakeTransport()
+        session = hub.register(transport)
+        hub.apply_flow_control(
+            enabled=False, queue_size=1, lag_notice_interval_ms=0
+        )
+        for index in range(5):
+            session.enqueue("market.bar.1m.x", {"index": index})
+        await asyncio.sleep(0.05)
+        dropped = session.dropped_total
+        await hub.unregister(session)
+        await hub.close()
+        return transport.sent, dropped
+
+    sent, dropped = asyncio.run(scenario())
+
+    assert dropped == 0
+    assert [message["op"] for message in sent] == ["event"] * 5
+    assert [message["data"]["index"] for message in sent] == [0, 1, 2, 3, 4]
+
+
+def test_an_enabled_slow_consumer_policy_still_drops_and_notifies() -> None:
+    hub = WebSocketHub(queue_size=1, lag_notice_interval_ms=0)
+
+    async def scenario() -> tuple[list[Any], int]:
+        transport = FakeTransport()
+        session = hub.register(transport)
+        for index in range(3):
+            session.enqueue("market.bar.1m.x", {"index": index})
+        await asyncio.sleep(0.05)
+        dropped = session.dropped_total
+        await hub.unregister(session)
+        await hub.close()
+        return transport.sent, dropped
+
+    sent, dropped = asyncio.run(scenario())
+
+    assert dropped >= 1
+    ops = [message["op"] for message in sent]
+    assert "lag_notice" in ops
+    events = [message for message in sent if message["op"] == "event"]
+    assert events[-1]["data"] == {"index": 2}
+
+
+def test_the_queue_stays_unbounded_while_enqueue_enforces_the_policy() -> None:
+    hub = WebSocketHub(queue_size=10, lag_notice_interval_ms=1000)
+
+    async def scenario() -> tuple[int, int]:
+        session = hub.register(FakeTransport())
+        hub.apply_flow_control(
+            enabled=True, queue_size=3, lag_notice_interval_ms=1000
+        )
+        policy = (session.queue_size, session._queue.maxsize)
+        await hub.unregister(session)
+        await hub.close()
+        return policy
+
+    # The policy bound is enforced by enqueue; the asyncio.Queue itself is
+    # never mutated through its private ``_maxsize`` attribute.
+    assert asyncio.run(scenario()) == (3, 0)

@@ -14,10 +14,9 @@ Invariants:
 
 from __future__ import annotations
 
-import json
+import logging
 import re
-from dataclasses import dataclass
-from hashlib import sha256
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
@@ -48,6 +47,7 @@ from mdgw.admin.feed.models import (
     last_error_wire,
 )
 from mdgw.admin.feed.store import DuplicateSubscriptionError
+from mdgw.core.hashing import canonical_json_sha256
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import INTERVALS
 
@@ -59,11 +59,15 @@ if TYPE_CHECKING:
     from mdgw.admin.feed.client import CollectorControlClient
     from mdgw.admin.feed.runtime import FeedAdminRuntime
     from mdgw.admin.feed.store import FeedStore
+    from mdgw.config import FeedConfig
     from mdgw.reference import InstrumentStore
+
+logger = logging.getLogger(__name__)
 
 ACTION_CREATE = "feed_subscription.create"
 ACTION_UPDATE = "feed_subscription.update"
 ACTION_DELETE = "feed_subscription.delete"
+_CONFIG_ACTOR = "config"
 _TARGET_TYPE = "feed_subscription"
 _INTERVAL_CHOICES: tuple[str, ...] = tuple(INTERVALS)
 _IF_MATCH_RE = re.compile(r'^\s*"?(?P<version>\d+)"?\s*$')
@@ -159,13 +163,6 @@ def parse_if_match(value: str | None) -> int:
     return version
 
 
-@dataclass(frozen=True)
-class DispatchOutcome:
-    fallback_reason: str | None
-    message: str
-    code: str
-
-
 class FeedSubscriptionService:
     """Create/read/update/delete one Feed Subscription resource."""
 
@@ -179,6 +176,7 @@ class FeedSubscriptionService:
         clock: Callable[[], int],
         adapter_enabled: bool,
         runtime: FeedAdminRuntime,
+        feeds: tuple[FeedConfig, ...] = (),
     ) -> None:
         self._context = context
         self._store = store
@@ -187,6 +185,7 @@ class FeedSubscriptionService:
         self._clock = clock
         self._adapter_enabled = adapter_enabled
         self._runtime = runtime
+        self._feeds = {feed.name: feed for feed in feeds}
 
     # -- queries -----------------------------------------------------------
 
@@ -365,27 +364,23 @@ class FeedSubscriptionService:
             reason=reason,
             before=current.to_wire(),
         )
-        updated = FeedSubscription(
-            **{
-                **current.__dict__,
-                "feed": body.feed,
-                "venue": venue,
-                "instrument_id": body.instrument_id,
-                "interval": body.interval,
-                "desired_enabled": enabled,
-                "desired_deleted": deleted,
-                "desired_version": current.desired_version + 1,
-                "desired_updated_at_ns": now,
-                "desired_updated_by": actor.subject,
-                "updated_at_ns": now,
-                "drift_in_sync": False,
-                "drift_reason": (
-                    DRIFT_DELETION_PENDING
-                    if deleted
-                    else DRIFT_NOT_APPLIED
-                ),
-                "drift_since_ns": now,
-            }
+        updated = replace(
+            current,
+            feed=body.feed,
+            venue=venue,
+            instrument_id=body.instrument_id,
+            interval=body.interval,
+            desired_enabled=enabled,
+            desired_deleted=deleted,
+            desired_version=current.desired_version + 1,
+            desired_updated_at_ns=now,
+            desired_updated_by=actor.subject,
+            updated_at_ns=now,
+            drift_in_sync=False,
+            drift_reason=(
+                DRIFT_DELETION_PENDING if deleted else DRIFT_NOT_APPLIED
+            ),
+            drift_since_ns=now,
         )
         if not self._store.update_desired(
             updated, expected_version=current.desired_version
@@ -429,19 +424,17 @@ class FeedSubscriptionService:
             before=current.to_wire(),
             after=None,
         )
-        tombstone = FeedSubscription(
-            **{
-                **current.__dict__,
-                "desired_enabled": False,
-                "desired_deleted": True,
-                "desired_version": current.desired_version + 1,
-                "desired_updated_at_ns": now,
-                "desired_updated_by": actor.subject,
-                "updated_at_ns": now,
-                "drift_in_sync": False,
-                "drift_reason": DRIFT_DELETION_PENDING,
-                "drift_since_ns": now,
-            }
+        tombstone = replace(
+            current,
+            desired_enabled=False,
+            desired_deleted=True,
+            desired_version=current.desired_version + 1,
+            desired_updated_at_ns=now,
+            desired_updated_by=actor.subject,
+            updated_at_ns=now,
+            drift_in_sync=False,
+            drift_reason=DRIFT_DELETION_PENDING,
+            drift_since_ns=now,
         )
         if not self._store.update_desired(
             tombstone, expected_version=current.desired_version
@@ -456,13 +449,122 @@ class FeedSubscriptionService:
     # -- dispatch ----------------------------------------------------------
 
     def redispatch_on_startup(self) -> None:
-        """Re-load persisted desired state and send it to the Collector."""
+        """Seed a fresh database from ``[[feeds]]``, then re-dispatch.
+
+        The TOML feed list is only the *initial* desired state: seeding runs
+        exactly once, when the table has no row at all. Any later start sees
+        the operator's rows (including tombstones) and never resurrects a feed
+        an operator deleted.
+        """
+        try:
+            seeded = self._seed_from_configured_feeds()
+            if seeded:
+                logger.info(
+                    "seeded feed subscriptions from startup configuration",
+                    extra={
+                        "event": "admin.feed.seeded_from_config",
+                        "count": seeded,
+                    },
+                )
+        except Exception:  # seeding must never abort the API
+            logger.exception(
+                "failed to seed feed subscriptions from configuration",
+                extra={"event": "admin.feed.seed_failed"},
+            )
         try:
             self._dispatch(request_id=f"req_startup_{uuid4().hex}")
         except Exception:  # startup must never abort the API
             self._runtime.record_dispatch_failure(
                 REASON_NOT_APPLIED, "startup redispatch failed"
             )
+
+    def _seed_from_configured_feeds(self) -> int:
+        """Create Desired rows for configured feeds on an empty database."""
+        if self._store.has_rows():
+            return 0
+        store = self._instrument_store
+        created = 0
+        for feed in self._feeds.values():
+            if "bar" not in feed.data_types:
+                continue
+            for symbol in feed.symbols:
+                instrument_id = f"{feed.venue}:{symbol.strip()}"
+                try:
+                    parsed = InstrumentId.parse(instrument_id)
+                except ValueError:
+                    self._log_seed_skip(
+                        instrument_id, "invalid_instrument", feed.name
+                    )
+                    continue
+                if store is None:
+                    self._log_seed_skip(
+                        instrument_id,
+                        "instrument_reference_unavailable",
+                        feed.name,
+                    )
+                    continue
+                instrument = store.get(parsed.value)
+                if instrument is None:
+                    self._log_seed_skip(
+                        instrument_id, "unknown_instrument", feed.name
+                    )
+                    continue
+                if instrument.is_delisted:
+                    self._log_seed_skip(
+                        instrument_id, "instrument_delisted", feed.name
+                    )
+                    continue
+                if instrument.venue != feed.venue:
+                    self._log_seed_skip(
+                        instrument_id, "venue_mismatch", feed.name
+                    )
+                    continue
+                now = self._now()
+                subscription = FeedSubscription(
+                    subscription_id=f"fsub_{uuid4().hex}",
+                    feed=feed.name,
+                    venue=feed.venue,
+                    instrument_id=parsed.value,
+                    interval="1m",
+                    desired_enabled=True,
+                    desired_deleted=False,
+                    desired_version=1,
+                    desired_updated_at_ns=now,
+                    desired_updated_by=_CONFIG_ACTOR,
+                    created_at_ns=now,
+                    created_by=_CONFIG_ACTOR,
+                    updated_at_ns=now,
+                    observed_enabled=False,
+                    observed_deleted=False,
+                    observed_version=0,
+                    observed_state=OBSERVED_UNKNOWN,
+                    observed_at_ns=None,
+                    collector_instance_id=None,
+                    drift_in_sync=False,
+                    drift_reason=DRIFT_NOT_APPLIED,
+                    drift_since_ns=now,
+                    last_error=None,
+                )
+                try:
+                    self._store.insert(subscription)
+                except DuplicateSubscriptionError:
+                    continue
+                created += 1
+        return created
+
+    @staticmethod
+    def _log_seed_skip(
+        instrument_id: str, reason: str, feed_name: str
+    ) -> None:
+        logger.warning(
+            "skipped seeding a configured feed symbol",
+            extra={
+                "event": "admin.feed.seed_skipped",
+                "feed": feed_name,
+                "instrument_id": instrument_id,
+                "reason": reason,
+            },
+        )
 
     def _dispatch(self, *, request_id: str) -> None:
         rows = self._store.all_for_dispatch()
@@ -643,6 +745,16 @@ class FeedSubscriptionService:
                     "allowed": list(_INTERVAL_CHOICES),
                 },
             )
+        feed_config = self._feeds.get(feed)
+        if feed_config is None:
+            raise InvalidParameterError(
+                "feed does not name a configured Feed Handler",
+                details={
+                    "field": "feed",
+                    "reason": "unknown_feed",
+                    "allowed": sorted(self._feeds),
+                },
+            )
         try:
             parsed = InstrumentId.parse(instrument_id)
         except ValueError as exc:
@@ -680,10 +792,15 @@ class FeedSubscriptionService:
                     "reason": "instrument_delisted",
                 },
             )
-        if not feed.strip():
+        if instrument.venue != feed_config.venue:
             raise InvalidParameterError(
-                "feed must be a non-empty string",
-                details={"field": "feed"},
+                "feed venue does not match the instrument's venue",
+                details={
+                    "field": "feed",
+                    "reason": "venue_mismatch",
+                    "feed_venue": feed_config.venue,
+                    "instrument_venue": instrument.venue,
+                },
             )
         return instrument.venue
 
@@ -760,17 +877,13 @@ def _since(
 
 
 def _body_fingerprint(body: BaseModel) -> str:
-    encoded = json.dumps(
-        body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    return sha256(encoded).hexdigest()
+    return canonical_json_sha256(body.model_dump(mode="json"))
 
 
 __all__ = [
     "ACTION_CREATE",
     "ACTION_DELETE",
     "ACTION_UPDATE",
-    "DispatchOutcome",
     "FeedSubscriptionCreateBody",
     "FeedSubscriptionService",
     "FeedSubscriptionUpdateBody",

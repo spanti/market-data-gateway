@@ -19,13 +19,11 @@ import pytest
 
 from mdgw.admin.control import ControlTarget
 from mdgw.service.control_plane import (
-    API_RATE_LIMIT_ACTION,
     BACKFILL_JOB_CANCEL_ACTION,
     BACKFILL_JOB_START_ACTION,
     BACKFILL_JOB_STATUS_ACTION,
     FEED_SUBSCRIPTION_SYNC_ACTION,
     GAPS_SNAPSHOT_ACTION,
-    WS_SLOW_CONSUMER_ACTION,
     BackfillJobCancelPayload,
     BackfillJobStartPayload,
     BackfillJobStatusPayload,
@@ -104,8 +102,6 @@ def test_the_collector_allowlist_contains_the_ticket_04_06_and_07_actions() -> N
     assert set(registry.allowed_for("collector")) == {
         "ping",
         FEED_SUBSCRIPTION_SYNC_ACTION,
-        API_RATE_LIMIT_ACTION,
-        WS_SLOW_CONSUMER_ACTION,
         BACKFILL_JOB_START_ACTION,
         BACKFILL_JOB_STATUS_ACTION,
         BACKFILL_JOB_CANCEL_ACTION,

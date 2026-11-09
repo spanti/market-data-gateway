@@ -190,8 +190,8 @@ def _admin_config(tmp_path: Path, control_port: int) -> AdminConfig:
             oidc=False, audit_store=True, collector_control=True
         ),
         control=AdminControlConfig(
-            host=HOST,
-            port=control_port,
+            collector_host=HOST,
+            collector_port=control_port,
             token_env=TOKEN_ENV,
             timeout_s=0.25,
         ),

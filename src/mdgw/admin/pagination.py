@@ -133,6 +133,69 @@ def cursor_page(*, next_cursor: str | None) -> dict[str, Any]:
     return {"next_cursor": next_cursor, "has_more": next_cursor is not None}
 
 
+#: Created-at keyset sort keys. Every resource uses the same two key names so
+#: a cursor can never drift between features: the nanosecond timestamp is
+#: ``created_at_ns`` and the opaque id key names the resource (``job_id``,
+#: ``gap_id``, ``subscription_id``).
+CREATED_AT_CURSOR_KEY = "created_at_ns"
+SEQUENCE_CURSOR_KEY = "sequence"
+
+
+def encode_created_cursor(
+    created_at_ns: int, resource_id: str, *, id_key: str
+) -> str:
+    """Encode the ``(created_at_ns, <id_key>)`` keyset tuple."""
+    return encode_cursor(
+        {CREATED_AT_CURSOR_KEY: int(created_at_ns), id_key: resource_id}
+    )
+
+
+def decode_created_cursor(
+    cursor: str, *, id_key: str
+) -> tuple[int, str]:
+    """Decode a created-at keyset cursor or raise a stable 400."""
+    payload = _decode_or_invalid(cursor)
+    created_at_ns = payload.get(CREATED_AT_CURSOR_KEY)
+    resource_id = payload.get(id_key)
+    if (
+        isinstance(created_at_ns, bool)
+        or not isinstance(created_at_ns, int)
+        or not isinstance(resource_id, str)
+        or not resource_id
+    ):
+        _raise_invalid_cursor()
+    return created_at_ns, resource_id
+
+
+def encode_sequence_cursor(sequence: int) -> str:
+    """Encode the append-only ``sequence`` keyset value."""
+    return encode_cursor({SEQUENCE_CURSOR_KEY: int(sequence)})
+
+
+def decode_sequence_cursor(cursor: str) -> int:
+    """Decode an append-only sequence cursor or raise a stable 400."""
+    payload = _decode_or_invalid(cursor)
+    sequence = payload.get(SEQUENCE_CURSOR_KEY)
+    if isinstance(sequence, bool) or not isinstance(sequence, int):
+        _raise_invalid_cursor()
+    return sequence
+
+
+def _decode_or_invalid(cursor: str) -> dict[str, Any]:
+    try:
+        return decode_cursor(cursor)
+    except InvalidCursorError:
+        _raise_invalid_cursor()
+
+
+def _raise_invalid_cursor() -> None:
+    msg = "cursor is invalid"
+    raise InvalidParameterError(
+        msg,
+        details={"field": "cursor", "reason": "invalid_cursor"},
+    )
+
+
 def _raise_invalid_limit(maximum: int) -> None:
     msg = f"limit must be an integer between 1 and {maximum}"
     raise InvalidParameterError(
@@ -145,12 +208,18 @@ def _raise_invalid_limit(maximum: int) -> None:
 
 
 __all__ = [
+    "CREATED_AT_CURSOR_KEY",
     "CURSOR_VERSION",
     "MAX_CURSOR_LENGTH",
+    "SEQUENCE_CURSOR_KEY",
     "InvalidCursorError",
     "cursor_page",
+    "decode_created_cursor",
     "decode_cursor",
+    "decode_sequence_cursor",
+    "encode_created_cursor",
     "encode_cursor",
+    "encode_sequence_cursor",
     "parse_limit",
     "parse_order",
 ]

@@ -31,8 +31,6 @@ from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import INTERVALS
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from fastapi import APIRouter
 
     from mdgw.admin.auth.service import AdminAuth
@@ -234,32 +232,40 @@ def add_admin_ws_route(
             await websocket.close(code=CLOSE_FORBIDDEN)
             return
 
-        quota: Callable[[SessionRecord], bool] | None = (
-            context.ws_quota_checker
-        )
-        if quota is not None and not quota(record):
-            await websocket.close(code=CLOSE_QUOTA)
-            return
-
+        # Reuse the one RateLimiter that already owns the per-IP WebSocket
+        # session cap. The source address is the resolved client IP under the
+        # trusted-proxy policy, never the raw peer address.
+        limiter = context.feed.ws_rate_limiter()
+        source_ip = client_ip(context, websocket)
+        reserved = False
+        if limiter is not None:
+            if not await limiter.acquire_ws_session(source_ip):
+                await websocket.close(code=CLOSE_QUOTA)
+                return
+            reserved = True
         try:
-            session = hub.register(websocket)
-        except RuntimeError:
-            await websocket.close(code=CLOSE_RESTART)
-            return
+            try:
+                session = hub.register(websocket)
+            except RuntimeError:
+                await websocket.close(code=CLOSE_RESTART)
+                return
 
-        close_code = CLOSE_NORMAL
-        try:
-            close_code = await _admin_session_loop(
-                websocket=websocket,
-                session=session,
-                auth=auth,
-                token=token,
-                record=record,
-                request_id=request_id,
-                context=context,
-            )
+            close_code = CLOSE_NORMAL
+            try:
+                close_code = await _admin_session_loop(
+                    websocket=websocket,
+                    session=session,
+                    auth=auth,
+                    token=token,
+                    record=record,
+                    request_id=request_id,
+                    context=context,
+                )
+            finally:
+                await hub.unregister(session, close_code=close_code)
         finally:
-            await hub.unregister(session, close_code=close_code)
+            if reserved:
+                await limiter.release_ws_session(source_ip)
 
 
 async def _admin_session_loop(  # ruff: ignore[too-many-arguments]  # explicit WS state

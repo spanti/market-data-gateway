@@ -15,10 +15,16 @@ import pytest
 
 from mdgw.admin.errors import InvalidParameterError
 from mdgw.admin.pagination import (
+    CREATED_AT_CURSOR_KEY,
+    SEQUENCE_CURSOR_KEY,
     InvalidCursorError,
     cursor_page,
+    decode_created_cursor,
     decode_cursor,
+    decode_sequence_cursor,
+    encode_created_cursor,
     encode_cursor,
+    encode_sequence_cursor,
     parse_limit,
     parse_order,
 )
@@ -135,4 +141,72 @@ def test_cursor_page_reports_honest_has_more_and_next_cursor() -> None:
     assert cursor_page(next_cursor=None) == {
         "next_cursor": None,
         "has_more": False,
+    }
+
+
+# -- feature keyset helpers (T4) --------------------------------------------
+
+
+def test_created_cursor_uses_the_shared_key_names() -> None:
+    cursor = encode_created_cursor(
+        1_700_000_000_000_000_000, "bf_1", id_key="job_id"
+    )
+
+    # The key names are pinned: every Admin list uses ``created_at_ns`` plus
+    # its opaque resource id key, never a per-feature spelling.
+    assert decode_cursor(cursor) == {
+        "v": 1,
+        CREATED_AT_CURSOR_KEY: 1_700_000_000_000_000_000,
+        "job_id": "bf_1",
+    }
+    assert decode_created_cursor(cursor, id_key="job_id") == (
+        1_700_000_000_000_000_000,
+        "bf_1",
+    )
+
+
+def test_sequence_cursor_uses_the_shared_key_name() -> None:
+    cursor = encode_sequence_cursor(42)
+
+    assert decode_cursor(cursor) == {"v": 1, SEQUENCE_CURSOR_KEY: 42}
+    assert decode_sequence_cursor(cursor) == 42
+
+
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        encode_cursor({"created_at": 1, "job_id": "bf_1"}),
+        encode_cursor({"created_at_ns": 1, "wrong_id": "bf_1"}),
+        encode_cursor({"created_at_ns": True, "job_id": "bf_1"}),
+        encode_cursor({"created_at_ns": 1, "job_id": ""}),
+    ],
+)
+def test_created_cursor_rejects_missing_or_malformed_keys(
+    cursor: str,
+) -> None:
+    with pytest.raises(InvalidParameterError) as caught:
+        decode_created_cursor(cursor, id_key="job_id")
+
+    assert caught.value.details == {
+        "field": "cursor",
+        "reason": "invalid_cursor",
+    }
+
+
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        encode_cursor({"sequence": "1"}),
+        encode_cursor({"sequence": True}),
+        encode_cursor({"other": 1}),
+        "not-a-cursor",
+    ],
+)
+def test_sequence_cursor_rejects_malformed_values(cursor: str) -> None:
+    with pytest.raises(InvalidParameterError) as caught:
+        decode_sequence_cursor(cursor)
+
+    assert caught.value.details == {
+        "field": "cursor",
+        "reason": "invalid_cursor",
     }

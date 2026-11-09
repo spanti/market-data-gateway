@@ -127,8 +127,8 @@ def _context(tmp_path: Path, port: int) -> AdminContext:
             oidc=False, audit_store=True, collector_control=True
         ),
         control=AdminControlConfig(
-            host=HOST,
-            port=port,
+            collector_host=HOST,
+            collector_port=port,
             token_env=TOKEN_ENV,
             timeout_s=1.0,
         ),

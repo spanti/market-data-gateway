@@ -22,7 +22,7 @@ def _config(**updates) -> AdminConfig:
     base = AdminConfig(
         enabled=True,
         adapters=AdminAdaptersConfig(supervisor=True),
-        control=AdminControlConfig(port=0, token_env=TOKEN_ENV),
+        control=AdminControlConfig(supervisor_port=0, token_env=TOKEN_ENV),
     )
     return base.model_copy(update=updates) if updates else base
 
@@ -42,7 +42,7 @@ def _runtime(
 def test_the_adapter_reports_unsupported_when_disabled(tmp_path: Path) -> None:
     config = _config(
         adapters=AdminAdaptersConfig(supervisor=False),
-        control=AdminControlConfig(port=12345, token_env=TOKEN_ENV),
+        control=AdminControlConfig(supervisor_port=12345, token_env=TOKEN_ENV),
     )
     runtime = _runtime(tmp_path, config, {TOKEN_ENV: "secret"})
 
@@ -61,7 +61,7 @@ def test_the_adapter_reports_unavailable_without_endpoint_or_token(
 
     no_token = _runtime(
         tmp_path,
-        _config(control=AdminControlConfig(port=12345, token_env=TOKEN_ENV)),
+        _config(control=AdminControlConfig(supervisor_port=12345, token_env=TOKEN_ENV)),
         {},
     )
     assert no_token.adapter_status().state == "unavailable"
@@ -75,7 +75,7 @@ def test_the_adapter_is_available_and_builds_a_client_when_configured(
 ) -> None:
     runtime = _runtime(
         tmp_path,
-        _config(control=AdminControlConfig(port=12345, token_env=TOKEN_ENV)),
+        _config(control=AdminControlConfig(supervisor_port=12345, token_env=TOKEN_ENV)),
         {TOKEN_ENV: "secret"},
     )
 

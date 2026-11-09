@@ -18,6 +18,7 @@ from pydantic import (
     model_validator,
 )
 
+from mdgw.core.redirect import validate_relative_path
 from mdgw.core.schema import INTERVALS
 from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
 
@@ -475,28 +476,6 @@ class AdminAdaptersConfig(_ConfigModel):
 ADMIN_ACCESS_ROLES: tuple[str, ...] = ("SuperAdmin", "Operator", "Auditor")
 
 
-def _validate_relative_redirect_path(value: str, field: str) -> str:
-    """Reject unsafe SPA redirect paths.
-
-    Redirects only ever go to a same-origin relative path: no absolute URL,
-    no protocol-relative ``//host``, no control characters and no backslash
-    (which some browsers normalize into a separator).
-    """
-    if not isinstance(value, str):
-        msg = f"{field} must be a string"
-        # Pydantic validators signal bad input as ValueError.
-        raise ValueError(msg)  # ruff: ignore[type-check-without-type-error]
-    if not value.startswith("/") or value.startswith("//"):
-        msg = f"{field} must be a same-origin relative path starting with '/'"
-        raise ValueError(msg)
-    if "\\" in value or any(
-        ord(character) < 0x20 or ord(character) == 0x7F for character in value
-    ):
-        msg = f"{field} must not contain control characters or backslashes"
-        raise ValueError(msg)
-    return value
-
-
 class AdminOidcConfig(_ConfigModel):
     """OIDC Authorization Code + PKCE client settings and role mapping."""
 
@@ -573,12 +552,12 @@ class AdminOidcConfig(_ConfigModel):
     @field_validator("default_return_to")
     @classmethod
     def _default_return_to_is_relative(cls, value: str) -> str:
-        return _validate_relative_redirect_path(value, "default_return_to")
+        return validate_relative_path(value, field="default_return_to")
 
     @field_validator("error_redirect_path")
     @classmethod
     def _error_path_is_relative(cls, value: str) -> str:
-        return _validate_relative_redirect_path(value, "error_redirect_path")
+        return validate_relative_path(value, field="error_redirect_path")
 
     @field_validator("role_mapping", mode="before")
     @classmethod
@@ -680,40 +659,57 @@ _CONTROL_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class AdminControlConfig(_ConfigModel):
-    """Controlled Collector/Supervisor IPC channel.
+    """Controlled Collector/Supervisor IPC channels.
 
     Windows pyzmq cannot bind ``ipc://``, so the Admin control plane is a
     loopback TCP listener carrying length-prefixed, token-authenticated,
-    schema-validated envelopes. The token itself is never stored in config:
+    schema-validated envelopes (ADR-0017). The Collector and the Supervisor
+    are separate services, so each has its own endpoint: enabling both must
+    never make one fail to bind because it reused the other's port. A port of
+    ``0`` disables that endpoint. The token itself is never stored in config:
     ``token_env`` names the environment variable both sides read.
     """
 
-    socket_path: Path | None = None
-    host: str = "127.0.0.1"
-    # 0 means "not configured": the Collector does not bind a control server
-    # and the API reports the collector_control adapter as unavailable.
-    port: int = Field(default=0, ge=0, le=65535)
+    collector_host: str = "127.0.0.1"
+    collector_port: int = Field(default=0, ge=0, le=65535)
+    supervisor_host: str = "127.0.0.1"
+    supervisor_port: int = Field(default=0, ge=0, le=65535)
     # This is the environment variable *name*, never the token itself.
     token_env: str = "MDGW_ADMIN_CONTROL_TOKEN"  # ruff: ignore[hardcoded-password-string]
     timeout_s: float = Field(default=5.0, gt=0)
     max_message_bytes: int = Field(default=65_536, ge=1)
     grace_s: float = Field(default=10.0, gt=0)
 
-    @field_validator("host")
+    @field_validator("collector_host", "supervisor_host")
     @classmethod
-    def _loopback_host(cls, value: str) -> str:
+    def _loopback_host(cls, value: str, info: ValidationInfo) -> str:
         cleaned = value.strip()
         if cleaned == "localhost":
             return cleaned
         try:
             address = ipaddress.ip_address(cleaned)
         except ValueError as exc:
-            msg = "control.host must be a loopback address"
+            msg = f"control.{info.field_name} must be a loopback address"
             raise ValueError(msg) from exc
         if not address.is_loopback:
-            msg = "control.host must be a loopback address"
+            msg = f"control.{info.field_name} must be a loopback address"
             raise ValueError(msg)
         return cleaned
+
+    @model_validator(mode="after")
+    def _endpoints_do_not_collide(self) -> AdminControlConfig:
+        if (
+            self.collector_port > 0
+            and self.supervisor_port > 0
+            and self.collector_port == self.supervisor_port
+            and self.collector_host == self.supervisor_host
+        ):
+            msg = (
+                "collector and supervisor control endpoints must differ "
+                "(same host and port)"
+            )
+            raise ValueError(msg)
+        return self
 
     @field_validator("token_env")
     @classmethod

@@ -46,6 +46,11 @@ class CompositeFeedHandler:
             handler.supports_history for handler in self._handlers
         )
 
+    @property
+    def handlers(self) -> tuple[object, ...]:
+        """The child Feed Handlers, in configured order (public accessor)."""
+        return self._handlers
+
     def iter_bars(self) -> Iterator[RawBar]:
         for handler in self._handlers:
             yield from handler.iter_bars()
@@ -100,7 +105,7 @@ def attach_quarantine(
     if callable(attach):
         attach(quarantine, rule_version=rule_version)
         return
-    for child in getattr(handler, "_handlers", ()):
+    for child in getattr(handler, "handlers", ()):
         attach_quarantine(child, quarantine, rule_version=rule_version)
 
 

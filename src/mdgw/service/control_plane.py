@@ -35,8 +35,6 @@ is not registered cannot be invoked. Feature handlers should stay off
 from __future__ import annotations
 
 import contextlib
-import hmac
-import ipaddress
 import json
 import logging
 import socket
@@ -65,14 +63,18 @@ from mdgw.admin.control import (
     build_control_message,
     validate_control_message,
 )
+from mdgw.service.control_wire import (
+    decode_json_object,
+    encode_json,
+    is_loopback_host,
+    token_matches,
+)
 
 logger = logging.getLogger(__name__)
 
 CONTROL_PLANE_PROTOCOL_VERSION = 1
 ACTION_PING = "ping"
 FEED_SUBSCRIPTION_SYNC_ACTION = "feed.subscription.sync"
-API_RATE_LIMIT_ACTION = "flow_control.api_rate_limit.apply"
-WS_SLOW_CONSUMER_ACTION = "flow_control.ws_slow_consumer.apply"
 BACKFILL_JOB_START_ACTION = "backfill.job.start"
 BACKFILL_JOB_STATUS_ACTION = "backfill.job.status"
 BACKFILL_JOB_CANCEL_ACTION = "backfill.job.cancel"
@@ -145,25 +147,6 @@ class FeedSubscriptionSyncPayload(BaseModel):
     )
 
 
-class ApiRateLimitApplyPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    version: int = Field(ge=1)
-    enabled: bool
-    requests_per_second: float = Field(gt=0)
-    burst: int = Field(ge=0)
-    max_ws_sessions_per_ip: int = Field(ge=0)
-
-
-class WsSlowConsumerApplyPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    version: int = Field(ge=1)
-    enabled: bool
-    queue_size: int = Field(ge=1)
-    lag_notice_interval_ms: int = Field(ge=0)
-
-
 class _BackfillJobScopedPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -229,16 +212,6 @@ def collector_control_registry() -> ControlActionRegistry:
         payload=FeedSubscriptionSyncPayload,
     )
     registry.register(
-        API_RATE_LIMIT_ACTION,
-        targets=(ControlTarget.COLLECTOR,),
-        payload=ApiRateLimitApplyPayload,
-    )
-    registry.register(
-        WS_SLOW_CONSUMER_ACTION,
-        targets=(ControlTarget.COLLECTOR,),
-        payload=WsSlowConsumerApplyPayload,
-    )
-    registry.register(
         BACKFILL_JOB_START_ACTION,
         targets=(ControlTarget.COLLECTOR,),
         payload=BackfillJobStartPayload,
@@ -271,9 +244,7 @@ def write_frame(
     payload: Mapping[str, Any], *, max_message_bytes: int | None = None
 ) -> bytes:
     """Serialize one JSON frame with a 4-byte big-endian length prefix."""
-    body = json.dumps(
-        dict(payload), separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
+    body = encode_json(payload)
     if max_message_bytes is not None and len(body) > max_message_bytes:
         msg = f"control message exceeds {max_message_bytes} bytes"
         raise ValueError(msg)
@@ -318,15 +289,6 @@ def _recv_frame(sock: socket.socket, max_message_bytes: int) -> Any:
     return read_frame(header + _recv_exact(sock, length))
 
 
-def _is_loopback(host: str) -> bool:
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
 def _error_payload(
     correlation_id: str | None,
     code: str,
@@ -362,7 +324,7 @@ class ControlPlaneServer:
         max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES,
         request_timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
     ) -> None:
-        if not _is_loopback(host):
+        if not is_loopback_host(host):
             msg = "the control plane must bind a loopback address"
             raise ValueError(msg)
         if not token:
@@ -522,15 +484,10 @@ class ControlPlaneServer:
             logger.debug("control plane response could not be sent")
 
     def _handle_frame(self, body: bytes) -> dict[str, Any]:
-        try:
-            wrapper = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
+        wrapper = decode_json_object(body)
+        if wrapper is None:
             return _error_payload(
                 None, "invalid_message", "the control frame is not valid JSON"
-            )
-        if not isinstance(wrapper, dict):
-            return _error_payload(
-                None, "invalid_message", "the control frame must be an object"
             )
         correlation = wrapper.get("correlation_id")
         if not isinstance(correlation, str) or not correlation:
@@ -542,7 +499,7 @@ class ControlPlaneServer:
                 "unsupported control plane protocol version",
             )
         provided = wrapper.get("token")
-        if not isinstance(provided, str) or not hmac.compare_digest(
+        if not isinstance(provided, str) or not token_matches(
             self._token, provided
         ):
             return _error_payload(
@@ -676,7 +633,7 @@ class ControlPlaneClient:
         max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES,
         timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
     ) -> None:
-        if not _is_loopback(host):
+        if not is_loopback_host(host):
             msg = "the control plane must connect a loopback address"
             raise ValueError(msg)
         if not token:
@@ -801,7 +758,6 @@ class ControlPlaneClient:
 
 __all__ = [
     "ACTION_PING",
-    "API_RATE_LIMIT_ACTION",
     "BACKFILL_JOB_CANCEL_ACTION",
     "BACKFILL_JOB_START_ACTION",
     "BACKFILL_JOB_STATUS_ACTION",
@@ -810,8 +766,6 @@ __all__ = [
     "DEFAULT_REQUEST_TIMEOUT_S",
     "FEED_SUBSCRIPTION_SYNC_ACTION",
     "GAPS_SNAPSHOT_ACTION",
-    "WS_SLOW_CONSUMER_ACTION",
-    "ApiRateLimitApplyPayload",
     "BackfillJobCancelPayload",
     "BackfillJobStartPayload",
     "BackfillJobStatusPayload",
@@ -822,7 +776,6 @@ __all__ = [
     "EmptyPayload",
     "FeedSubscriptionDesired",
     "FeedSubscriptionSyncPayload",
-    "WsSlowConsumerApplyPayload",
     "collector_control_registry",
     "read_frame",
     "write_frame",

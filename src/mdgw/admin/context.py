@@ -26,7 +26,7 @@ from mdgw.admin.auth.oidc import OidcClient
 from mdgw.admin.auth.service import AdminAuth
 from mdgw.admin.auth.store import AuthStore
 from mdgw.admin.capabilities import AdapterStatus
-from mdgw.admin.db import AdminStore
+from mdgw.admin.db import AdminInstanceLockedError, AdminStore
 from mdgw.admin.export.service import ExportService
 from mdgw.admin.lifecycle.runtime import AdminLifecycle
 from mdgw.admin.proxy import ClientIpResolver
@@ -36,17 +36,21 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
     from mdgw.admin.auth.oidc import OidcTransport
-    from mdgw.admin.auth.store import SessionRecord
     from mdgw.admin.feed.runtime import FeedAdminRuntime
     from mdgw.admin.gaps.runtime import GapRuntime
     from mdgw.admin.jobs.runtime import BackfillJobRuntime
     from mdgw.api.ws_hub import WebSocketHub
-    from mdgw.config import AdminConfig
+    from mdgw.config import AdminConfig, FeedConfig
     from mdgw.metrics import MetricsRegistry
     from mdgw.reference import InstrumentStore
     from mdgw.store.parquet_dataset import ParquetBarStore
 
 logger = logging.getLogger(__name__)
+
+#: Renew the single-instance lease at roughly ``lease_ttl/3``. The lower bound
+#: only keeps a nonsensically small configured TTL from spinning.
+_MIN_HEARTBEAT_INTERVAL_S = 0.01
+_HEARTBEAT_JOIN_TIMEOUT_S = 5.0
 
 #: Adapters/capabilities this build implements. Later tickets extend the
 #: registration through ``register_capabilities``.
@@ -94,11 +98,16 @@ class AdminContext:
         environ: Mapping[str, str] | None = None,
         ws_hub: WebSocketHub | None = None,
         flow_control_defaults: Mapping[str, Mapping[str, object]] | None = None,
+        feeds: Iterable[FeedConfig] = (),
     ) -> None:
         self.config = config
         self.storage_root = Path(storage_root)
         self.store = store
         self.instrument_store = instrument_store
+        #: Startup ``[[feeds]]`` configuration. It is only an initial seed for
+        #: an empty management database; the Admin desired state is
+        #: authoritative once any row (including a tombstone) exists.
+        self.feeds: tuple[FeedConfig, ...] = tuple(feeds)
         self.metrics = metrics
         self.instance_id = (
             f"api-{uuid4().hex}" if instance_id is None else instance_id
@@ -107,9 +116,6 @@ class AdminContext:
         #: Hub attached by the API service before the app is built; the Admin
         #: WebSocket reuses its bounded queue/lag_notice fan-out.
         self.ws_hub = ws_hub
-        #: Narrow hook for ticket 04 flow control: a callable may deny a new
-        #: Admin WS session (close 4429). ``None`` means no quota.
-        self.ws_quota_checker: Callable[[SessionRecord], bool] | None = None
         self._auth: AdminAuth | None = None
         self._auth_lock = threading.Lock()
         self._audit: AuditWriter | None = None
@@ -130,6 +136,8 @@ class AdminContext:
             }
         )
         self._client_ip_resolver: ClientIpResolver | None = None
+        self._lease_stop: threading.Event | None = None
+        self._lease_thread: threading.Thread | None = None
         self._cleanup_callbacks: list[Callable[[], None]] = []
         self._adapter_status_providers: dict[
             str, Callable[[], AdapterStatus]
@@ -523,8 +531,10 @@ class AdminContext:
         )
         try:
             database.claim_instance(self.instance_id)
+            self._start_lease_heartbeat(database)
             audit = self._open_audit_writer()
         except BaseException:
+            self._stop_lease_heartbeat()
             database.close()
             raise
         self.db = database
@@ -544,6 +554,62 @@ class AdminContext:
                     "export executor failed to start",
                     extra={"event": "admin.export.start_failed"},
                 )
+
+    def _start_lease_heartbeat(self, database: AdminStore) -> None:
+        """Keep the single-instance lease live while this process runs.
+
+        Without the renewal a healthy API would look crashed after
+        ``instance_lease_s`` and a second API process could take over the
+        management store. A lost lease is an error (never a silent event):
+        another process is now authoritative, so the heartbeat stops.
+        """
+        self._stop_lease_heartbeat()
+        interval_s = max(
+            self.config.instance_lease_s / 3.0, _MIN_HEARTBEAT_INTERVAL_S
+        )
+        stop = threading.Event()
+        instance_id = self.instance_id
+
+        def renew() -> None:
+            while not stop.wait(interval_s):
+                try:
+                    database.heartbeat(instance_id)
+                except AdminInstanceLockedError:
+                    logger.exception(
+                        "admin store lease was lost to another instance",
+                        extra={
+                            "event": "admin.store.lease_lost",
+                            "instance_id": instance_id,
+                        },
+                    )
+                    return
+                except Exception:  # a transient DB error must not kill it
+                    logger.exception(
+                        "admin store lease heartbeat failed",
+                        extra={
+                            "event": "admin.store.heartbeat_failed",
+                            "instance_id": instance_id,
+                        },
+                    )
+
+        thread = threading.Thread(
+            target=renew,
+            name="mdgw-admin-lease-heartbeat",
+            daemon=True,
+        )
+        self._lease_stop = stop
+        self._lease_thread = thread
+        thread.start()
+
+    def _stop_lease_heartbeat(self) -> None:
+        stop = self._lease_stop
+        thread = self._lease_thread
+        self._lease_stop = None
+        self._lease_thread = None
+        if stop is not None:
+            stop.set()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=_HEARTBEAT_JOIN_TIMEOUT_S)
 
     def _open_audit_writer(self) -> AuditWriter:
         return AuditWriter(AuditStore(self.db_path), clock=self._clock)
@@ -590,6 +656,9 @@ class AdminContext:
         self._gaps = None
         self._startup_done = False
         self._startup_callbacks.clear()
+        # Stop renewing before releasing: a heartbeat racing the release
+        # could re-touch (or raise from) a closing SQLite connection.
+        self._stop_lease_heartbeat()
         database = self.db
         self.db = None
         if database is not None:

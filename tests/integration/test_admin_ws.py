@@ -1,4 +1,4 @@
-# ruff: file-ignore[implicit-namespace-package]
+# ruff: file-ignore[implicit-namespace-package,too-many-arguments]
 """Authenticated Admin WebSocket: cookie+Origin upgrade, allowlist, close codes.
 
 The Admin WS reuses the public ``WebSocketHub`` fan-out (bounded queue,
@@ -24,7 +24,12 @@ from mdgw.admin.context import AdminContext
 from mdgw.api.app import create_app
 from mdgw.api.asgi_server import AsgiServer
 from mdgw.api.ws_hub import WebSocketHub
-from mdgw.config import AdminAdaptersConfig, AdminConfig
+from mdgw.config import (
+    AdminAdaptersConfig,
+    AdminConfig,
+    AdminProxyConfig,
+    RateLimitConfig,
+)
 from mdgw.store.parquet_dataset import ParquetBarStore
 
 if TYPE_CHECKING:
@@ -60,11 +65,14 @@ def _running(
     hub: WebSocketHub | None = None,
     attach_hub: bool = True,
     clock: Clock | None = None,
+    rate_limit: RateLimitConfig | None = None,
+    trusted_proxies: tuple[str, ...] = (),
 ) -> Generator[tuple[AsgiServer, AdminContext, WebSocketHub]]:
     config = AdminConfig(
         enabled=True,
         db_path=tmp_path / "admin" / "admin.db",
         adapters=AdminAdaptersConfig(oidc=False),
+        proxy=AdminProxyConfig(trusted_proxies=trusted_proxies),
     )
     store = ParquetBarStore(tmp_path / "data")
     active_hub = hub or WebSocketHub()
@@ -75,7 +83,12 @@ def _running(
         ws_hub=active_hub if attach_hub else None,
         clock=clock,
     )
-    app = create_app(store, admin=context, ws_hub=active_hub)
+    app = create_app(
+        store,
+        admin=context,
+        ws_hub=active_hub,
+        rate_limit=rate_limit,
+    )
     server = AsgiServer()
     try:
         server.start(app, host=HOST, port=0, thread_name=THREAD_NAME)
@@ -113,14 +126,15 @@ async def _connect(
     origin: str | None = None,
     path: str = "/api/v1/admin/ws",
     query: str = "",
+    headers: dict[str, str] | None = None,
 ):
-    headers = {}
+    extra = dict(headers or {})
     if cookie is not None:
-        headers["Cookie"] = cookie
+        extra["Cookie"] = cookie
     return await websockets.connect(
         _ws_url(server, path) + query,
         origin=origin,
-        additional_headers=headers or None,
+        additional_headers=extra or None,
     )
 
 
@@ -251,23 +265,134 @@ def test_admin_ws_reports_restart_when_no_hub_is_attached(
         assert asyncio.run(scenario()) == 1012
 
 
-def test_admin_ws_quota_hook_closes_4429(tmp_path: Path) -> None:
-    with _running(tmp_path) as (server, context, _hub):
-        credential = Credential(context, "Operator")
-        context.ws_quota_checker = lambda _record: False
+# -- per-IP WebSocket quota (S6) --------------------------------------------
 
-        async def scenario() -> int:
-            ws = await _connect(
-                server,
-                cookie=f"mdgw_session={credential.token}",
-                origin=_origin(server),
+
+def _quota_limit(*, enabled: bool = True) -> RateLimitConfig:
+    return RateLimitConfig(
+        enabled=enabled,
+        requests_per_second=1_000,
+        burst=1_000,
+        max_ws_sessions_per_ip=1,
+    )
+
+
+def test_admin_ws_enforces_max_ws_sessions_per_ip_and_releases_on_close(
+    tmp_path: Path,
+) -> None:
+    with _running(tmp_path, rate_limit=_quota_limit()) as (
+        server,
+        context,
+        hub,
+    ):
+        credential = Credential(context, "Operator")
+        cookie = f"mdgw_session={credential.token}"
+
+        async def scenario() -> tuple[int, int]:
+            first = await _connect(
+                server, cookie=cookie, origin=_origin(server)
             )
             try:
-                return await _close_code(ws)
+                await first.send(json.dumps({"op": "ping"}))
+                await _recv_op(first, "pong")
+                second = await _connect(
+                    server, cookie=cookie, origin=_origin(server)
+                )
+                try:
+                    rejected = await _close_code(second)
+                finally:
+                    await second.close()
             finally:
-                await ws.close()
+                await first.close()
+            assert _session_hub_count(hub, 0)
+            # The slot reserved by the first session was released.
+            third = await _connect(
+                server, cookie=cookie, origin=_origin(server)
+            )
+            try:
+                await third.send(json.dumps({"op": "ping"}))
+                await _recv_op(third, "pong")
+                return rejected, 0
+            finally:
+                await third.close()
+
+        rejected, _ = asyncio.run(scenario())
+        assert rejected == 4429
+        assert _session_hub_count(hub, 0)
+
+
+def test_admin_ws_quota_uses_the_resolved_proxy_client_ip(
+    tmp_path: Path,
+) -> None:
+    with _running(
+        tmp_path,
+        rate_limit=_quota_limit(),
+        trusted_proxies=(HOST,),
+    ) as (server, context, _hub):
+        credential = Credential(context, "Operator")
+        cookie = f"mdgw_session={credential.token}"
+
+        async def scenario() -> int:
+            first = await _connect(
+                server,
+                cookie=cookie,
+                origin=_origin(server),
+                headers={"X-Forwarded-For": "203.0.113.10"},
+            )
+            second = await _connect(
+                server,
+                cookie=cookie,
+                origin=_origin(server),
+                headers={"X-Forwarded-For": "203.0.113.11"},
+            )
+            try:
+                await first.send(json.dumps({"op": "ping"}))
+                await _recv_op(first, "pong")
+                await second.send(json.dumps({"op": "ping"}))
+                await _recv_op(second, "pong")
+                third = await _connect(
+                    server,
+                    cookie=cookie,
+                    origin=_origin(server),
+                    headers={"X-Forwarded-For": "203.0.113.10"},
+                )
+                try:
+                    return await _close_code(third)
+                finally:
+                    await third.close()
+            finally:
+                await first.close()
+                await second.close()
 
         assert asyncio.run(scenario()) == 4429
+
+
+def test_a_disabled_rate_limit_admits_admin_ws_sessions(
+    tmp_path: Path,
+) -> None:
+    with _running(
+        tmp_path, rate_limit=_quota_limit(enabled=False)
+    ) as (server, context, _hub):
+        credential = Credential(context, "Operator")
+        cookie = f"mdgw_session={credential.token}"
+
+        async def scenario() -> None:
+            first = await _connect(
+                server, cookie=cookie, origin=_origin(server)
+            )
+            second = await _connect(
+                server, cookie=cookie, origin=_origin(server)
+            )
+            try:
+                await first.send(json.dumps({"op": "ping"}))
+                await _recv_op(first, "pong")
+                await second.send(json.dumps({"op": "ping"}))
+                await _recv_op(second, "pong")
+            finally:
+                await first.close()
+                await second.close()
+
+        asyncio.run(scenario())
 
 
 # -- protocol allowlist -----------------------------------------------------

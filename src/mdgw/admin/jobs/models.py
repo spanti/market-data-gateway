@@ -22,45 +22,23 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from mdgw.backfill_job_plan import plan_for_interval
+from mdgw.backfill_job_status import (
+    ACTIVE_STATUSES,
+    BACKFILL_STATUSES,
+    CANCELLED,
+    CANCELLING,
+    FAILED,
+    PARTIALLY_SUCCEEDED,
+    QUEUED,
+    RETRYABLE_STATUSES,
+    RUNNING,
+    SUCCEEDED,
+    TERMINAL_STATUSES,
+)
 from mdgw.core.time import ns_to_iso
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-
-QUEUED = "queued"
-RUNNING = "running"
-SUCCEEDED = "succeeded"
-PARTIALLY_SUCCEEDED = "partially_succeeded"
-FAILED = "failed"
-CANCELLING = "cancelling"
-CANCELLED = "cancelled"
-
-BACKFILL_STATUSES: tuple[str, ...] = (
-    QUEUED,
-    RUNNING,
-    SUCCEEDED,
-    PARTIALLY_SUCCEEDED,
-    FAILED,
-    CANCELLING,
-    CANCELLED,
-)
-
-#: Statuses that block a second job for the same (instrument_id, interval).
-ACTIVE_STATUSES: tuple[str, ...] = (QUEUED, RUNNING, CANCELLING)
-
-#: Statuses whose job can be retried as a NEW linked job.
-RETRYABLE_STATUSES: tuple[str, ...] = (
-    FAILED,
-    PARTIALLY_SUCCEEDED,
-    CANCELLED,
-)
-
-TERMINAL_STATUSES: tuple[str, ...] = (
-    SUCCEEDED,
-    PARTIALLY_SUCCEEDED,
-    FAILED,
-    CANCELLED,
-)
 
 COUNTER_KEYS: tuple[str, ...] = (
     "scanned_bars",
