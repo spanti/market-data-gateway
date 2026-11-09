@@ -7,7 +7,6 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import type { CapabilityState } from "@/api/capabilities";
 import { DisabledReason } from "@/components/disabled-reason";
 import { EmptyState } from "@/components/states";
 import { StatusBadge, type StatusTone } from "@/components/status-badge";
@@ -24,10 +23,7 @@ import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { BAR_INTERVALS } from "@/lib/time-range";
 import { filterMessages, WS_DEBUG_MESSAGE_LIMIT } from "@/pages/console/message-buffer";
-import {
-  capabilityDisabledReason,
-  type DisabledReason as DisabledReasonValue,
-} from "@/runtime/permissions";
+import { resolveWsTarget } from "@/api/ws/ws-target";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
 import { useActionReason } from "@/runtime/use-permission";
 import {
@@ -50,8 +46,12 @@ import {
  */
 
 export interface WebSocketDebugViewProps {
-  /** Injectable for tests; defaults to a real transport-backed session. */
-  sessionFactory?: () => WsDebugSession;
+  /**
+   * Injectable for tests; defaults to a real transport-backed session. The
+   * resolved target URL is passed for assertion/documentation; test factories
+   * may ignore it and inject their own transport.
+   */
+  sessionFactory?: (targetUrl: string | null) => WsDebugSession;
 }
 
 function formatClock(value: string | null): string {
@@ -104,27 +104,19 @@ function syncLabel(snapshot: WsDebugSnapshot): string {
   }
 }
 
-function adminWsCapabilityReason(
-  capability: CapabilityState | null,
-): DisabledReasonValue | null {
-  if (capability?.mode !== "admin-api") {
-    return null;
-  }
-  if (capability.compatible === false) {
-    return { code: "backend-unsupported", message: "Admin API 版本不兼容" };
-  }
-  return capabilityDisabledReason(
-    capability.document?.capabilities.ws_admin_session,
-  );
-}
-
 export function WebSocketDebugView({
   sessionFactory,
 }: WebSocketDebugViewProps) {
   const { capability } = useRuntimeMode();
-  const [session] = useState<WsDebugSession>(
-    () => sessionFactory?.() ?? new WsDebugSession(),
-  );
+  const wsTarget = useMemo(() => resolveWsTarget(capability), [capability]);
+  const session = useMemo<WsDebugSession>(() => {
+    if (sessionFactory) {
+      return sessionFactory(wsTarget.url);
+    }
+    return new WsDebugSession(
+      wsTarget.url !== null ? { url: wsTarget.url } : {},
+    );
+  }, [sessionFactory, wsTarget.url]);
 
   const subscribeToStore = useCallback(
     (listener: () => void) => session.subscribeToChanges(listener),
@@ -137,7 +129,7 @@ export function WebSocketDebugView({
 
   const subscribeActionReason = useActionReason("ws.session.subscribe");
   const freeformActionReason = useActionReason("ws.debug.freeform");
-  const capabilityReason = adminWsCapabilityReason(capability);
+  const capabilityReason = wsTarget.reason;
   const connectionBlockReason = capabilityReason;
   const subscribeBlockReason = subscribeActionReason ?? capabilityReason;
   const freeformBlockReason = freeformActionReason ?? capabilityReason;
@@ -218,8 +210,9 @@ export function WebSocketDebugView({
         <div>
           <PanelTitle>WebSocket Debug</PanelTitle>
           <PanelDescription>
-            通过 GatewayWsTransport 连接网关 /ws。每个连接是新的接收段；断线后没有恢复位点，不宣称无缝恢复。
-            Admin API 模式下角色白名单为契约目标，真实连接仍是公开 /ws（当前无认证）。
+            通过 GatewayWsTransport 连接网关 WebSocket。每个连接是新的接收段；断线后没有恢复位点，不宣称无缝恢复。
+            Current Contract 使用公开 /ws；Admin API 模式只连接能力声明中的
+            /api/v1/admin/ws，不降级到公开 /ws。
           </PanelDescription>
         </div>
         <div className="flex flex-col items-end gap-1">
@@ -227,7 +220,8 @@ export function WebSocketDebugView({
             {connectionLabel(snapshot)}
           </StatusBadge>
           <span className="text-[11px] text-faint-foreground">
-            目标 {snapshot.targetUrl} · 连接时间 {formatClock(snapshot.connectedAt)}
+            目标 {wsTarget.url ?? "—（Admin WS 能力不可用）"} · 连接时间{" "}
+            {formatClock(snapshot.connectedAt)}
           </span>
         </div>
       </PanelHeader>

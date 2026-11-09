@@ -33,6 +33,7 @@ import {
   peakRangeLabel,
 } from "@/lib/monitoring-config";
 import {
+  adminInstanceToServiceRow,
   errorText,
   lastSuccessAt,
   sourceState,
@@ -168,7 +169,7 @@ export function MonitoringPage() {
       ? deriveVenueRows(sources.instruments.data.instruments, collectorHealth)
       : [];
 
-  const serviceRows: ServiceInstanceRow[] = [
+  const directServiceRows: ServiceInstanceRow[] = [
     {
       role: "collector",
       service: sources.collector.data?.service ?? null,
@@ -237,6 +238,13 @@ export function MonitoringPage() {
     },
   ];
 
+  const serviceRows: ServiceInstanceRow[] =
+    sources.serviceSource.kind === "admin"
+      ? (sources.adminInstances.data ?? []).map(adminInstanceToServiceRow)
+      : sources.serviceSource.kind === "gap"
+        ? []
+        : directServiceRows;
+
   const qpsValue =
     trends.qps.state === "ready" ? latestFiniteSum(trends.qps.value) : null;
   const peakValue =
@@ -263,13 +271,19 @@ export function MonitoringPage() {
     p99 === null
       ? trendUnknownReason(trends.latency, trends.source)
       : null;
-  const feedUnknown = feedSummary
-    ? null
-    : collectorError
-      ? "能力未知"
-      : "正在加载…";
+  const feedUnknown = !sources.directOpsEnabled
+    ? (sources.opsGapReason ?? "能力未知")
+    : feedSummary
+      ? null
+      : collectorError
+        ? "能力未知"
+        : "正在加载…";
 
-  const headerStatus = collectorError ? (
+  const headerStatus = !sources.directOpsEnabled ? (
+    <StatusBadge tone="warning" live>
+      Feed Freshness 需要 Admin API 接口
+    </StatusBadge>
+  ) : collectorError ? (
     <StatusBadge tone="warning" live>
       Feed Freshness 未知
     </StatusBadge>
@@ -289,8 +303,9 @@ export function MonitoringPage() {
     <StatusBadge tone="unknown">等待 Feed Freshness</StatusBadge>
   );
 
-  const feedOverallStatus =
-    collectorError || !feedSummary ? (
+  const feedOverallStatus = !sources.directOpsEnabled ? (
+    <StatusBadge tone="warning">需要 Admin API 接口</StatusBadge>
+  ) : collectorError || !feedSummary ? (
       <StatusBadge tone="critical">未知</StatusBadge>
     ) : feedSummary.stale > 0 ? (
       <StatusBadge tone="critical" live>
@@ -302,25 +317,34 @@ export function MonitoringPage() {
       </StatusBadge>
     );
 
+  const opsSourceRow = (
+    source: string,
+    state: "loading" | "ready" | "error",
+    lastSuccessAtValue: number | null,
+  ) => ({
+    source,
+    window: "当前快照（5 秒轮询）",
+    state: sources.directOpsEnabled ? state : ("unknown" as const),
+    lastSuccessAt: sources.directOpsEnabled ? lastSuccessAtValue : null,
+    reason: sources.directOpsEnabled ? null : sources.opsGapReason,
+  });
+
   const sourceRows = [
-    {
-      source: "Service /status",
-      window: "当前快照（5 秒轮询）",
-      state: sourceState(sources.api),
-      lastSuccessAt: lastSuccessAt(sources.api),
-    },
-    {
-      source: "Collector /status",
-      window: "当前快照（5 秒轮询）",
-      state: collectorReadyState,
-      lastSuccessAt: lastSuccessAt(sources.collector),
-    },
-    {
-      source: "Replay /status",
-      window: "当前快照（5 秒轮询）",
-      state: sourceState(sources.replay),
-      lastSuccessAt: lastSuccessAt(sources.replay),
-    },
+    opsSourceRow(
+      "Service /status",
+      sourceState(sources.api),
+      lastSuccessAt(sources.api),
+    ),
+    opsSourceRow(
+      "Collector /status",
+      collectorReadyState,
+      lastSuccessAt(sources.collector),
+    ),
+    opsSourceRow(
+      "Replay /status",
+      sourceState(sources.replay),
+      lastSuccessAt(sources.replay),
+    ),
     {
       source: "Dataset /api/v1/status",
       window: "当前快照（5 秒轮询）",
@@ -469,10 +493,29 @@ export function MonitoringPage() {
           unknownCause={trends.source.disabledReason ? "not-exposed" : "failed"}
           errorMessage={chartError(trends.qps)}
         />
-        <ServiceInstanceList
-          className="xl:col-span-4"
-          rows={serviceRows}
-        />
+        {sources.serviceSource.kind === "gap" ? (
+          <section
+            aria-label="Service Instance capability gap"
+            data-testid="service-instance-gap"
+            className="border-t-2 border-status-warning bg-card px-4 py-4 xl:col-span-4"
+          >
+            <PanelTitle>Service Instance ledger</PanelTitle>
+            <p className="mt-2 text-sm font-medium">
+              {sources.serviceSource.reason.message}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Admin API 模式不读取无认证 <code>/status</code> 或{" "}
+              <code>/ops/*</code>。需要后端实现{" "}
+              <code>GET /api/v1/admin/service-instances</code> 并声明{" "}
+              <code>service_lifecycle</code> 能力。
+            </p>
+          </section>
+        ) : (
+          <ServiceInstanceList
+            className="xl:col-span-4"
+            rows={serviceRows}
+          />
+        )}
         <TrendChart
           className="xl:col-span-7"
           title="HTTP 延迟 P50 / P95 / P99"
@@ -488,7 +531,27 @@ export function MonitoringPage() {
         </div>
       </div>
 
-      {collectorError ? (
+      {!sources.directOpsEnabled ? (
+        <section
+          aria-label="Feed Freshness"
+          data-testid="feed-freshness-gap"
+          className="mt-7 border-y border-border bg-card py-4"
+        >
+          <PanelHeader className="px-4">
+            <div>
+              <PanelTitle>Feed Freshness</PanelTitle>
+              <PanelDescription>
+                Feed Freshness 来自 collector /status.health.tracked。Admin
+                模式不暴露无认证 /ops/collector，因此该面板保持能力缺口。
+              </PanelDescription>
+            </div>
+            {feedOverallStatus}
+          </PanelHeader>
+          <p className="mt-2 px-4 text-sm font-medium">
+            {sources.opsGapReason}
+          </p>
+        </section>
+      ) : collectorError ? (
         <section
           aria-label="Feed Freshness"
           className="mt-7 border-y border-border bg-card py-4"

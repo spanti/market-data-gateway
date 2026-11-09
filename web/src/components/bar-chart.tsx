@@ -8,7 +8,7 @@ import {
 import { SVGRenderer } from "echarts/renderers";
 import type { EChartsType } from "echarts/core";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import type { BarMessageEnvelope } from "@/api/endpoints/bars";
 import {
@@ -152,6 +152,7 @@ export function BarChart({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<EChartsType | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const chartLabelId = useId();
 
   const selectedBar =
     selectedIndex === null ? null : (points[selectedIndex] ?? null);
@@ -267,12 +268,20 @@ export function BarChart({
       dataTable={points.length > 0 ? <BarDataTable bars={points} /> : undefined}
     >
       <div>
+        {/*
+          ECharts' AriaComponent overwrites the host's aria-label with its own
+          generated chart description. aria-labelledby keeps the keyboard
+          instruction stable in the accessibility tree.
+        */}
+        <span id={chartLabelId} className="sr-only">
+          最大 Revision Bar 价格图。使用左右方向键逐点读取，完整精确值见下方数据表。
+        </span>
         <div
           ref={hostRef}
           data-chart="true"
           role="img"
           tabIndex={0}
-          aria-label="最大 Revision Bar 价格图。使用左右方向键逐点读取，完整精确值见下方数据表。"
+          aria-labelledby={chartLabelId}
           aria-describedby="bar-chart-readout"
           onFocus={() => {
             if (points.length > 0 && selectedIndex === null) {

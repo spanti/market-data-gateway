@@ -703,4 +703,40 @@ describe("monitoring runtime-mode gating", () => {
     ).toBeInTheDocument();
     await expectKpiValue("Realtime QPS", "12.5");
   });
+
+  it("never reads unauthenticated ops endpoints in Admin mode and shows explicit capability gaps", async () => {
+    installAdmin("Operator");
+    let opsRequested = false;
+    server.use(
+      http.get("*/status", ({ request }) => {
+        if (new URL(request.url).pathname === "/status") {
+          opsRequested = true;
+        }
+        return HttpResponse.json(apiStatus());
+      }),
+      http.get("*/readyz", () => {
+        opsRequested = true;
+        return HttpResponse.json({ ready: true, reason: "unexpected" });
+      }),
+      http.get("*/ops/*", () => {
+        opsRequested = true;
+        return HttpResponse.json({});
+      }),
+    );
+    renderApp();
+
+    expect(
+      await screen.findByRole("heading", { name: "监控分析工作台" }),
+    ).toBeInTheDocument();
+    await expectKpiValue("Realtime QPS", "12.5");
+
+    const serviceGap = await screen.findByTestId("service-instance-gap");
+    expect(serviceGap).toHaveTextContent(
+      "需要 Admin API 服务实例接口（未实现）",
+    );
+    expect(screen.getByTestId("feed-freshness-gap")).toHaveTextContent(
+      "需要 Admin API 服务实例接口（未实现）",
+    );
+    expect(opsRequested).toBe(false);
+  });
 });

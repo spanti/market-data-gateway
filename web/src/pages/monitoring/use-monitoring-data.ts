@@ -1,5 +1,7 @@
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { useMemo } from "react";
+import type { ServiceInstance } from "@/api/endpoints/admin";
+import type { InstrumentsResponse } from "@/api/endpoints/instruments";
 import {
   fetchDatasetStatus,
   fetchApiReady,
@@ -8,8 +10,17 @@ import {
   fetchCollectorStatus,
   fetchReplayReady,
   fetchReplayStatus,
+  type ApiStatus,
+  type CollectorStatus,
+  type DatasetStatus,
+  type ReadyPayload,
+  type ReplayStatus,
 } from "@/api/endpoints/ops";
 import { fetchInstruments } from "@/api/endpoints/instruments";
+import {
+  adminServiceInstanceToRow,
+  fetchAdminServiceInstances,
+} from "@/api/endpoints/admin-service-instances";
 import {
   adminMonitoringAvailability,
   adminResponseToTrendSeries,
@@ -20,6 +31,12 @@ import {
   type AdminMonitoringQueryResponse,
   type AdminMonitoringTemplate,
 } from "@/api/monitoring/admin-proxy";
+import type { ServiceInstanceRow } from "@/components/monitoring/service-instance-list";
+import {
+  ADMIN_SERVICE_INSTANCE_GAP,
+  serviceInstanceSource,
+  type ServiceInstanceSource,
+} from "@/runtime/service-instance-source";
 import {
   fetchLatencyTrends,
   fetchPeakQps,
@@ -49,6 +66,7 @@ export const MONITORING_QUERY_KEYS = {
   latencyTrend: ["monitoring", "trend", "latency"] as const,
   adminTemplates: ["monitoring", "admin", "templates"] as const,
   adminTrend: ["monitoring", "admin", "trend"] as const,
+  adminServiceInstances: ["monitoring", "admin", "service-instances"] as const,
 };
 
 export type SourceState = "loading" | "ready" | "error";
@@ -78,6 +96,7 @@ export function errorText(error: unknown): string {
 function useStatusQuery<T>(
   queryKey: readonly unknown[],
   queryFn: (signal?: AbortSignal) => Promise<T>,
+  enabled = true,
 ) {
   return useQuery({
     queryKey,
@@ -85,40 +104,120 @@ function useStatusQuery<T>(
     refetchInterval: STATUS_POLL_INTERVAL_MS,
     staleTime: 0,
     retry: false,
+    enabled,
   });
 }
 
-export function useMonitoringSources() {
+/**
+ * The per-Role `/status`, `/readyz` and `/ops/*` endpoints are Current
+ * Contract only. Admin mode must not call them; the deployment denies those
+ * paths, and the UI shows an explicit capability gap instead of a fallback.
+ */
+export interface MonitoringSources {
+  dataset: UseQueryResult<DatasetStatus>;
+  api: UseQueryResult<ApiStatus>;
+  apiReady: UseQueryResult<ReadyPayload>;
+  collector: UseQueryResult<CollectorStatus>;
+  collectorReady: UseQueryResult<ReadyPayload>;
+  replay: UseQueryResult<ReplayStatus>;
+  replayReady: UseQueryResult<ReadyPayload>;
+  instruments: UseQueryResult<InstrumentsResponse>;
+  adminInstances: UseQueryResult<ServiceInstance[]>;
+  directOpsEnabled: boolean;
+  serviceSource: ServiceInstanceSource;
+  opsGapReason: string | null;
+}
+
+export function useMonitoringSources(): MonitoringSources {
+  const { capability, role } = useRuntimeMode();
+  const directOpsEnabled = capability?.mode === "current-contract";
+  const serviceSource = serviceInstanceSource(capability);
+  const adminInstances = useQuery({
+    queryKey: MONITORING_QUERY_KEYS.adminServiceInstances,
+    queryFn: ({ signal }) => fetchAdminServiceInstances(signal),
+    refetchInterval: STATUS_POLL_INTERVAL_MS,
+    staleTime: 0,
+    retry: false,
+    enabled: serviceSource.kind === "admin" && role !== null,
+  });
+
+  const opsGapReason = directOpsEnabled
+    ? null
+    : capability === null || capability.mode === "capabilities-unknown"
+      ? "能力未知，暂不可用"
+      : `${ADMIN_SERVICE_INSTANCE_GAP}；Admin 模式不暴露 /status、/ops/* 或 /prometheus`;
+
   return {
+    directOpsEnabled,
+    serviceSource,
+    opsGapReason,
+    adminInstances,
     dataset: useStatusQuery(
       MONITORING_QUERY_KEYS.datasetStatus,
       fetchDatasetStatus,
     ),
-    api: useStatusQuery(MONITORING_QUERY_KEYS.apiStatus, fetchApiStatus),
+    api: useStatusQuery(
+      MONITORING_QUERY_KEYS.apiStatus,
+      fetchApiStatus,
+      directOpsEnabled,
+    ),
     apiReady: useStatusQuery(
       MONITORING_QUERY_KEYS.apiReady,
       fetchApiReady,
+      directOpsEnabled,
     ),
     collector: useStatusQuery(
       MONITORING_QUERY_KEYS.collectorStatus,
       fetchCollectorStatus,
+      directOpsEnabled,
     ),
     collectorReady: useStatusQuery(
       MONITORING_QUERY_KEYS.collectorReady,
       fetchCollectorReady,
+      directOpsEnabled,
     ),
     replay: useStatusQuery(
       MONITORING_QUERY_KEYS.replayStatus,
       fetchReplayStatus,
+      directOpsEnabled,
     ),
     replayReady: useStatusQuery(
       MONITORING_QUERY_KEYS.replayReady,
       fetchReplayReady,
+      directOpsEnabled,
     ),
     instruments: useStatusQuery(
       MONITORING_QUERY_KEYS.instruments,
       (signal) => fetchInstruments({ include_delisted: true }, signal),
     ),
+  };
+}
+
+/**
+ * Contract-target mapping from the Admin service-instance list to the same
+ * ledger row shape used by Current Contract. Only fields the Admin contract
+ * actually returns are rendered; uptime is not inferred from `started_at`.
+ */
+export function adminInstanceToServiceRow(
+  instance: ServiceInstance,
+): ServiceInstanceRow {
+  const row = adminServiceInstanceToRow(instance);
+  const observed = Date.parse(row.lastObservedAt);
+  return {
+    role: row.role,
+    service: row.role,
+    ready: row.ready,
+    readyReason: row.readyReason || null,
+    uptimeS: null,
+    statusState: "ready",
+    lastSuccessAt: Number.isFinite(observed) ? observed : null,
+    details: [
+      `Instance ${row.instanceId}`,
+      `Desired ${row.desiredState}`,
+      `Observed ${row.observedState}`,
+      `Health ${row.health}`,
+    ],
+    errorMessage: row.lastError?.message ?? null,
   };
 }
 

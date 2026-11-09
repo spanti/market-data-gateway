@@ -1,0 +1,81 @@
+# Admin API mode.
+#
+# Only the same-origin /api surface (including /api/v1/admin/* and the
+# authenticated Admin WebSocket), plus the two probe endpoints, are proxied.
+# Unauthenticated Prometheus, metrics, per-Role /status and /ops management
+# resources are denied here: they are not merely hidden in the UI.
+#
+# MDGW_RUNTIME_MODE=admin-api
+
+map $http_upgrade $mdgw_connection_upgrade {
+  default upgrade;
+  ''      close;
+}
+
+server {
+  listen 80;
+  server_name _;
+
+  root /usr/share/nginx/html;
+  index index.html;
+  server_tokens off;
+
+  # Resolved per request through Docker's embedded DNS; an absent upstream
+  # yields 502 for that route instead of preventing startup.
+  resolver ${MDGW_DNS_RESOLVER} valid=10s ipv6=off;
+  set $mgdw_api_upstream "${MDGW_API_UPSTREAM}";
+
+  include /etc/nginx/mgdw/security-headers.conf;
+
+  gzip on;
+  gzip_vary on;
+  gzip_min_length 1024;
+  gzip_types text/plain text/css application/json application/javascript
+             application/xml image/svg+xml;
+
+  client_max_body_size 1m;
+
+  location = /index.html {
+    expires -1;
+  }
+
+  location /assets/ {
+    expires 1y;
+    try_files $uri =404;
+  }
+
+  # Admin API, public read APIs and the authenticated Admin WebSocket (upgrade
+  # under /api/v1/admin/ws).
+  location /api/ {
+    include /etc/nginx/mgdw/proxy-headers.conf;
+    include /etc/nginx/mgdw/websocket-upgrade.conf;
+    proxy_pass $mgdw_api_upstream;
+  }
+
+  # Probes are safe and contain no operational detail.
+  location = /healthz {
+    include /etc/nginx/mgdw/proxy-headers.conf;
+    proxy_pass $mgdw_api_upstream;
+  }
+  location = /readyz {
+    include /etc/nginx/mgdw/proxy-headers.conf;
+    proxy_pass $mgdw_api_upstream;
+  }
+
+  # Explicit, testable denial of unauthenticated ops/Prometheus resources.
+  # The response uses the public error-envelope shape.
+  location ~ ^/(prometheus|metrics|status|ws|ops/collector|ops/replay)(/|$) {
+    default_type application/json;
+    return 404 '{"error":{"code":"not_found","message":"Admin API mode does not expose unauthenticated Prometheus or ops management resources","details":{},"request_id":"nginx-admin-mode"}}';
+  }
+
+  location ~ /\. {
+    deny all;
+  }
+
+  # SPA history fallback. The index shell is not cached.
+  location / {
+    expires -1;
+    try_files $uri $uri/ /index.html;
+  }
+}
