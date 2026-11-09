@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Depends
 from starlette.responses import JSONResponse
 
+from mdgw.admin.audit.routes import create_audit_router
 from mdgw.admin.auth.dependencies import require_authenticated_request
 from mdgw.admin.auth.routes import (
     create_auth_router,
@@ -49,6 +50,10 @@ FEATURE_ROUTER_FACTORIES: list[Callable[[AdminContext], APIRouter]] = []
 def register_feature(factory: Callable[[AdminContext], APIRouter]) -> None:
     """Register one feature router factory for every admin app."""
     FEATURE_ROUTER_FACTORIES.append(factory)
+
+
+#: Ticket 03: read-only Operator Audit Event query routes.
+register_feature(create_audit_router)
 
 
 def create_admin_router(context: AdminContext) -> APIRouter:

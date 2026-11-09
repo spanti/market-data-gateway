@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from mdgw.admin.audit.store import AuditStore
+from mdgw.admin.audit.writer import AuditWriter
 from mdgw.admin.auth.oidc import OidcClient
 from mdgw.admin.auth.service import AdminAuth
 from mdgw.admin.auth.store import AuthStore
@@ -42,13 +44,20 @@ logger = logging.getLogger(__name__)
 
 #: Adapters/capabilities this build implements. Later tickets extend the
 #: registration through ``register_capabilities``.
-_BUILT_ADAPTERS = frozenset({"admin_store", "oidc"})
-_BUILT_CAPABILITIES = frozenset({"oidc_session", "ws_admin_session"})
-_WS_CAPABILITY_DETAILS = {
+_BUILT_ADAPTERS = frozenset({"admin_store", "oidc", "audit_store"})
+_BUILT_CAPABILITIES = frozenset(
+    {"oidc_session", "ws_admin_session", "operator_audit"}
+)
+_CAPABILITY_DETAILS = {
     "ws_admin_session": {
         "path": "/api/v1/admin/ws",
         "ops": ["subscribe", "unsubscribe", "ping"],
-    }
+    },
+    "operator_audit": {
+        "export": False,
+        "edit": False,
+        "delete": False,
+    },
 }
 
 
@@ -86,6 +95,8 @@ class AdminContext:
         self.ws_quota_checker: Callable[[SessionRecord], bool] | None = None
         self._auth: AdminAuth | None = None
         self._auth_lock = threading.Lock()
+        self._audit: AuditWriter | None = None
+        self._audit_lock = threading.Lock()
         self._oidc_transport = oidc_transport
         self._clock = clock
         self._environ = environ
@@ -95,7 +106,7 @@ class AdminContext:
         self._built_capabilities: set[str] = set(_BUILT_CAPABILITIES)
         self._capability_details: dict[str, dict[str, object]] = {
             name: dict(detail)
-            for name, detail in _WS_CAPABILITY_DETAILS.items()
+            for name, detail in _CAPABILITY_DETAILS.items()
         }
 
     @property
@@ -125,14 +136,38 @@ class AdminContext:
                     and self.config.oidc.is_configured
                     else None
                 )
-                self._auth = AdminAuth(
+                auth = AdminAuth(
                     self.config,
                     AuthStore(self.db_path),
                     oidc=oidc,
                     clock=self._clock,
                     environ=self._environ,
                 )
+                audit = self._audit
+                if audit is not None:
+                    auth.security_event_sink = audit.record_security_event
+                self._auth = auth
             return self._auth
+
+    @property
+    def audit(self) -> AuditWriter:
+        """Operator Audit Event writer; opening it opens the management DB."""
+        existing = self._audit
+        if existing is not None:
+            return existing
+        with self._audit_lock:
+            if self._audit is None:
+                if not self.enabled:
+                    msg = "Admin API is disabled"
+                    raise RuntimeError(msg)
+                self.ensure_open()
+                if self._audit is None:
+                    self._audit = self._open_audit_writer()
+                if self._auth is not None:
+                    self._auth.security_event_sink = (
+                        self._audit.record_security_event
+                    )
+            return self._audit
 
     # -- capability registration ------------------------------------------
 
@@ -192,6 +227,16 @@ class AdminContext:
                 else "admin store is not open",
             )
         }
+        if not self.config.adapters.audit_store:
+            statuses["audit_store"] = AdapterStatus(
+                "unsupported", "disabled by configuration"
+            )
+        elif self._audit is None or not self._audit.available:
+            statuses["audit_store"] = AdapterStatus(
+                "unavailable", "audit store is not open"
+            )
+        else:
+            statuses["audit_store"] = AdapterStatus("available")
         if not self.config.adapters.oidc:
             statuses["oidc"] = AdapterStatus(
                 "unsupported", "disabled by configuration"
@@ -224,10 +269,17 @@ class AdminContext:
         )
         try:
             database.claim_instance(self.instance_id)
+            audit = self._open_audit_writer()
         except BaseException:
             database.close()
             raise
         self.db = database
+        self._audit = audit
+        if self._auth is not None:
+            self._auth.security_event_sink = audit.record_security_event
+
+    def _open_audit_writer(self) -> AuditWriter:
+        return AuditWriter(AuditStore(self.db_path), clock=self._clock)
 
     def close(self) -> None:
         """Release the lease, run registered cleanups, and close the store.
@@ -246,12 +298,23 @@ class AdminContext:
         auth = self._auth
         self._auth = None
         if auth is not None:
+            auth.security_event_sink = None
             try:
                 auth.close()
             except Exception:  # cleanup must not block shutdown
                 logger.exception(
                     "admin auth store close failed",
                     extra={"event": "admin.auth.close_failed"},
+                )
+        audit = self._audit
+        self._audit = None
+        if audit is not None:
+            try:
+                audit.close()
+            except Exception:  # cleanup must not block shutdown
+                logger.exception(
+                    "admin audit store close failed",
+                    extra={"event": "admin.audit.close_failed"},
                 )
         database = self.db
         self.db = None
