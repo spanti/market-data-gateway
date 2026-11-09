@@ -1,8 +1,12 @@
 import { useLocation } from "react-router-dom";
+import { DisabledAction } from "@/components/disabled-reason";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
+import { buildLoginUrl } from "@/runtime/auth";
+import { loginDisabledReason } from "@/runtime/login-availability";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
+import type { SessionIssueReason } from "@/runtime/session-expiry";
 
 function formatUtcTimestamp(value: string): string {
   const date = new Date(value);
@@ -12,9 +16,26 @@ function formatUtcTimestamp(value: string): string {
   return `${date.toISOString().replace("T", " ").slice(0, 19)} UTC`;
 }
 
+function sessionIssueDetail(reason: SessionIssueReason): string {
+  switch (reason) {
+    case "idle_timeout":
+      return "原因：30 分钟无操作，空闲会话已过期";
+    case "absolute_timeout":
+      return "原因：已达 8 小时最长会话时限";
+    case "idp_error":
+      return "原因：OIDC 登录失败";
+    case "missing":
+      return "原因：没有有效的服务端会话";
+    default:
+      return "原因：会话无效或已被服务端拒绝";
+  }
+}
+
 /**
  * The runtime-mode banner is the only place the console states which contract
- * it is talking to. It never offers a role switcher or a fake login.
+ * it is talking to. It never offers a role switcher or a fake login: login is
+ * a top-level browser navigation to the backend OIDC entry, logout is a
+ * CSRF-protected POST.
  */
 export function ModeBanner() {
   const {
@@ -23,6 +44,9 @@ export function ModeBanner() {
     session,
     sessionLoading,
     role,
+    sessionIssue,
+    authPending,
+    logout,
     refreshCapabilities,
   } = useRuntimeMode();
   const location = useLocation();
@@ -62,7 +86,8 @@ export function ModeBanner() {
 
   if (capability.mode === "admin-api") {
     const returnTo = `${location.pathname}${location.search}`;
-    const loginHref = `/api/v1/admin/auth/login?return_to=${encodeURIComponent(returnTo)}`;
+    const loginHref = buildLoginUrl(returnTo);
+    const loginReason = loginDisabledReason(capability);
     return (
       <div
         data-testid="runtime-mode-banner"
@@ -76,6 +101,8 @@ export function ModeBanner() {
             <span className="font-medium">正在确认会话…</span>
           ) : role ? (
             <span className="font-medium">{role}</span>
+          ) : sessionIssue ? (
+            <StatusBadge tone="warning">会话已失效</StatusBadge>
           ) : (
             <span className="font-medium">未登录</span>
           )}
@@ -84,13 +111,34 @@ export function ModeBanner() {
               {session.user.displayName}
             </span>
           ) : null}
+          {!sessionLoading && !role && sessionIssue ? (
+            <span className="text-muted-foreground">
+              {sessionIssueDetail(sessionIssue)}
+            </span>
+          ) : null}
           {capability.compatible === false ? (
             <StatusBadge tone="critical">Admin API 版本不兼容</StatusBadge>
           ) : null}
           {!sessionLoading && !role ? (
-            <a className="underline underline-offset-2" href={loginHref}>
-              登录
-            </a>
+            loginReason ? (
+              <DisabledAction label="登录" reason={loginReason} />
+            ) : (
+              <a className="underline underline-offset-2" href={loginHref}>
+                登录
+              </a>
+            )
+          ) : null}
+          {!sessionLoading && role ? (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={authPending}
+              onClick={() => {
+                void logout().catch(() => {});
+              }}
+            >
+              {authPending ? "注销中…" : "注销"}
+            </Button>
           ) : null}
           <span className="text-muted-foreground">
             Access Role 由服务端分配；前端不构成安全边界。
