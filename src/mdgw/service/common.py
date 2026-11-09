@@ -58,6 +58,36 @@ def update_dataset_metrics(
     )
 
 
+def advance_counter(  # ruff: ignore[too-many-arguments] - explicit metric fields
+    metrics: MetricsRegistry,
+    name: str,
+    current: float,
+    previous: float,
+    *,
+    help: str,  # ruff: ignore[builtin-argument-shadowing] - established keyword API
+    labels: dict[str, str] | None = None,
+) -> float:
+    """Advance a cumulative metric by the delta of a source counter.
+
+    Prometheus counters never decrease. If the source counter resets (for
+    example after a process restart), the metric is re-baselined instead of
+    decrementing or double counting; the next increase is counted from zero.
+    """
+    current_value = float(current)
+    previous_value = float(previous)
+    if current_value > previous_value:
+        metrics.inc(
+            name,
+            amount=current_value - previous_value,
+            labels=labels,
+            help=help,
+        )
+        return current_value
+    if current_value < previous_value:
+        return current_value
+    return previous_value
+
+
 def ns_iso(value: datetime | None) -> str | None:
     if value is None:
         return None
@@ -73,4 +103,9 @@ def iso_to_seconds(value: str | None) -> float:
         return 0.0
 
 
-__all__ = ["iso_to_seconds", "ns_iso", "update_dataset_metrics"]
+__all__ = [
+    "advance_counter",
+    "iso_to_seconds",
+    "ns_iso",
+    "update_dataset_metrics",
+]

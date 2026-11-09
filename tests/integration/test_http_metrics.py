@@ -65,13 +65,22 @@ def test_metrics_exposes_http_request_duration_histogram(
     service = ApiService(_config(), data_root=tmp_path)
     try:
         service.start()
-        health_status, _ = _get(f"{service.base_url}/healthz")
+        health_status, health_body = _get(f"{service.base_url}/healthz")
         assert health_status == 200
         text = _scrape_until_observed(
             f"{service.base_url}/metrics", HEALTH_SERIES
         )
     finally:
         service.stop()
+
+    # Response bytes are measured on the ASGI send path, per method/route
+    # template/status, and never claimed as client-received network bytes.
+    assert "# TYPE mdgw_api_http_response_bytes_total counter" in text
+    assert (
+        "mdgw_api_http_response_bytes_total"
+        f"{{{HEALTH_SERIES}}} {len(health_body.encode('utf-8'))}"
+    ) in text
+    assert "complete response stream" in text
 
     assert f"# TYPE {DURATION_METRIC} histogram" in text
     # Router template is the label value, not the raw request path.
