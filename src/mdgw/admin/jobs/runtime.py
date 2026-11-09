@@ -22,11 +22,21 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
+from mdgw.admin.audit.models import (
+    RESULT_SUCCEEDED,
+    AuditActor,
+    AuditTarget,
+)
 from mdgw.admin.jobs.client import (
     BackfillDispatchError,
     CollectorBackfillClient,
 )
-from mdgw.admin.jobs.models import CANCELLING, QUEUED, RUNNING
+from mdgw.admin.jobs.models import (
+    CANCELLING,
+    QUEUED,
+    RUNNING,
+    TERMINAL_STATUSES,
+)
 from mdgw.admin.jobs.service import BackfillJobService
 from mdgw.admin.jobs.store import BackfillJobStore
 
@@ -186,7 +196,7 @@ class BackfillJobRuntime:
             )
             return
         self.service.mark_dispatched(record.job_id)
-        self.service.apply_collector_state(record.job_id, result)
+        self._apply_state(record.job_id, result)
 
     def _poll(self, record: BackfillJobRecord) -> None:
         if record.status == CANCELLING and record.dispatched_at_ns is None:
@@ -202,15 +212,8 @@ class BackfillJobRuntime:
                 if cancel_result.get("state") == "unknown":
                     self.service.mark_interrupted(record.job_id)
                     return
-                if cancel_result.get("state") in {
-                    "succeeded",
-                    "partially_succeeded",
-                    "failed",
-                    "cancelled",
-                }:
-                    self.service.apply_collector_state(
-                        record.job_id, cancel_result
-                    )
+                if cancel_result.get("state") in TERMINAL_STATUSES:
+                    self._apply_state(record.job_id, cancel_result)
                     return
         try:
             status = self.client.job_status(
@@ -227,7 +230,81 @@ class BackfillJobRuntime:
         if state == "unknown":
             self.service.mark_interrupted(record.job_id)
             return
-        self.service.apply_collector_state(record.job_id, status)
+        self._apply_state(record.job_id, status)
+
+    def _apply_state(
+        self, job_id: str, result: dict
+    ) -> None:
+        """Persist one observed Collector state, then reconcile Gaps once.
+
+        ``apply_status`` only updates active rows, so this terminal transition
+        (and therefore the Gap reconciliation) happens exactly once per job.
+        """
+        applied = self.service.apply_collector_state(job_id, result)
+        if applied and result.get("state") in TERMINAL_STATUSES:
+            self._reconcile_gaps(job_id, result)
+
+    def _reconcile_gaps(
+        self, job_id: str, result: dict
+    ) -> None:
+        """Ticket 07: persist observed gaps / resolve after a successful job.
+
+        Audit or gap-storage failures must never turn an already executed job
+        into a failure, so this hook is best effort and fully logged.
+        """
+        try:  # ruff: ignore[too-many-statements-in-try-clause]
+            latest = self.service.get(job_id)
+            if latest is None:
+                return
+            resolved = self._context.gaps.service.reconcile_finished_job(
+                latest, result
+            )
+            if resolved:
+                self.service.set_resolved_gap_ids(job_id, resolved)
+                self._audit_gap_resolutions(latest, resolved)
+        except Exception:
+            logger.exception(
+                "backfill gap reconciliation failed",
+                extra={
+                    "event": "admin.backfill.gap_reconcile_failed",
+                    "job_id": job_id,
+                },
+            )
+
+    def _audit_gap_resolutions(
+        self, job: BackfillJobRecord, gap_ids: tuple[str, ...]
+    ) -> None:
+        """Append ``backfill_gap.resolve`` best effort; never fail the job."""
+        try:
+            writer = self._context.audit
+            actor = AuditActor(
+                subject=job.requested_by_subject,
+                display_name=job.requested_by_display_name,
+                access_role=job.requested_by_access_role,
+            )
+            for gap_id in gap_ids:
+                writer.append(
+                    actor=actor,
+                    action="backfill_gap.resolve",
+                    target=AuditTarget(type="backfill_gap", id=gap_id),
+                    result=RESULT_SUCCEEDED,
+                    request_id=f"req_{job.job_id}",
+                    reason=job.reason,
+                    job_id=job.job_id,
+                    after={
+                        "gap_id": gap_id,
+                        "resolved_by_job_id": job.job_id,
+                        "status": "resolved",
+                    },
+                )
+        except Exception:
+            logger.exception(
+                "failed to audit backfill gap resolutions; the job succeeded",
+                extra={
+                    "event": "admin.backfill.gap_audit_failed",
+                    "job_id": job.job_id,
+                },
+            )
 
     def _try_cancel(self, job_id: str) -> dict | None:
         try:

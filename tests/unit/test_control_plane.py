@@ -24,6 +24,7 @@ from mdgw.service.control_plane import (
     BACKFILL_JOB_START_ACTION,
     BACKFILL_JOB_STATUS_ACTION,
     FEED_SUBSCRIPTION_SYNC_ACTION,
+    GAPS_SNAPSHOT_ACTION,
     WS_SLOW_CONSUMER_ACTION,
     BackfillJobCancelPayload,
     BackfillJobStartPayload,
@@ -97,7 +98,7 @@ def _recv_exact(sock: socket.socket, size: int) -> bytes:
     return bytes(chunks)
 
 
-def test_the_collector_allowlist_contains_the_ticket_04_and_06_actions() -> None:
+def test_the_collector_allowlist_contains_the_ticket_04_06_and_07_actions() -> None:
     registry = collector_control_registry()
 
     assert set(registry.allowed_for("collector")) == {
@@ -108,6 +109,7 @@ def test_the_collector_allowlist_contains_the_ticket_04_and_06_actions() -> None
         BACKFILL_JOB_START_ACTION,
         BACKFILL_JOB_STATUS_ACTION,
         BACKFILL_JOB_CANCEL_ACTION,
+        GAPS_SNAPSHOT_ACTION,
     }
     assert registry.allowed_for("supervisor") == ()
 

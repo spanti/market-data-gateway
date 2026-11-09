@@ -38,9 +38,11 @@ from mdgw.service.control_plane import (
     BACKFILL_JOB_START_ACTION,
     BACKFILL_JOB_STATUS_ACTION,
     FEED_SUBSCRIPTION_SYNC_ACTION,
+    GAPS_SNAPSHOT_ACTION,
     ControlPlaneServer,
     FeedSubscriptionSyncPayload,
 )
+from mdgw.service.gap_snapshot import gaps_snapshot_result
 from mdgw.service.health_server import ServiceHealthServer
 from mdgw.store.composition import StorageComposition
 from mdgw.streaming import StreamingInterface
@@ -370,6 +372,13 @@ class CollectorService:
         )
         server.register(
             BACKFILL_JOB_CANCEL_ACTION, self._backfill_runner.handle_cancel
+        )
+        # Ticket 07: read-only in-memory Gap snapshot for the Admin API.
+        server.register(
+            GAPS_SNAPSHOT_ACTION,
+            lambda _payload: gaps_snapshot_result(
+                self.core, collector_instance_id=self.instance_id
+            ),
         )
         server.start()
         self._control_server = server

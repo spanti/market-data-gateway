@@ -4,9 +4,13 @@ Staleness is tracked per `(feed, instrument_id, interval)` using the Bar's
 `event_ts` (its `close_ts`). The threshold is `max(2 * interval, stale_after_s)`
 so a coarse interval is not declared stale just because it only closes hourly.
 
-`gap_unrecoverable` events are an in-memory, append-only audit list for v1.
-Ticket 12 can export the same snapshot through metrics without changing this
-module's contract.
+`gap_unrecoverable` events are an in-memory, append-only audit list for v1 and
+remain process-local: they are lost on Collector restart and the public
+`/status`/`/metrics` surfaces report only this process's view. Persistent
+history is owned by the Admin API (`mdgw.admin.gaps`), which may poll the
+`gaps.snapshot` control action; that store never changes the meaning of this
+snapshot. Ticket 12 can export the same snapshot through metrics without
+changing this module's contract.
 """
 
 from __future__ import annotations
@@ -29,7 +33,12 @@ GAP_BACKFILL_LIMIT = "backfill_limit_exceeded"
 
 @dataclass(frozen=True, slots=True)
 class GapEvent:
-    """One known hole that Backfill could not close."""
+    """One known hole that Backfill could not close.
+
+    ``feed`` names the Feed Handler that owned the missing range. It is an
+    empty string for callers that predate the persistent Gap store (ticket 07)
+    so the public health snapshot stays source-compatible.
+    """
 
     instrument_id: str
     interval: str
@@ -37,6 +46,7 @@ class GapEvent:
     to_ts: datetime | None
     reason: str
     recorded_at: datetime
+    feed: str = ""
 
 
 def stale_threshold_s(interval: str, stale_after_s: float) -> float:
@@ -108,6 +118,7 @@ class HealthTracker:
         to_ts: datetime | None,
         reason: str,
         recorded_at: datetime | None = None,
+        feed: str = "",
     ) -> GapEvent:
         """Append one `gap_unrecoverable` event."""
         event = GapEvent(
@@ -117,6 +128,7 @@ class HealthTracker:
             to_ts=None if to_ts is None else to_utc(to_ts),
             reason=reason,
             recorded_at=to_utc(recorded_at) if recorded_at is not None else utc_now(),
+            feed=feed,
         )
         with self._lock:
             self._gaps.append(event)
@@ -187,6 +199,7 @@ def _ts_to_iso(value: datetime | None) -> str | None:
 
 
 def _gap_to_dict(event: GapEvent) -> dict:
+    """Public process-local snapshot entry (unchanged wire keys)."""
     return {
         "instrument_id": event.instrument_id,
         "interval": event.interval,

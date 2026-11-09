@@ -76,6 +76,7 @@ WS_SLOW_CONSUMER_ACTION = "flow_control.ws_slow_consumer.apply"
 BACKFILL_JOB_START_ACTION = "backfill.job.start"
 BACKFILL_JOB_STATUS_ACTION = "backfill.job.status"
 BACKFILL_JOB_CANCEL_ACTION = "backfill.job.cancel"
+GAPS_SNAPSHOT_ACTION = "gaps.snapshot"
 
 #: Largest frame accepted or produced by one request/response.
 DEFAULT_MAX_MESSAGE_BYTES = 65_536
@@ -251,6 +252,14 @@ def collector_control_registry() -> ControlActionRegistry:
         BACKFILL_JOB_CANCEL_ACTION,
         targets=(ControlTarget.COLLECTOR,),
         payload=BackfillJobCancelPayload,
+    )
+    # Ticket 07: read-only projection of the Collector's process-local
+    # ``gap_unrecoverable`` list. The API persists it; the Collector's Dataset
+    # and HWM are never touched by this action.
+    registry.register(
+        GAPS_SNAPSHOT_ACTION,
+        targets=(ControlTarget.COLLECTOR,),
+        payload=EmptyPayload,
     )
     return registry
 
@@ -800,6 +809,7 @@ __all__ = [
     "DEFAULT_MAX_MESSAGE_BYTES",
     "DEFAULT_REQUEST_TIMEOUT_S",
     "FEED_SUBSCRIPTION_SYNC_ACTION",
+    "GAPS_SNAPSHOT_ACTION",
     "WS_SLOW_CONSUMER_ACTION",
     "ApiRateLimitApplyPayload",
     "BackfillJobCancelPayload",

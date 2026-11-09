@@ -469,6 +469,18 @@ class BackfillJobStore:
             )
             return cursor.rowcount > 0
 
+    def set_resolved_gap_ids(
+        self, job_id: str, gap_ids: tuple[str, ...], now_ns: int
+    ) -> bool:
+        """Persist the Gap ids a successful job resolved (ticket 07 linkage)."""
+        with self._lock:
+            cursor = self._connection().execute(
+                "UPDATE backfill_jobs SET resolved_gap_ids_json = ?, "
+                "updated_at_ns = ? WHERE job_id = ?",
+                (encode_gap_ids(gap_ids), now_ns, job_id),
+            )
+            return cursor.rowcount > 0
+
     def mark_interrupted(self, job_id: str, now_ns: int) -> bool:
         """Fail an unconfirmed active job with the stable ``interrupted`` code."""
         with self._lock:

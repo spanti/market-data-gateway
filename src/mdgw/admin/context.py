@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from mdgw.admin.auth.oidc import OidcTransport
     from mdgw.admin.auth.store import SessionRecord
     from mdgw.admin.feed.runtime import FeedAdminRuntime
+    from mdgw.admin.gaps.runtime import GapRuntime
     from mdgw.admin.jobs.runtime import BackfillJobRuntime
     from mdgw.api.ws_hub import WebSocketHub
     from mdgw.config import AdminConfig
@@ -143,6 +144,8 @@ class AdminContext:
         self._feed_lock = threading.Lock()
         self._backfill: BackfillJobRuntime | None = None
         self._backfill_lock = threading.Lock()
+        self._gaps: GapRuntime | None = None
+        self._gaps_lock = threading.Lock()
         self._built_adapters: set[str] = set(_BUILT_ADAPTERS)
         self._built_capabilities: set[str] = set(_BUILT_CAPABILITIES)
         self._capability_details: dict[str, dict[str, object]] = {
@@ -380,6 +383,28 @@ class AdminContext:
             return self._backfill
 
     @property
+    def gaps(self) -> GapRuntime:
+        """Persistent Gaps and the Collector snapshot poller for this API."""
+        existing = self._gaps
+        if existing is not None:
+            return existing
+        with self._gaps_lock:
+            if self._gaps is None:
+                if not self.enabled:
+                    msg = "Admin API is disabled"
+                    raise RuntimeError(msg)
+                self.ensure_open()
+                from mdgw.admin.gaps.runtime import (  # ruff: ignore[import-outside-top-level]
+                    GapRuntime,
+                )
+
+                runtime = GapRuntime(self)
+                runtime.start()
+                self._gaps = runtime
+                self.register_cleanup(runtime.close)
+            return self._gaps
+
+    @property
     def client_ip_resolver(self) -> ClientIpResolver:
         """Trusted-proxy resolver used by the admin request context."""
         if self._client_ip_resolver is None:
@@ -562,6 +587,7 @@ class AdminContext:
                 )
         self._feed = None
         self._backfill = None
+        self._gaps = None
         self._startup_done = False
         self._startup_callbacks.clear()
         database = self.db
