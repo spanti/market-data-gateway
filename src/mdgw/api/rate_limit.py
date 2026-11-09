@@ -56,11 +56,15 @@ class RateLimitMiddleware:
         limiter: RateLimiter,
         metrics: MetricsRegistry | None = None,
         routes: Iterable[Any] = (),
+        client_ip_resolver: Callable[[MutableMapping[str, Any]], str] | None = None,
     ) -> None:
         self.app = app
         self.limiter = limiter
         self.metrics = metrics
         self._routes = tuple(routes)
+        # Admin Flow Control keys on the trusted-proxy resolved address; the
+        # default deployment keeps the transport peer (no X-Forwarded-For).
+        self._client_ip_resolver = client_ip_resolver
 
     async def __call__(
         self,
@@ -76,7 +80,12 @@ class RateLimitMiddleware:
         # Publish the template before the router runs. A 429 never reaches
         # routing, and an allowed request keeps the same label either way.
         scope[ROUTE_TEMPLATE_SCOPE_KEY] = route
-        decision = await self.limiter.acquire(client_ip(scope), route)
+        source_ip = (
+            client_ip(scope)
+            if self._client_ip_resolver is None
+            else self._client_ip_resolver(scope)
+        )
+        decision = await self.limiter.acquire(source_ip, route)
         if decision.allowed:
             await self.app(scope, receive, send)
             return

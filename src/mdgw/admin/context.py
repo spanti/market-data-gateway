@@ -14,6 +14,7 @@ the connection. ``create_app`` registers ``close`` as the ASGI shutdown hook.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
 
     from mdgw.admin.auth.oidc import OidcTransport
     from mdgw.admin.auth.store import SessionRecord
+    from mdgw.admin.feed.runtime import FeedAdminRuntime
     from mdgw.api.ws_hub import WebSocketHub
     from mdgw.config import AdminConfig
     from mdgw.metrics import MetricsRegistry
@@ -89,6 +91,7 @@ class AdminContext:
         clock: Callable[[], int] | None = None,
         environ: Mapping[str, str] | None = None,
         ws_hub: WebSocketHub | None = None,
+        flow_control_defaults: Mapping[str, Mapping[str, object]] | None = None,
     ) -> None:
         self.config = config
         self.storage_root = Path(storage_root)
@@ -114,6 +117,16 @@ class AdminContext:
         self._oidc_transport = oidc_transport
         self._clock = clock
         self._environ = environ
+        #: Startup configuration seeds untouched flow-control rows. Once an
+        #: operator writes a resource its row is authoritative.
+        self.flow_control_defaults: dict[str, dict[str, object]] | None = (
+            None
+            if flow_control_defaults is None
+            else {
+                name: dict(value)
+                for name, value in flow_control_defaults.items()
+            }
+        )
         self._client_ip_resolver: ClientIpResolver | None = None
         self._cleanup_callbacks: list[Callable[[], None]] = []
         self._adapter_status_providers: dict[
@@ -123,12 +136,30 @@ class AdminContext:
         # Re-entrant: opening the management store eagerly starts the export
         # executor, which re-enters this property from the same thread.
         self._exports_lock = threading.RLock()
+        self._startup_callbacks: list[Callable[[], None]] = []
+        self._startup_done = False
+        self._feed: FeedAdminRuntime | None = None
+        self._feed_lock = threading.Lock()
         self._built_adapters: set[str] = set(_BUILT_ADAPTERS)
         self._built_capabilities: set[str] = set(_BUILT_CAPABILITIES)
         self._capability_details: dict[str, dict[str, object]] = {
             name: dict(detail)
             for name, detail in _CAPABILITY_DETAILS.items()
         }
+        # Ticket 04: the Collector control transport and the two feed
+        # capabilities are implemented here; truthfulness still depends on the
+        # adapter flag and the live Collector connection.
+        self.register_capabilities(
+            adapters={"collector_control"},
+            capabilities={"feed_subscription", "feed_flow_control"},
+            details={
+                "feed_flow_control": {
+                    "api_rate_limit": {"hot_apply": True},
+                    "ws_slow_consumer": {"hot_apply": True},
+                    "restart_required_fields": [],
+                }
+            },
+        )
         self.register_cleanup(self._close_lifecycle)
 
     @property
@@ -300,6 +331,29 @@ class AdminContext:
         return self.config.resolved_db_path(self.storage_root)
 
     @property
+    def resolved_environ(self) -> Mapping[str, str]:
+        """Environment used for secret lookups (injectable in tests)."""
+        return self._environ if self._environ is not None else os.environ
+
+    @property
+    def feed(self) -> FeedAdminRuntime:
+        """Feed Subscription and flow-control runtime (opens the store)."""
+        existing = self._feed
+        if existing is not None:
+            return existing
+        with self._feed_lock:
+            if self._feed is None:
+                if not self.enabled:
+                    msg = "Admin API is disabled"
+                    raise RuntimeError(msg)
+                self.ensure_open()
+                # Imported lazily: the feed package reads AdminContext types.
+                from mdgw.admin.feed.runtime import FeedAdminRuntime  # ruff: ignore[import-outside-top-level]
+
+                self._feed = FeedAdminRuntime(self)
+            return self._feed
+
+    @property
     def client_ip_resolver(self) -> ClientIpResolver:
         """Trusted-proxy resolver used by the admin request context."""
         if self._client_ip_resolver is None:
@@ -357,6 +411,7 @@ class AdminContext:
                 statuses[name] = AdapterStatus(
                     "unavailable", "adapter status probe failed"
                 )
+        statuses["collector_control"] = self._collector_control_status()
         if not self.config.adapters.prometheus:
             statuses["prometheus"] = AdapterStatus(
                 "unsupported", "disabled by configuration"
@@ -369,9 +424,37 @@ class AdminContext:
             statuses["prometheus"] = AdapterStatus("available")
         return statuses
 
+    def _collector_control_status(self) -> AdapterStatus:
+        """Ticket 04: Collector control is only connected when configured."""
+        if not self.config.adapters.collector_control:
+            return AdapterStatus("unsupported", "disabled by configuration")
+        if self._feed is None and self.db is None:
+            return AdapterStatus(
+                "unavailable", "collector control is not connected"
+            )
+        return self.feed.adapter_status()
+
     def register_cleanup(self, callback: Callable[[], None]) -> None:
         """Register a callback run before the admin DB closes."""
         self._cleanup_callbacks.append(callback)
+
+    def register_startup(self, callback: Callable[[], None]) -> None:
+        """Register a callback run once after the admin app is mounted."""
+        self._startup_callbacks.append(callback)
+
+    def run_startup(self) -> None:
+        """Run registered startup hooks once; failures never abort the API."""
+        if self._startup_done:
+            return
+        self._startup_done = True
+        for callback in tuple(self._startup_callbacks):
+            try:
+                callback()
+            except Exception:  # startup recovery must not crash the API
+                logger.exception(
+                    "admin startup hook failed",
+                    extra={"event": "admin.startup_hook_failed"},
+                )
 
     def ensure_open(self) -> None:
         """Open the management store and claim the single-instance lease."""
@@ -451,6 +534,9 @@ class AdminContext:
                     "admin audit store close failed",
                     extra={"event": "admin.audit.close_failed"},
                 )
+        self._feed = None
+        self._startup_done = False
+        self._startup_callbacks.clear()
         database = self.db
         self.db = None
         if database is not None:

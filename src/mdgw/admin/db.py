@@ -202,6 +202,17 @@ class AdminStore:
                 raise
             connection.execute("COMMIT")
 
+    @contextlib.contextmanager
+    def read(self) -> Generator[sqlite3.Connection]:
+        """Run read-only statements under the store's connection lock.
+
+        The admin store keeps one shared SQLite connection (``check_same_thread
+        = False``); holding the lock for the duration of a read prevents a
+        concurrent transaction from re-entering a different cursor state.
+        """
+        with self._lock:
+            yield self._connection()
+
     # -- single API instance constraint ------------------------------------
 
     def claim_instance(

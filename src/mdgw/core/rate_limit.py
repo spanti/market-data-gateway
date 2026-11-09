@@ -23,6 +23,22 @@ Clock = Callable[[], float]
 
 
 @dataclass(frozen=True, slots=True)
+class RateLimitPolicy:
+    """The current API Rate Limit settings, optionally hot-applied at runtime.
+
+    ``version`` is the admin resource version. A source that changes the
+    version resets the per-key token buckets so the new rate/burst applies
+    immediately instead of being blended with the old policy.
+    """
+
+    enabled: bool
+    requests_per_second: float
+    burst: int
+    max_ws_sessions_per_ip: int = 0
+    version: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class RateDecision:
     """The explicit outcome of one limiter acquisition.
 
@@ -83,7 +99,13 @@ class TokenBucket:
 
 
 class RateLimiter:
-    """Per-`(source_ip, route_template)` buckets plus per-IP WS session caps."""
+    """Per-`(source_ip, route_template)` buckets plus per-IP WS session caps.
+
+    ``policy_source`` is the hot-apply seam used by Admin Flow Control: every
+    acquisition reads the current policy, and a new ``version`` resets the
+    token buckets. With no source the limiter keeps the static configuration
+    (the pre-ticket-04 behaviour).
+    """
 
     def __init__(
         self,
@@ -92,24 +114,48 @@ class RateLimiter:
         burst: int,
         max_ws_sessions_per_ip: int = 0,
         clock: Clock = time.monotonic,
+        policy_source: Callable[[], RateLimitPolicy] | None = None,
     ) -> None:
-        self._rate = float(requests_per_second)
-        self._burst = burst
-        self._max_ws_sessions_per_ip = max_ws_sessions_per_ip
+        self._default_policy = RateLimitPolicy(
+            enabled=True,
+            requests_per_second=float(requests_per_second),
+            burst=burst,
+            max_ws_sessions_per_ip=max_ws_sessions_per_ip,
+            version=0,
+        )
+        self._policy_source = policy_source
+        self._applied_version: int | None = None
         self._clock = clock
         self._buckets: dict[tuple[str, str], TokenBucket] = {}
         self._ws_sessions: dict[str, int] = {}
         self._lock = asyncio.Lock()
 
+    def policy(self) -> RateLimitPolicy:
+        """Return the policy currently in force."""
+        if self._policy_source is None:
+            return self._default_policy
+        return self._policy_source()
+
+    def _apply_locked(self, policy: RateLimitPolicy) -> None:
+        """Reset token buckets when the policy version changes."""
+        if self._applied_version == policy.version:
+            return
+        self._applied_version = policy.version
+        self._buckets.clear()
+
     async def acquire(self, source_ip: str, route: str) -> RateDecision:
         """Take one token for this key and report the decision."""
         async with self._lock:
+            policy = self.policy()
+            if not policy.enabled:
+                return RateDecision(allowed=True)
+            self._apply_locked(policy)
             key = (source_ip, route)
             bucket = self._buckets.get(key)
             if bucket is None:
                 bucket = TokenBucket(
-                    rate=self._rate,
-                    burst=self._burst,
+                    rate=policy.requests_per_second,
+                    burst=policy.burst,
                     clock=self._clock,
                 )
                 self._buckets[key] = bucket
@@ -119,13 +165,16 @@ class RateLimiter:
         """Reserve one WebSocket session slot for this IP.
 
         Returns ``False`` when the per-IP cap is reached. A cap of ``0`` means
-        unlimited.
+        unlimited. A disabled policy admits without reserving a slot.
         """
         async with self._lock:
+            policy = self.policy()
+            if not policy.enabled:
+                return True
+            self._apply_locked(policy)
             count = self._ws_sessions.get(source_ip, 0)
-            if self._max_ws_sessions_per_ip and count >= (
-                self._max_ws_sessions_per_ip
-            ):
+            cap = policy.max_ws_sessions_per_ip
+            if cap and count >= cap:
                 return False
             self._ws_sessions[source_ip] = count + 1
             return True
@@ -140,4 +189,9 @@ class RateLimiter:
                 self._ws_sessions[source_ip] = count - 1
 
 
-__all__ = ["RateDecision", "RateLimiter", "TokenBucket"]
+__all__ = [
+    "RateDecision",
+    "RateLimitPolicy",
+    "RateLimiter",
+    "TokenBucket",
+]

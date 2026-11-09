@@ -711,6 +711,7 @@ def test_capabilities_announce_operator_audit_when_enabled(
     with _running_admin(tmp_path) as (_server, client, context):
         document = client.get("/api/v1/admin/capabilities").json()
         schema_version = context.db.schema_version
+        latest_schema_version = context.db.latest_schema_version
 
     adapters = {
         entry["name"]: entry["state"] for entry in document["adapters"]
@@ -722,8 +723,9 @@ def test_capabilities_announce_operator_audit_when_enabled(
         "edit": False,
         "delete": False,
     }
-    # Later tickets add further migrations; this pins that 003 and the
-    # lifecycle migration (ticket 05, 005) ran.
+    # Later tickets add further migrations; the database runs the newest
+    # schema, which includes 003 and the lifecycle migration (ticket 05, 005).
+    assert schema_version == latest_schema_version
     assert schema_version >= 5
 
 

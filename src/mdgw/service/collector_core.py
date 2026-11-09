@@ -145,6 +145,10 @@ class CollectorCore:
         self._asset_class_for_callback = asset_class_for
         self.instrument_store: InstrumentStore | None = None
         self.hwm: HighWaterMarkStore | None = None
+        #: Optional runtime subscription gate (feed subscription control).
+        #: Returning False stops future collection of that raw Bar before
+        #: normalization/persistence; ``None`` preserves the current behaviour.
+        self.subscription_filter: Callable[[str, str], bool] | None = None
         self.bars_ingested = 0
         self.bars_written = 0
         self.last_ingest_ts: datetime | None = None
@@ -191,6 +195,12 @@ class CollectorCore:
 
         ingest_ts = utc_now()
         raws = list(self.feed_handler.iter_bars())
+        if self.subscription_filter is not None:
+            raws = [
+                raw
+                for raw in raws
+                if self.subscription_filter(raw.instrument_id, raw.interval)
+            ]
         if not raws:
             return 0, []
 

@@ -66,11 +66,11 @@ def _session(now_ns: int = 1_000 * SECONDS) -> SessionRecord:
 def test_migrations_are_discovered_in_numeric_order() -> None:
     versions = [version for version, _ in discover_migrations()]
 
-    # 003 is ticket 03's Operator Audit Event schema; 005 is ticket 05's
-    # lifecycle schema; 008 is ticket 08's Export Job schema. Later tickets
-    # append higher-numbered migrations.
+    # 003 is ticket 03's Operator Audit Event schema; 004 is ticket 04's
+    # feed schema; 005 is ticket 05's lifecycle schema; 008 is ticket 08's
+    # Export Job schema. Later tickets append higher-numbered migrations.
     assert versions[:3] == [1, 2, 3]
-    assert 5 in versions
+    assert {4, 5, 8} <= set(versions)
     assert versions == sorted(set(versions))
     assert versions[-1] == ADMIN_STORE_SCHEMA_VERSION
 

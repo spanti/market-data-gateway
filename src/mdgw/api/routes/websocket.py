@@ -20,6 +20,7 @@ def create_router(
     ws_hub: WebSocketHub,
     ws_path: str,
     rate_limiter: RateLimiter | None = None,
+    client_ip_resolver=None,
 ) -> APIRouter:
     """Build the WebSocket router for one application instance."""
     router = APIRouter(include_in_schema=False)
@@ -51,7 +52,11 @@ def create_router(
             await run_session(websocket)
             return
 
-        source_ip = client_ip(websocket.scope)
+        source_ip = (
+            client_ip(websocket.scope)
+            if client_ip_resolver is None
+            else client_ip_resolver(websocket.scope)
+        )
         route = route_template(websocket.scope, fallback=ws_path)
 
         # The normal token bucket gates the handshake first, then the per-IP
