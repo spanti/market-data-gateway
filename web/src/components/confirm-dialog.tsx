@@ -1,5 +1,8 @@
-import { useId, useState } from "react";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useEffect, useId, useMemo } from "react";
 import type * as React from "react";
+import { useForm } from "react-hook-form";
+import { z } from "zod";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,6 +15,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { OPERATION_REASON_MAX_LENGTH } from "@/lib/validation";
 
 export interface ConfirmDialogInput {
   reason: string;
@@ -32,10 +36,54 @@ export interface ConfirmDialogProps {
   onConfirm: (input: ConfirmDialogInput) => void;
 }
 
+interface ConfirmationFormValues {
+  reason: string;
+  confirmInstanceName: string;
+}
+
+function buildConfirmationSchema(
+  requireReason: boolean,
+  requireInstanceName: string | undefined,
+) {
+  return z
+    .object({
+      reason: z.string(),
+      confirmInstanceName: z.string(),
+    })
+    .superRefine((values, ctx) => {
+      const reason = values.reason.trim();
+      if (requireReason) {
+        if (reason.length === 0) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["reason"],
+            message: "操作原因不能为空",
+          });
+        } else if (reason.length > OPERATION_REASON_MAX_LENGTH) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["reason"],
+            message: `操作原因不能超过 ${OPERATION_REASON_MAX_LENGTH} 字符`,
+          });
+        }
+      }
+      if (
+        requireInstanceName !== undefined &&
+        values.confirmInstanceName.trim() !== requireInstanceName
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["confirmInstanceName"],
+          message: "实例名不匹配，无法提交。",
+        });
+      }
+    });
+}
+
 /**
- * Confirmation skeleton for high-risk actions. It enforces a non-empty
- * reason and, when required, an exact instance name; submits are disabled
- * while submitting and are never auto-replayed.
+ * Confirmation dialog for high-risk actions, validated by React Hook Form +
+ * Zod. It enforces a non-empty bounded reason and, when required, an exact
+ * instance name; submits are disabled while submitting and never auto-replayed.
  */
 export function ConfirmDialog({
   open,
@@ -50,13 +98,40 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const reasonId = useId();
   const instanceId = useId();
-  const [reason, setReason] = useState("");
-  const [instanceName, setInstanceName] = useState("");
+  const reasonErrorId = useId();
+  const instanceErrorId = useId();
+  const schema = useMemo(
+    () => buildConfirmationSchema(requireReason, requireInstanceName),
+    [requireInstanceName, requireReason],
+  );
+  const {
+    register,
+    handleSubmit,
+    reset,
+    formState: { errors, isValid },
+  } = useForm<ConfirmationFormValues>({
+    resolver: zodResolver(schema),
+    mode: "onChange",
+    defaultValues: { reason: "", confirmInstanceName: "" },
+  });
 
-  const instanceMatches =
-    requireInstanceName === undefined || instanceName === requireInstanceName;
-  const reasonValid = !requireReason || reason.trim().length > 0;
-  const canSubmit = !submitting && instanceMatches && reasonValid;
+  useEffect(() => {
+    if (open) {
+      reset({ reason: "", confirmInstanceName: "" });
+    }
+  }, [open, reset]);
+
+  const hasRules = requireReason || requireInstanceName !== undefined;
+  const canSubmit = !submitting && (!hasRules || isValid);
+
+  const submit = handleSubmit((values) => {
+    onConfirm({
+      reason: values.reason.trim(),
+      ...(requireInstanceName !== undefined
+        ? { confirmInstanceName: values.confirmInstanceName }
+        : {}),
+    });
+  });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -68,67 +143,80 @@ export function ConfirmDialog({
           ) : null}
         </DialogHeader>
 
-        <div className="mt-4 flex flex-col gap-3">
-          {requireReason ? (
-            <div className="flex flex-col gap-1">
-              <Label htmlFor={reasonId}>操作原因</Label>
-              <Textarea
-                id={reasonId}
-                value={reason}
-                onChange={(event) => setReason(event.target.value)}
-                placeholder="说明本次操作的原因（必填）"
-                disabled={submitting}
-              />
-            </div>
-          ) : null}
+        <form onSubmit={submit} noValidate>
+          <div className="mt-4 flex flex-col gap-3">
+            {requireReason ? (
+              <div className="flex flex-col gap-1">
+                <Label htmlFor={reasonId}>操作原因</Label>
+                <Textarea
+                  id={reasonId}
+                  placeholder="说明本次操作的原因（必填）"
+                  disabled={submitting}
+                  aria-invalid={Boolean(errors.reason)}
+                  aria-describedby={
+                    errors.reason ? reasonErrorId : undefined
+                  }
+                  {...register("reason")}
+                />
+                {errors.reason?.message ? (
+                  <p
+                    id={reasonErrorId}
+                    role="alert"
+                    className="text-[11px] text-status-critical"
+                  >
+                    {errors.reason.message}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
 
-          {requireInstanceName !== undefined ? (
-            <div className="flex flex-col gap-1">
-              <Label htmlFor={instanceId}>
-                输入目标实例名 <span className="font-mono">{requireInstanceName}</span>
-              </Label>
-              <Input
-                id={instanceId}
-                value={instanceName}
-                onChange={(event) => setInstanceName(event.target.value)}
-                placeholder={requireInstanceName}
-                autoComplete="off"
-                spellCheck={false}
-                disabled={submitting}
-                aria-invalid={!instanceMatches}
-              />
-              {!instanceMatches ? (
-                <p className="text-[11px] text-status-critical">
-                  实例名不匹配，无法提交。
-                </p>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
+            {requireInstanceName !== undefined ? (
+              <div className="flex flex-col gap-1">
+                <Label htmlFor={instanceId}>
+                  输入目标实例名{" "}
+                  <span className="font-mono">{requireInstanceName}</span>
+                </Label>
+                <Input
+                  id={instanceId}
+                  placeholder={requireInstanceName}
+                  autoComplete="off"
+                  spellCheck={false}
+                  disabled={submitting}
+                  aria-invalid={Boolean(errors.confirmInstanceName)}
+                  aria-describedby={
+                    errors.confirmInstanceName
+                      ? instanceErrorId
+                      : undefined
+                  }
+                  {...register("confirmInstanceName")}
+                />
+                {errors.confirmInstanceName?.message ? (
+                  <p
+                    id={instanceErrorId}
+                    role="alert"
+                    className="text-[11px] text-status-critical"
+                  >
+                    {errors.confirmInstanceName.message}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
 
-        <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={() => onOpenChange(false)}
-            disabled={submitting}
-          >
-            取消
-          </Button>
-          <Button
-            variant="destructive"
-            disabled={!canSubmit}
-            onClick={() =>
-              onConfirm({
-                reason: reason.trim(),
-                ...(requireInstanceName !== undefined
-                  ? { confirmInstanceName: instanceName }
-                  : {}),
-              })
-            }
-          >
-            {submitting ? "提交中…" : confirmLabel}
-          </Button>
-        </DialogFooter>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+              disabled={submitting}
+            >
+              取消
+            </Button>
+            <Button type="submit" variant="destructive" disabled={!canSubmit}>
+              {submitting ? "提交中…" : confirmLabel}
+            </Button>
+          </DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
   );

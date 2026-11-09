@@ -1,5 +1,8 @@
+import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useForm } from "react-hook-form";
+import { z } from "zod";
 import type { CapabilityState } from "@/api/capabilities";
 import {
   deleteFeedSubscription,
@@ -8,8 +11,6 @@ import {
   updateApiRateLimit,
   updateFeedSubscription,
   updateWsSlowConsumer,
-  type ApiRateLimitUpdateBody,
-  type WsSlowConsumerUpdateBody,
 } from "@/api/endpoints/admin-console";
 import type {
   FeedSubscription,
@@ -654,6 +655,323 @@ export function FeedSubscriptionView() {
   );
 }
 
+const apiRateLimitSchema = z.object({
+  enabled: z.boolean(),
+  requests_per_second: z
+    .number({ invalid_type_error: "请输入数字" })
+    .positive("requests_per_second 必须大于 0"),
+  burst: z
+    .number({ invalid_type_error: "请输入数字" })
+    .int("burst 必须是整数")
+    .min(0, "burst 不能小于 0"),
+  max_ws_sessions_per_ip: z
+    .number({ invalid_type_error: "请输入数字" })
+    .int("max_ws_sessions_per_ip 必须是整数")
+    .min(1, "max_ws_sessions_per_ip 至少为 1"),
+});
+
+const wsSlowConsumerSchema = z.object({
+  enabled: z.boolean(),
+  queue_size: z
+    .number({ invalid_type_error: "请输入数字" })
+    .int("queue_size 必须是整数")
+    .min(1, "queue_size 至少为 1"),
+  lag_notice_interval_ms: z
+    .number({ invalid_type_error: "请输入数字" })
+    .int("lag_notice_interval_ms 必须是整数")
+    .min(1, "lag_notice_interval_ms 至少为 1"),
+});
+
+type ApiRateLimitForm = z.infer<typeof apiRateLimitSchema>;
+type WsSlowConsumerForm = z.infer<typeof wsSlowConsumerSchema>;
+
+function FieldError({
+  id,
+  message,
+}: {
+  id: string;
+  message: string | undefined;
+}) {
+  if (!message) {
+    return null;
+  }
+  return (
+    <p id={id} role="alert" className="text-[11px] text-status-critical">
+      {message}
+    </p>
+  );
+}
+
+function ApiRateLimitEditor({
+  version,
+  csrfToken,
+  initial,
+  readOnlyReason,
+  onSaved,
+}: {
+  version: number;
+  csrfToken: string | null;
+  initial: FlowControlResponse["api_rate_limit"];
+  readOnlyReason: DisabledReasonValue | null;
+  onSaved: () => void;
+}) {
+  const defaultValues = useMemo<ApiRateLimitForm>(
+    () => ({
+      enabled: initial.enabled,
+      requests_per_second: initial.requests_per_second,
+      burst: initial.burst,
+      max_ws_sessions_per_ip: initial.max_ws_sessions_per_ip,
+    }),
+    [initial],
+  );
+  const {
+    register,
+    handleSubmit,
+    reset,
+    formState: { errors },
+  } = useForm<ApiRateLimitForm>({
+    resolver: zodResolver(apiRateLimitSchema),
+    mode: "onSubmit",
+    defaultValues,
+  });
+
+  useEffect(() => {
+    reset(defaultValues);
+  }, [defaultValues, reset]);
+
+  const mutation = useMutation({
+    mutationFn: (form: ApiRateLimitForm) =>
+      updateApiRateLimit(form, version, csrfToken),
+    onSuccess: onSaved,
+  });
+  const readOnly = readOnlyReason !== null;
+  const saving = mutation.isPending;
+
+  return (
+    <form
+      onSubmit={handleSubmit((values) => {
+        if (!readOnly) {
+          mutation.mutate(values);
+        }
+      })}
+      noValidate
+    >
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <label className="col-span-2 inline-flex items-center gap-2 text-xs">
+          <input
+            type="checkbox"
+            disabled={readOnly}
+            {...register("enabled")}
+          />
+          enabled
+        </label>
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="api-rps">requests_per_second</Label>
+          <Input
+            id="api-rps"
+            type="number"
+            step="any"
+            disabled={readOnly}
+            aria-invalid={Boolean(errors.requests_per_second)}
+            aria-describedby={
+              errors.requests_per_second ? "api-rps-error" : undefined
+            }
+            {...register("requests_per_second", { valueAsNumber: true })}
+          />
+          <FieldError
+            id="api-rps-error"
+            message={errors.requests_per_second?.message}
+          />
+        </div>
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="api-burst">burst</Label>
+          <Input
+            id="api-burst"
+            type="number"
+            step="1"
+            disabled={readOnly}
+            aria-invalid={Boolean(errors.burst)}
+            aria-describedby={errors.burst ? "api-burst-error" : undefined}
+            {...register("burst", { valueAsNumber: true })}
+          />
+          <FieldError id="api-burst-error" message={errors.burst?.message} />
+        </div>
+        <div className="col-span-2 flex flex-col gap-1">
+          <Label htmlFor="api-ws-sessions">max_ws_sessions_per_ip</Label>
+          <Input
+            id="api-ws-sessions"
+            type="number"
+            step="1"
+            disabled={readOnly}
+            aria-invalid={Boolean(errors.max_ws_sessions_per_ip)}
+            aria-describedby={
+              errors.max_ws_sessions_per_ip
+                ? "api-ws-sessions-error"
+                : undefined
+            }
+            {...register("max_ws_sessions_per_ip", { valueAsNumber: true })}
+          />
+          <FieldError
+            id="api-ws-sessions-error"
+            message={errors.max_ws_sessions_per_ip?.message}
+          />
+        </div>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Button
+          type="submit"
+          size="sm"
+          variant="outline"
+          disabled={readOnly || saving}
+          aria-describedby={
+            readOnlyReason ? "flow-api_rate_limit-reason" : undefined
+          }
+        >
+          保存 API Rate Limit
+        </Button>
+        <DisabledReason
+          id="flow-api_rate_limit-reason"
+          reason={readOnlyReason}
+        />
+        {mutation.isError ? (
+          <span className="text-xs text-status-critical">
+            保存失败，请查看错误与 Request ID。
+          </span>
+        ) : null}
+      </div>
+    </form>
+  );
+}
+
+function WsSlowConsumerEditor({
+  version,
+  csrfToken,
+  initial,
+  readOnlyReason,
+  onSaved,
+}: {
+  version: number;
+  csrfToken: string | null;
+  initial: FlowControlResponse["ws_slow_consumer"];
+  readOnlyReason: DisabledReasonValue | null;
+  onSaved: () => void;
+}) {
+  const defaultValues = useMemo<WsSlowConsumerForm>(
+    () => ({
+      enabled: initial.enabled,
+      queue_size: initial.queue_size,
+      lag_notice_interval_ms: initial.lag_notice_interval_ms,
+    }),
+    [initial],
+  );
+  const {
+    register,
+    handleSubmit,
+    reset,
+    formState: { errors },
+  } = useForm<WsSlowConsumerForm>({
+    resolver: zodResolver(wsSlowConsumerSchema),
+    mode: "onSubmit",
+    defaultValues,
+  });
+
+  useEffect(() => {
+    reset(defaultValues);
+  }, [defaultValues, reset]);
+
+  const mutation = useMutation({
+    mutationFn: (form: WsSlowConsumerForm) =>
+      updateWsSlowConsumer(form, version, csrfToken),
+    onSuccess: onSaved,
+  });
+  const readOnly = readOnlyReason !== null;
+  const saving = mutation.isPending;
+
+  return (
+    <form
+      onSubmit={handleSubmit((values) => {
+        if (!readOnly) {
+          mutation.mutate(values);
+        }
+      })}
+      noValidate
+    >
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <label className="col-span-2 inline-flex items-center gap-2 text-xs">
+          <input
+            type="checkbox"
+            disabled={readOnly}
+            {...register("enabled")}
+          />
+          enabled
+        </label>
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="ws-queue-size">queue_size</Label>
+          <Input
+            id="ws-queue-size"
+            type="number"
+            step="1"
+            disabled={readOnly}
+            aria-invalid={Boolean(errors.queue_size)}
+            aria-describedby={
+              errors.queue_size ? "ws-queue-size-error" : undefined
+            }
+            {...register("queue_size", { valueAsNumber: true })}
+          />
+          <FieldError
+            id="ws-queue-size-error"
+            message={errors.queue_size?.message}
+          />
+        </div>
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="ws-lag-ms">lag_notice_interval_ms</Label>
+          <Input
+            id="ws-lag-ms"
+            type="number"
+            step="1"
+            disabled={readOnly}
+            aria-invalid={Boolean(errors.lag_notice_interval_ms)}
+            aria-describedby={
+              errors.lag_notice_interval_ms
+                ? "ws-lag-ms-error"
+                : undefined
+            }
+            {...register("lag_notice_interval_ms", { valueAsNumber: true })}
+          />
+          <FieldError
+            id="ws-lag-ms-error"
+            message={errors.lag_notice_interval_ms?.message}
+          />
+        </div>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Button
+          type="submit"
+          size="sm"
+          variant="outline"
+          disabled={readOnly || saving}
+          aria-describedby={
+            readOnlyReason ? "flow-ws_slow_consumer-reason" : undefined
+          }
+        >
+          保存 WebSocket Slow Consumer
+        </Button>
+        <DisabledReason
+          id="flow-ws_slow_consumer-reason"
+          reason={readOnlyReason}
+        />
+        {mutation.isError ? (
+          <span className="text-xs text-status-critical">
+            保存失败，请查看错误与 Request ID。
+          </span>
+        ) : null}
+      </div>
+    </form>
+  );
+}
+
 function FlowControlEditor({
   resource,
   title,
@@ -679,40 +997,7 @@ function FlowControlEditor({
   initial: FlowControlResponse["api_rate_limit"] | FlowControlResponse["ws_slow_consumer"];
   onSaved: () => void;
 }) {
-  const [apiForm, setApiForm] = useState<ApiRateLimitUpdateBody | null>(null);
-  const [wsForm, setWsForm] = useState<WsSlowConsumerUpdateBody | null>(null);
-
-  useEffect(() => {
-    if ("requests_per_second" in initial) {
-      setApiForm({
-        enabled: initial.enabled,
-        requests_per_second: initial.requests_per_second,
-        burst: initial.burst,
-        max_ws_sessions_per_ip: initial.max_ws_sessions_per_ip,
-      });
-    } else {
-      setWsForm({
-        enabled: initial.enabled,
-        queue_size: initial.queue_size,
-        lag_notice_interval_ms: initial.lag_notice_interval_ms,
-      });
-    }
-  }, [initial]);
-
-  const apiMutation = useMutation({
-    mutationFn: (form: ApiRateLimitUpdateBody) =>
-      updateApiRateLimit(form, version, csrfToken),
-    onSuccess: onSaved,
-  });
-  const wsMutation = useMutation({
-    mutationFn: (form: WsSlowConsumerUpdateBody) =>
-      updateWsSlowConsumer(form, version, csrfToken),
-    onSuccess: onSaved,
-  });
-
   const readOnlyReason = writeReason ?? retryAfterReason;
-  const readOnly = readOnlyReason !== null;
-  const saving = apiMutation.isPending || wsMutation.isPending;
 
   return (
     <div
@@ -732,144 +1017,25 @@ function FlowControlEditor({
         </StatusBadge>
       </div>
 
-      {resource === "api_rate_limit" && apiForm ? (
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          <label className="col-span-2 inline-flex items-center gap-2 text-xs">
-            <input
-              type="checkbox"
-              checked={apiForm.enabled}
-              disabled={readOnly}
-              onChange={(event) =>
-                setApiForm({ ...apiForm, enabled: event.target.checked })
-              }
-            />
-            enabled
-          </label>
-          <div className="flex flex-col gap-1">
-            <Label htmlFor="api-rps">requests_per_second</Label>
-            <Input
-              id="api-rps"
-              type="number"
-              value={apiForm.requests_per_second}
-              disabled={readOnly}
-              onChange={(event) =>
-                setApiForm({
-                  ...apiForm,
-                  requests_per_second: Number(event.target.value),
-                })
-              }
-            />
-          </div>
-          <div className="flex flex-col gap-1">
-            <Label htmlFor="api-burst">burst</Label>
-            <Input
-              id="api-burst"
-              type="number"
-              value={apiForm.burst}
-              disabled={readOnly}
-              onChange={(event) =>
-                setApiForm({ ...apiForm, burst: Number(event.target.value) })
-              }
-            />
-          </div>
-          <div className="col-span-2 flex flex-col gap-1">
-            <Label htmlFor="api-ws-sessions">max_ws_sessions_per_ip</Label>
-            <Input
-              id="api-ws-sessions"
-              type="number"
-              value={apiForm.max_ws_sessions_per_ip}
-              disabled={readOnly}
-              onChange={(event) =>
-                setApiForm({
-                  ...apiForm,
-                  max_ws_sessions_per_ip: Number(event.target.value),
-                })
-              }
-            />
-          </div>
-        </div>
-      ) : null}
-
-      {resource === "ws_slow_consumer" && wsForm ? (
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          <label className="col-span-2 inline-flex items-center gap-2 text-xs">
-            <input
-              type="checkbox"
-              checked={wsForm.enabled}
-              disabled={readOnly}
-              onChange={(event) =>
-                setWsForm({ ...wsForm, enabled: event.target.checked })
-              }
-            />
-            enabled
-          </label>
-          <div className="flex flex-col gap-1">
-            <Label htmlFor="ws-queue-size">queue_size</Label>
-            <Input
-              id="ws-queue-size"
-              type="number"
-              value={wsForm.queue_size}
-              disabled={readOnly}
-              onChange={(event) =>
-                setWsForm({
-                  ...wsForm,
-                  queue_size: Number(event.target.value),
-                })
-              }
-            />
-          </div>
-          <div className="flex flex-col gap-1">
-            <Label htmlFor="ws-lag-ms">lag_notice_interval_ms</Label>
-            <Input
-              id="ws-lag-ms"
-              type="number"
-              value={wsForm.lag_notice_interval_ms}
-              disabled={readOnly}
-              onChange={(event) =>
-                setWsForm({
-                  ...wsForm,
-                  lag_notice_interval_ms: Number(event.target.value),
-                })
-              }
-            />
-          </div>
-        </div>
-      ) : null}
-
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={readOnly || saving}
-          aria-describedby={
-            readOnlyReason ? `flow-${resource}-reason` : undefined
-          }
-          onClick={() => {
-            if (readOnly) {
-              return;
-            }
-            if (resource === "api_rate_limit" && apiForm) {
-              apiMutation.mutate(apiForm);
-            } else if (wsForm) {
-              wsMutation.mutate(wsForm);
-            }
-          }}
-        >
-          {resource === "api_rate_limit"
-            ? "保存 API Rate Limit"
-            : "保存 WebSocket Slow Consumer"}
-        </Button>
-        <DisabledReason
-          id={`flow-${resource}-reason`}
-          reason={readOnlyReason}
+      {resource === "api_rate_limit" && "requests_per_second" in initial ? (
+        <ApiRateLimitEditor
+          version={version}
+          csrfToken={csrfToken}
+          initial={initial}
+          readOnlyReason={readOnlyReason}
+          onSaved={onSaved}
         />
-        {(apiMutation.isError || wsMutation.isError) ? (
-          <span className="text-xs text-status-critical">
-            保存失败，请查看错误与 Request ID。
-          </span>
-        ) : null}
-      </div>
+      ) : null}
+
+      {resource === "ws_slow_consumer" && "queue_size" in initial ? (
+        <WsSlowConsumerEditor
+          version={version}
+          csrfToken={csrfToken}
+          initial={initial}
+          readOnlyReason={readOnlyReason}
+          onSaved={onSaved}
+        />
+      ) : null}
     </div>
   );
 }
-

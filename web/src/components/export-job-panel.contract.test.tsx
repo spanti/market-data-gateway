@@ -520,14 +520,17 @@ describe("CONTRACT TARGET (Admin API, MSW only — not integrated)", () => {
     await user.click(chunkButtons[0]!);
     let dialog = screen.getByRole("dialog");
     expect(
-      within(dialog).getByText(/2026-01-01T00:00:00.000Z/),
-    ).toBeInTheDocument();
+      within(dialog).getAllByText(/2026-01-01T00:00:00.000Z/).length,
+    ).toBeGreaterThan(0);
     await user.click(within(dialog).getByRole("button", { name: "取消" }));
     expect(postCount).toBe(0);
 
     // Explicit confirmation creates exactly one chunk, not the combined range.
     await user.click(chunkButtons[0]!);
     dialog = screen.getByRole("dialog");
+    await user.click(
+      within(dialog).getByLabelText(/我确认只创建所选分段/),
+    );
     await user.click(
       within(dialog).getByRole("button", { name: "确认创建该段" }),
     );
@@ -589,10 +592,12 @@ describe("CONTRACT TARGET (Admin API, MSW only — not integrated)", () => {
     await user.click(
       screen.getByRole("button", { name: "创建第 1 段 Export Job" }),
     );
+    const dialog = screen.getByRole("dialog");
     await user.click(
-      within(screen.getByRole("dialog")).getByRole("button", {
-        name: "确认创建该段",
-      }),
+      within(dialog).getByLabelText(/我确认只创建所选分段/),
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "确认创建该段" }),
     );
 
     expect(

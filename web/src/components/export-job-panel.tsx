@@ -1,6 +1,9 @@
+import { zodResolver } from "@hookform/resolvers/zod";
 import { useInfiniteQuery, useMutation } from "@tanstack/react-query";
 import { Download, RefreshCw, XCircle } from "lucide-react";
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
+import { useForm } from "react-hook-form";
+import { z } from "zod";
 import type { CapabilityState } from "@/api/capabilities";
 import type { ExportJob, ExportJobStatus } from "@/api/endpoints/admin";
 import {
@@ -12,12 +15,21 @@ import {
   listExportJobs,
 } from "@/api/endpoints/export-jobs";
 import { HttpError } from "@/api/http/types";
-import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
 import { ErrorState, LoadingState } from "@/components/states";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
 import { Panel, PanelDescription, PanelHeader, PanelTitle } from "@/components/ui/panel";
+import { Select } from "@/components/ui/select";
 import type {
   ExportPathDecision,
   ExportRangeChunk,
@@ -257,6 +269,163 @@ function ExportJobItem({
         ) : null}
       </div>
     </article>
+  );
+}
+
+const splitChunkSchema = z.object({
+  chunkIndex: z
+    .number({ invalid_type_error: "请选择目标分段" })
+    .int("请选择目标分段")
+    .min(0, "请选择目标分段"),
+  confirmed: z
+    .boolean()
+    .refine((value) => value, "请确认只创建所选分段"),
+});
+
+type SplitChunkFormValues = z.infer<typeof splitChunkSchema>;
+
+function SplitChunkCreateDialog({
+  open,
+  onOpenChange,
+  chunks,
+  initialIndex,
+  creating,
+  onConfirm,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  chunks: readonly ExportRangeChunk[];
+  initialIndex: number;
+  creating: boolean;
+  onConfirm: (index: number) => void;
+}) {
+  const confirmedId = useId();
+  const chunkErrorId = useId();
+  const {
+    register,
+    handleSubmit,
+    reset,
+    watch,
+    formState: { errors, isValid },
+  } = useForm<SplitChunkFormValues>({
+    resolver: zodResolver(splitChunkSchema),
+    mode: "onChange",
+    defaultValues: { chunkIndex: initialIndex, confirmed: false },
+  });
+
+  useEffect(() => {
+    if (open) {
+      reset({ chunkIndex: initialIndex, confirmed: false });
+    }
+  }, [initialIndex, open, reset]);
+
+  const selectedIndex = watch("chunkIndex");
+  const selectedChunk = Number.isInteger(selectedIndex)
+    ? chunks[selectedIndex]
+    : undefined;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>确认创建单独分段 Export Job</DialogTitle>
+          <DialogDescription>
+            每段是独立的单 Instrument Export Job；不会合并为多 Instrument
+            ZIP。每段 ≤366 天，创建后需等待其不再运行才能创建下一段。
+          </DialogDescription>
+        </DialogHeader>
+
+        <form
+          noValidate
+          onSubmit={handleSubmit((values) => {
+            if (!creating) {
+              onConfirm(values.chunkIndex);
+            }
+          })}
+        >
+          <div className="mt-4 flex flex-col gap-3">
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="export-split-chunk">目标分段</Label>
+              <Select
+                id="export-split-chunk"
+                aria-invalid={Boolean(errors.chunkIndex)}
+                aria-describedby={
+                  errors.chunkIndex ? chunkErrorId : undefined
+                }
+                {...register("chunkIndex", {
+                  setValueAs: (value: string) => Number(value),
+                })}
+              >
+                {chunks.map((chunk, index) => (
+                  <option key={chunk.start.toISOString()} value={index}>
+                    第 {index + 1} / {chunks.length} 段：{" "}
+                    {chunk.start.toISOString()} → {chunk.end.toISOString()}
+                  </option>
+                ))}
+              </Select>
+              {errors.chunkIndex?.message ? (
+                <p
+                  id={chunkErrorId}
+                  role="alert"
+                  className="text-[11px] text-status-critical"
+                >
+                  {errors.chunkIndex.message}
+                </p>
+              ) : null}
+            </div>
+
+            {selectedChunk ? (
+              <p className="text-[11px] text-muted-foreground">
+                所选范围：
+                <span className="font-mono">
+                  {selectedChunk.start.toISOString()} →{" "}
+                  {selectedChunk.end.toISOString()}
+                </span>
+              </p>
+            ) : null}
+
+            <div className="flex flex-col gap-1">
+              <label
+                htmlFor={confirmedId}
+                className="inline-flex items-center gap-2 text-xs"
+              >
+                <input
+                  id={confirmedId}
+                  type="checkbox"
+                  aria-invalid={Boolean(errors.confirmed)}
+                  aria-describedby={errors.confirmed ? "export-confirm-error" : undefined}
+                  {...register("confirmed")}
+                />
+                我确认只创建所选分段，不创建合并 ZIP
+              </label>
+              {errors.confirmed?.message ? (
+                <p
+                  id="export-confirm-error"
+                  role="alert"
+                  className="text-[11px] text-status-critical"
+                >
+                  {errors.confirmed.message}
+                </p>
+              ) : null}
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+              disabled={creating}
+            >
+              取消
+            </Button>
+            <Button type="submit" disabled={creating || !isValid}>
+              {creating ? "创建中…" : "确认创建该段"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -640,40 +809,21 @@ export function ExportJobPanel({
         </p>
       )}
 
-      <ConfirmDialog
+      <SplitChunkCreateDialog
         open={pendingChunk !== null}
         onOpenChange={(open) => {
           if (!open) {
             setPendingChunk(null);
           }
         }}
-        title={
-          pendingChunk
-            ? `确认创建第 ${pendingChunk.index + 1} 段 Export Job`
-            : "确认创建 Export Job"
-        }
-        description={
-          pendingChunk ? (
-            <span>
-              第 {pendingChunk.index + 1} / {decision.chunkCount} 段：
-              <span className="font-mono">
-                {" "}
-                {pendingChunk.chunk.start.toISOString()} →{" "}
-                {pendingChunk.chunk.end.toISOString()}
-              </span>
-              。将创建一个独立的单 Instrument Export Job；不会合并为多
-              Instrument ZIP。每段 ≤366 天，创建后需等待其不再运行才能创建下一段。
-            </span>
-          ) : undefined
-        }
-        confirmLabel="确认创建该段"
-        submitting={createMutation.isPending}
-        requireReason={false}
-        onConfirm={() => {
-          if (!pendingChunk || retryAfter.blocked) {
+        chunks={decision.chunks}
+        initialIndex={pendingChunk?.index ?? 0}
+        creating={createMutation.isPending}
+        onConfirm={(index) => {
+          const chunk = decision.chunks[index];
+          if (!chunk || retryAfter.blocked) {
             return;
           }
-          const chunk = pendingChunk.chunk;
           setPendingChunk(null);
           createMutation.mutate(chunk);
         }}

@@ -8,9 +8,11 @@
  * frontend never retries a non-idempotent write automatically.
  */
 
+import { OPERATION_REASON_MAX_LENGTH } from "@/lib/validation";
+
 export type ServiceLifecycleAction = "start" | "stop" | "reload";
 
-export const LIFECYCLE_REASON_MAX_LENGTH = 1000;
+export const LIFECYCLE_REASON_MAX_LENGTH = OPERATION_REASON_MAX_LENGTH;
 
 export interface LifecycleConfirmationInput {
   action: ServiceLifecycleAction;

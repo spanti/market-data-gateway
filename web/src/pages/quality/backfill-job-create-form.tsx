@@ -1,5 +1,8 @@
-import { useState, type FormEvent } from "react";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useState } from "react";
+import { useForm } from "react-hook-form";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { z } from "zod";
 import type { BackfillJobCreateBody } from "@/api/endpoints/admin";
 import {
   createBackfillJob,
@@ -21,16 +24,65 @@ import {
   BAR_INTERVALS,
   parseDateTimeInput,
   toQueryInstant,
-  type BarInterval,
 } from "@/lib/time-range";
 import type { DisabledReason } from "@/runtime/permissions";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
 import { useRetryAfter } from "@/runtime/use-retry-after";
 import { formatRange, planTextForInterval } from "./quality-format";
 
-type FieldErrors = Partial<
-  Record<"instrumentId" | "interval" | "start" | "end" | "reason", string>
->;
+interface BackfillCreateFormValues {
+  instrumentId: string;
+  interval: string;
+  start: string;
+  end: string;
+  reason: string;
+}
+
+const backfillCreateSchema = z
+  .object({
+    instrumentId: z.string(),
+    interval: z.string(),
+    start: z.string(),
+    end: z.string(),
+    reason: z.string(),
+  })
+  .superRefine((values, ctx) => {
+    const issue = (path: keyof BackfillCreateFormValues, message: string) =>
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
+
+    if (!values.instrumentId.trim()) {
+      issue("instrumentId", "请输入 InstrumentId");
+    }
+    if (!values.interval) {
+      issue("interval", "请选择目标 Bar Interval");
+    } else if (
+      !(BAR_INTERVALS as readonly string[]).includes(values.interval)
+    ) {
+      issue("interval", "请选择有效的目标 Bar Interval");
+    }
+
+    const start = parseDateTimeInput(values.start, "utc");
+    if (!values.start.trim()) {
+      issue("start", "请输入开始时间");
+    } else if (!start) {
+      issue("start", "请输入有效的开始时间（UTC）");
+    }
+
+    const end = parseDateTimeInput(values.end, "utc");
+    if (!values.end.trim()) {
+      issue("end", "请输入结束时间");
+    } else if (!end) {
+      issue("end", "请输入有效的结束时间（UTC）");
+    }
+
+    if (start && end && end.getTime() <= start.getTime()) {
+      issue("end", "结束时间必须晚于开始时间");
+    }
+
+    if (!values.reason.trim()) {
+      issue("reason", "请输入操作原因");
+    }
+  });
 
 interface CreateErrorDescription {
   tone: StatusTone;
@@ -105,12 +157,18 @@ function describeCreateError(error: unknown): CreateErrorDescription {
   };
 }
 
-function FieldError({ message }: { message: string | undefined }) {
+function FieldError({
+  id,
+  message,
+}: {
+  id: string;
+  message: string | undefined;
+}) {
   if (!message) {
     return null;
   }
   return (
-    <p role="alert" className="text-[11px] text-status-critical">
+    <p id={id} role="alert" className="text-[11px] text-status-critical">
       {message}
     </p>
   );
@@ -133,12 +191,23 @@ export function BackfillJobCreateForm({
   const { session } = useRuntimeMode();
   const retryAfter = useRetryAfter();
   const queryClient = useQueryClient();
-  const [instrumentId, setInstrumentId] = useState("");
-  const [interval, setInterval] = useState<BarInterval | "">("");
-  const [startInput, setStartInput] = useState("");
-  const [endInput, setEndInput] = useState("");
-  const [reason, setReason] = useState("");
-  const [errors, setErrors] = useState<FieldErrors>({});
+  const {
+    register,
+    handleSubmit,
+    watch,
+    formState: { errors },
+  } = useForm<BackfillCreateFormValues>({
+    resolver: zodResolver(backfillCreateSchema),
+    mode: "onSubmit",
+    defaultValues: {
+      instrumentId: "",
+      interval: "",
+      start: "",
+      end: "",
+      reason: "",
+    },
+  });
+  const interval = watch("interval");
   const [pendingBody, setPendingBody] = useState<BackfillJobCreateBody | null>(
     null,
   );
@@ -178,54 +247,27 @@ export function BackfillJobCreateForm({
     },
   });
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  const submitForm = handleSubmit((values) => {
     if (retryAfter.blocked) {
       return;
     }
-    const start = parseDateTimeInput(startInput, "utc");
-    const end = parseDateTimeInput(endInput, "utc");
-    const nextErrors: FieldErrors = {};
-
-    if (!instrumentId.trim()) {
-      nextErrors.instrumentId = "请输入 InstrumentId";
-    }
-    if (!interval) {
-      nextErrors.interval = "请选择目标 Bar Interval";
-    }
-    if (!startInput.trim()) {
-      nextErrors.start = "请输入开始时间";
-    } else if (!start) {
-      nextErrors.start = "请输入有效的开始时间（UTC）";
-    }
-    if (!endInput.trim()) {
-      nextErrors.end = "请输入结束时间";
-    } else if (!end) {
-      nextErrors.end = "请输入有效的结束时间（UTC）";
-    }
-    if (start && end && end.getTime() <= start.getTime()) {
-      nextErrors.end = "结束时间必须晚于开始时间";
-    }
-    if (!reason.trim()) {
-      nextErrors.reason = "请输入操作原因";
-    }
-
-    setErrors(nextErrors);
-    if (Object.keys(nextErrors).length > 0 || !start || !end || !interval) {
+    const start = parseDateTimeInput(values.start, "utc");
+    const end = parseDateTimeInput(values.end, "utc");
+    if (!start || !end) {
       return;
     }
 
     setOutcome(null);
     setPendingBody({
-      instrument_id: instrumentId.trim(),
-      interval,
+      instrument_id: values.instrumentId.trim(),
+      interval: values.interval,
       start: toQueryInstant(start),
       end: toQueryInstant(end),
-      reason: reason.trim(),
+      reason: values.reason.trim(),
       confirm: true,
     });
     setConfirmOpen(true);
-  }
+  });
 
   function handleConfirm() {
     if (!pendingBody || mutation.isPending || retryAfter.blocked) {
@@ -258,7 +300,8 @@ export function BackfillJobCreateForm({
   return (
     <form
       aria-label="创建 Backfill Job 表单"
-      onSubmit={handleSubmit}
+      onSubmit={submitForm}
+      noValidate
       className="mt-4 border border-border p-3"
     >
       <div className="flex flex-wrap items-start gap-3">
@@ -266,22 +309,27 @@ export function BackfillJobCreateForm({
           <Label htmlFor="backfill-create-instrument">InstrumentId</Label>
           <Input
             id="backfill-create-instrument"
-            value={instrumentId}
-            onChange={(event) => setInstrumentId(event.target.value)}
             placeholder="binance:BTC/USDT"
             aria-invalid={Boolean(errors.instrumentId)}
+            aria-describedby={
+              errors.instrumentId ? "backfill-instrument-error" : undefined
+            }
+            {...register("instrumentId")}
           />
-          <FieldError message={errors.instrumentId} />
+          <FieldError
+            id="backfill-instrument-error"
+            message={errors.instrumentId?.message}
+          />
         </div>
         <div className="flex w-36 flex-col gap-1">
           <Label htmlFor="backfill-create-interval">目标 Bar Interval</Label>
           <Select
             id="backfill-create-interval"
-            value={interval}
-            onChange={(event) =>
-              setInterval(event.target.value as BarInterval | "")
-            }
             aria-invalid={Boolean(errors.interval)}
+            aria-describedby={
+              errors.interval ? "backfill-interval-error" : undefined
+            }
+            {...register("interval")}
           >
             <option value="">选择 Interval</option>
             {BAR_INTERVALS.map((value) => (
@@ -290,7 +338,10 @@ export function BackfillJobCreateForm({
               </option>
             ))}
           </Select>
-          <FieldError message={errors.interval} />
+          <FieldError
+            id="backfill-interval-error"
+            message={errors.interval?.message}
+          />
         </div>
         <div className="flex w-52 flex-col gap-1">
           <Label htmlFor="backfill-create-start">
@@ -299,34 +350,44 @@ export function BackfillJobCreateForm({
           <Input
             id="backfill-create-start"
             type="datetime-local"
-            value={startInput}
-            onChange={(event) => setStartInput(event.target.value)}
             aria-invalid={Boolean(errors.start)}
+            aria-describedby={
+              errors.start ? "backfill-start-error" : undefined
+            }
+            {...register("start")}
           />
-          <FieldError message={errors.start} />
+          <FieldError
+            id="backfill-start-error"
+            message={errors.start?.message}
+          />
         </div>
         <div className="flex w-52 flex-col gap-1">
           <Label htmlFor="backfill-create-end">结束时间（UTC，开区间）</Label>
           <Input
             id="backfill-create-end"
             type="datetime-local"
-            value={endInput}
-            onChange={(event) => setEndInput(event.target.value)}
             aria-invalid={Boolean(errors.end)}
+            aria-describedby={errors.end ? "backfill-end-error" : undefined}
+            {...register("end")}
           />
-          <FieldError message={errors.end} />
+          <FieldError id="backfill-end-error" message={errors.end?.message} />
         </div>
         <div className="flex min-w-60 flex-1 flex-col gap-1">
           <Label htmlFor="backfill-create-reason">操作原因</Label>
           <Textarea
             id="backfill-create-reason"
             className="min-h-8"
-            value={reason}
-            onChange={(event) => setReason(event.target.value)}
             placeholder="说明本次补采原因（必填）"
             aria-invalid={Boolean(errors.reason)}
+            aria-describedby={
+              errors.reason ? "backfill-reason-error" : undefined
+            }
+            {...register("reason")}
           />
-          <FieldError message={errors.reason} />
+          <FieldError
+            id="backfill-reason-error"
+            message={errors.reason?.message}
+          />
         </div>
         <Button
           type="submit"

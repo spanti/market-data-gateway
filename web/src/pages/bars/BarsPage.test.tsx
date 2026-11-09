@@ -565,7 +565,8 @@ describe("Bars page live follow", () => {
 
   function setupLivePage() {
     const sockets: FakeSocket[] = [];
-    const factory = vi.fn((_url: string) => {
+    const factory = vi.fn((url: string) => {
+      void url;
       const socket = new FakeSocket();
       sockets.push(socket);
       return socket;
