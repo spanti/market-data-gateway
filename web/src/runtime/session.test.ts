@@ -44,6 +44,7 @@ describe("Admin session parsing", () => {
       header_name: "X-CSRF-Token",
       token: "opaque-random-token",
     });
+    expect(session?.csrfToken).toBe("opaque-random-token");
   });
 
   it("defaults the CSRF header name when the server omits it", () => {
@@ -112,6 +113,7 @@ describe("Admin session parsing", () => {
     expect(ANONYMOUS_SESSION.authenticated).toBe(false);
     expect(ANONYMOUS_SESSION.access_role).toBeNull();
     expect(ANONYMOUS_SESSION.csrf).toBeNull();
+    expect(ANONYMOUS_SESSION.csrfToken).toBeNull();
     expect(ANONYMOUS_SESSION.session).toBeNull();
   });
 });

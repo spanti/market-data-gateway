@@ -34,6 +34,11 @@ export interface AdminSession {
   server_time: string | null;
   session: AdminSessionTimes | null;
   csrf: AdminSessionCsrf | null;
+  /**
+   * Compatibility projection of `csrf.token` for in-memory header adapters
+   * (Backfill/Export write helpers). Same memory-only value; never persisted.
+   */
+  csrfToken: string | null;
   /** Client clock at parse time, used to correct `server_time` skew. */
   received_at: number;
 }
@@ -45,6 +50,7 @@ export const ANONYMOUS_SESSION: AdminSession = {
   server_time: null,
   session: null,
   csrf: null,
+  csrfToken: null,
   received_at: 0,
 };
 
@@ -119,6 +125,7 @@ export function parseAdminSession(
       typeof data.server_time === "string" ? data.server_time : null,
     session: data.authenticated ? parseSessionTimes(data.session) : null,
     csrf: data.authenticated ? csrf : null,
+    csrfToken: data.authenticated && csrf ? csrf.token : null,
     received_at: receivedAt,
   };
 }

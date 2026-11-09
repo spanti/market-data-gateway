@@ -28,6 +28,7 @@ function sessionAt(init: {
       absolute_expires_at: new Date(RECEIVED_AT + init.absoluteInMs).toISOString(),
     },
     csrf: { header_name: "X-CSRF-Token", token: "token" },
+    csrfToken: "token",
     received_at: RECEIVED_AT,
   };
 }
