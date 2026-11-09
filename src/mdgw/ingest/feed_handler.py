@@ -14,12 +14,22 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from mdgw.core.bar import RawBar
+    from mdgw.ingest.feed_status import FeedConnectionStatus
 
 
 class FeedHandler(Protocol):
     name: str
     instrument_ids: tuple[str, ...]
     supports_history: bool
+
+    def feed_status(self) -> tuple[FeedConnectionStatus, ...]:
+        """Return the real connection lifecycle per configured feed.
+
+        Handlers that predate this seam may omit it; callers then use
+        ``mdgw.ingest.feed_status.handler_feed_statuses`` which reports
+        ``unknown`` instead of inferring health from Feed Freshness.
+        """
+        ...
 
     def iter_bars(self) -> Iterator[RawBar]:
         """Yield closed Bars in source order."""

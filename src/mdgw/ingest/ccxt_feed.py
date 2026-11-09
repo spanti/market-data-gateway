@@ -31,6 +31,10 @@ from mdgw.core.bar import RawBar
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import INTERVALS
 from mdgw.core.time import UTC, datetime_to_ns, to_utc, utc_now
+from mdgw.ingest.feed_status import (
+    FeedConnectionStatus,
+    classify_feed_error,
+)
 from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
 from mdgw.quarantine import (
     REASON_MALFORMED_ROW,
@@ -442,6 +446,17 @@ class CcxtFeedHandler:
         self._closed = False
         self._exchange_closed = False
 
+        # Truthful connection lifecycle, owned by the background watch loop.
+        # `connected` means a live watch response was actually received since
+        # the last attempt; it is never derived from Bar freshness.
+        self._status_lock = threading.Lock()
+        self._feed_state = "stopped"
+        self._state_since = utc_now()
+        self._last_event_ts: datetime | None = None
+        self._reconnect_count = 0
+        self._last_error_code: str | None = None
+        self._last_error_at: datetime | None = None
+
         self._watch_for_symbols = self._capability(exchange, "watchOHLCVForSymbols")
         self._watch_one = self._capability(exchange, "watchOHLCV")
         if not (self._watch_for_symbols or self._watch_one):
@@ -518,12 +533,82 @@ class CcxtFeedHandler:
         if rule_version is not None:
             self.rule_version = rule_version
 
+    def feed_status(self) -> tuple[FeedConnectionStatus, ...]:
+        """Return the real watch-loop lifecycle for this Venue.
+
+        ccxt.pro does not expose a protocol heartbeat timestamp, so
+        ``heartbeat_supported`` is False and only the last event arrival time
+        is reported.
+        """
+        with self._status_lock:
+            state = self._feed_state
+            state_since = self._state_since
+            last_event_ts = self._last_event_ts
+            reconnect_count = self._reconnect_count
+            last_error_code = self._last_error_code
+            last_error_at = self._last_error_at
+        return (
+            FeedConnectionStatus(
+                feed=self.name,
+                venue=self.venue,
+                state=state,
+                state_since=state_since,
+                last_event_ts=last_event_ts,
+                heartbeat_supported=False,
+                reconnect_count=reconnect_count,
+                last_error_code=last_error_code,
+                last_error_at=last_error_at,
+            ),
+        )
+
+    def _set_feed_state(self, state: str) -> None:
+        with self._status_lock:
+            if self._feed_state == state:
+                return
+            self._feed_state = state
+            self._state_since = utc_now()
+
+    def _mark_event_received(self) -> None:
+        """A live watch response arrived: the stream is proven connected."""
+        with self._status_lock:
+            self._last_event_ts = utc_now()
+            if self._feed_state != "connected":
+                self._feed_state = "connected"
+                self._state_since = self._last_event_ts
+            # A successful event clears the previous error; the cumulative
+            # reconnect count is never reset.
+            self._last_error_code = None
+            self._last_error_at = None
+
+    def _mark_reconnecting(self, error: BaseException) -> None:
+        code = classify_feed_error(error)
+        with self._status_lock:
+            self._reconnect_count += 1
+            self._last_error_code = code
+            self._last_error_at = utc_now()
+            if self._feed_state != "reconnecting":
+                self._feed_state = "reconnecting"
+                self._state_since = self._last_error_at
+
+    def _mark_failed(self, error: BaseException) -> None:
+        code = classify_feed_error(error)
+        with self._status_lock:
+            self._last_error_code = code
+            self._last_error_at = utc_now()
+            if self._feed_state != "failed":
+                self._feed_state = "failed"
+                self._state_since = self._last_error_at
+
+    def _mark_stopped(self) -> None:
+        self._set_feed_state("stopped")
+
     def _raise_if_fatal(self) -> None:
         error = self._fatal_error
         if error is not None:
             raise error
 
     def _fail_closed(self, error: BaseException) -> None:
+        self._mark_failed(error)
         with self._fatal_lock:
             if self._fatal_error is None:
                 self._fatal_error = error
@@ -555,9 +640,11 @@ class CcxtFeedHandler:
                 logger.exception("error while shutting down ccxt Feed Handler")
             loop.call_soon_threadsafe(loop.stop)
             thread.join(timeout=SHUTDOWN_TIMEOUT_S)
+            self._mark_stopped()
             return
 
         self._close_exchange_sync()
+        self._mark_stopped()
 
     async def _shutdown(self) -> None:
         task = self._watch_task
@@ -595,6 +682,7 @@ class CcxtFeedHandler:
         with self._start_lock:
             if self._closed or self._thread is not None:
                 return
+            self._set_feed_state("connecting")
             thread = threading.Thread(
                 target=self._thread_main,
                 name=f"mdgw-ccxt-{self.name}",
@@ -625,7 +713,18 @@ class CcxtFeedHandler:
             loop.close()
 
     async def _watch_forever(self) -> None:
-        await self._load_markets()
+        try:
+            await self._load_markets()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # ruff: ignore[blind-except] - surface lifecycle
+            # Market loading happens before the watch loop, so it has no
+            # reconnect path; the handler is truthfully failed, not connected.
+            self._mark_failed(exc)
+            logger.warning(
+                "ccxt market load failed for %s: %s", self.name, exc
+            )
+            return
         backoff = self._reconnect_backoff_s
         while not self._closed:
             try:
@@ -641,6 +740,7 @@ class CcxtFeedHandler:
             except Exception as exc:  # ruff: ignore[blind-except] - keep reconnecting
                 if self._closed:
                     return
+                self._mark_reconnecting(exc)
                 logger.warning(
                     "ccxt watch failed for %s: %s; reconnecting in %.1fs",
                     self.name,
@@ -690,6 +790,7 @@ class CcxtFeedHandler:
     async def _watch_symbol(self, symbol: str) -> None:
         while not self._closed:
             rows = await self._exchange.watch_ohlcv(symbol, BASE_INTERVAL)
+            self._mark_event_received()
             self._handle_rows(symbol, rows)
 
     # -- live rows -----------------------------------------------------------
@@ -698,6 +799,9 @@ class CcxtFeedHandler:
         if not isinstance(payload, Mapping):
             logger.warning("unexpected watch_ohlcv_for_symbols payload: %r", payload)
             return
+        # A watch response (even an empty one) is the real proof of a live
+        # stream; its receive time is the event timestamp, never a heartbeat.
+        self._mark_event_received()
         for symbol, rows in payload.items():
             self._handle_rows(symbol, rows)
 

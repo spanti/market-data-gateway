@@ -814,6 +814,38 @@ class AdminProxyConfig(_ConfigModel):
         return value
 
 
+class AdminMonitoringConfig(_ConfigModel):
+    """Server-side Prometheus template proxy limits (ticket 09).
+
+    The proxy only runs fixed, server-owned PromQL templates; it never accepts
+    arbitrary PromQL or label selectors. ``prometheus_url`` is the deployment
+    endpoint (``admin.adapters.prometheus`` is the separate deployment-intent
+    flag); when it is unset the adapter reports ``unavailable`` instead of
+    silently defaulting to a local Prometheus.
+    """
+
+    prometheus_url: str | None = None
+    timeout_s: float = Field(default=5.0, gt=0)
+    max_range_s: int = Field(default=86_400, gt=0)
+    max_points: int = Field(default=1_000, gt=0)
+    min_step_s: int = Field(default=15, ge=1)
+
+    @field_validator("prometheus_url")
+    @classmethod
+    def _http_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        parts = urlsplit(cleaned)
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            msg = "prometheus_url must be an http(s) URL"
+            raise ValueError(msg)
+        if parts.query or parts.fragment or parts.username or parts.password:
+            msg = "prometheus_url must not contain credentials, query or fragment"
+            raise ValueError(msg)
+        return cleaned.rstrip("/")
+
+
 class AdminConfig(_ConfigModel):
     """Admin API foundation settings; disabled unless a deployment opts in."""
 
@@ -831,6 +863,9 @@ class AdminConfig(_ConfigModel):
     export: AdminExportConfig = Field(default_factory=AdminExportConfig)
     control: AdminControlConfig = Field(default_factory=AdminControlConfig)
     limits: AdminLimitsConfig = Field(default_factory=AdminLimitsConfig)
+    monitoring: AdminMonitoringConfig = Field(
+        default_factory=AdminMonitoringConfig
+    )
 
     def resolved_db_path(self, storage_root: Path) -> Path:
         """Resolve the management database path against the storage root."""

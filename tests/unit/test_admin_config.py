@@ -64,6 +64,14 @@ def test_admin_placeholders_have_contract_defaults() -> None:
     assert admin.limits.operation_retention_s == 604800
     assert admin.limits.backfill_max_range_days == 366
 
+    # Monitoring proxy: deployment intent is off; no Prometheus URL means the
+    # adapter stays unavailable rather than silently querying a default.
+    assert admin.monitoring.prometheus_url is None
+    assert admin.monitoring.timeout_s == pytest.approx(5.0)
+    assert admin.monitoring.max_range_s == 86400
+    assert admin.monitoring.max_points == 1000
+    assert admin.monitoring.min_step_s == 15
+
 
 def test_admin_resolves_database_under_the_storage_root() -> None:
     admin = AdminConfig()
@@ -122,6 +130,13 @@ def test_admin_accepts_typed_settings() -> None:
                     "operation_retention_s": 3600,
                     "backfill_max_range_days": 120,
                 },
+                "monitoring": {
+                    "prometheus_url": "http://127.0.0.1:9090",
+                    "timeout_s": 2.5,
+                    "max_range_s": 3600,
+                    "max_points": 240,
+                    "min_step_s": 30,
+                },
             }
         }
     )
@@ -140,6 +155,11 @@ def test_admin_accepts_typed_settings() -> None:
     assert admin.export.max_days == 90
     assert admin.control.timeout_s == pytest.approx(2.5)
     assert admin.limits.page_max == 100
+    assert admin.monitoring.prometheus_url == "http://127.0.0.1:9090"
+    assert admin.monitoring.timeout_s == pytest.approx(2.5)
+    assert admin.monitoring.max_range_s == 3600
+    assert admin.monitoring.max_points == 240
+    assert admin.monitoring.min_step_s == 30
 
 
 @pytest.mark.parametrize(
@@ -209,6 +229,42 @@ def test_admin_rejects_an_export_range_where_min_exceeds_max() -> None:
     with pytest.raises(ValidationError, match="export"):
         GatewayConfig.model_validate(
             {"admin": {"export": {"min_days": 100, "max_days": 90}}}
+        )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "prometheus:9090",
+        "/prometheus",
+        "ftp://prometheus",
+        "",
+        "http://prometheus:9090/?x=1",
+    ],
+)
+def test_admin_rejects_invalid_prometheus_urls(value: str) -> None:
+    with pytest.raises(ValidationError, match="prometheus_url"):
+        GatewayConfig.model_validate(
+            {"admin": {"monitoring": {"prometheus_url": value}}}
+        )
+
+
+def test_admin_rejects_non_positive_monitoring_limits() -> None:
+    with pytest.raises(ValidationError, match="timeout_s"):
+        GatewayConfig.model_validate(
+            {"admin": {"monitoring": {"timeout_s": 0}}}
+        )
+    with pytest.raises(ValidationError, match="max_range_s"):
+        GatewayConfig.model_validate(
+            {"admin": {"monitoring": {"max_range_s": 0}}}
+        )
+    with pytest.raises(ValidationError, match="max_points"):
+        GatewayConfig.model_validate(
+            {"admin": {"monitoring": {"max_points": 0}}}
+        )
+    with pytest.raises(ValidationError, match="min_step_s"):
+        GatewayConfig.model_validate(
+            {"admin": {"monitoring": {"min_step_s": 0}}}
         )
 
 
