@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -149,6 +149,10 @@ class CollectorCore:
         #: Returning False stops future collection of that raw Bar before
         #: normalization/persistence; ``None`` preserves the current behaviour.
         self.subscription_filter: Callable[[str, str], bool] | None = None
+        #: Set by the Collector Service Role to bound Admin Backfill Job writes
+        #: together with automatic Backfill (see BackfillWriteGate). ``None``
+        #: keeps the single-process GatewayRuntime behaviour unchanged.
+        self.backfill_gate: object | None = None
         self.bars_ingested = 0
         self.bars_written = 0
         self.last_ingest_ts: datetime | None = None
@@ -384,6 +388,22 @@ class CollectorCore:
     def run_backfill(self, now: datetime) -> BackfillReport:
         if self.hwm is None:
             raise RuntimeError(_NOT_OPEN_MESSAGE)
+        gate = self.backfill_gate
+        if gate is None:
+            return self._run_backfill_locked(now)
+        # Automatic Backfill and Admin Backfill Jobs share one bounded write
+        # boundary; holding every involved (instrument, 1m) key serializes
+        # them exactly like an explicit job for that instrument+interval.
+        keys = [
+            (instrument_id, self.config.aggregation.base_interval)
+            for instrument_id in self.feed_handler.instrument_ids
+        ]
+        with gate.hold(keys):  # type: ignore[attr-defined]
+            return self._run_backfill_locked(now)
+
+    def _run_backfill_locked(self, now: datetime) -> BackfillReport:
+        if self.hwm is None:  # pragma: no cover - guarded by run_backfill
+            raise RuntimeError(_NOT_OPEN_MESSAGE)
         return run_backfill(
             feed_handler=self.feed_handler,
             store=self.store,
@@ -394,6 +414,30 @@ class CollectorCore:
             now=now,
             backfill_hours=self.config.collector.backfill_hours,
         )
+
+    def persist_backfill_bars(self, bars: Sequence[Bar]) -> int:
+        """Write job-produced Bars synchronously and advance HWM/health.
+
+        Only the Collector calls this. The write is durable before the
+        monotonic HWM advances, exactly like the live pipeline's sink
+        callback, and an unknown Instrument fails before anything is written.
+        """
+        written = list(bars)
+        if not written:
+            return 0
+        groups: dict[str, list[Bar]] = defaultdict(list)
+        for bar in written:
+            groups[bar.instrument_id].append(bar)
+        asset_classes = {
+            instrument_id: self.asset_class_for(instrument_id)
+            for instrument_id in groups
+        }
+        for instrument_id, group in groups.items():
+            self.store.write_bars(
+                group, asset_class=asset_classes[instrument_id]
+            )
+        self._on_persisted(written)
+        return len(written)
 
     # -- collector state ---------------------------------------------------
 

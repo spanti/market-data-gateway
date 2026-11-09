@@ -24,6 +24,7 @@ from mdgw.ingest.feed_status import (
     handler_feed_statuses,
 )
 from mdgw.metrics import MetricsRegistry
+from mdgw.service.backfill_jobs import BackfillJobRunner
 from mdgw.service.bar_sink import BufferedBarSink
 from mdgw.service.collector_core import CollectorCore
 from mdgw.service.common import (
@@ -33,6 +34,9 @@ from mdgw.service.common import (
     update_dataset_metrics,
 )
 from mdgw.service.control_plane import (
+    BACKFILL_JOB_CANCEL_ACTION,
+    BACKFILL_JOB_START_ACTION,
+    BACKFILL_JOB_STATUS_ACTION,
     FEED_SUBSCRIPTION_SYNC_ACTION,
     ControlPlaneServer,
     FeedSubscriptionSyncPayload,
@@ -170,6 +174,14 @@ class CollectorService:
         self._active_instruments: set[str] = set()
         self.core.subscription_filter = self._allows_raw_subscription
 
+        # Ticket 06: Admin Backfill Jobs execute in the Collector process on a
+        # background thread. The write gate is shared with automatic Backfill
+        # so both paths serialize through the same bounded write boundary.
+        self._backfill_runner = BackfillJobRunner(
+            core=self.core, config=config
+        )
+        self.core.backfill_gate = self._backfill_runner.write_gate
+
         # `None` means "use [service].wait_for_api_ready". The CLI overrides it
         # with --wait-for-api/--no-wait-for-api.
         self._wait_for_api = (
@@ -236,6 +248,7 @@ class CollectorService:
             help="Bar messages published on the collector PUB",
         )
 
+        self._backfill_runner.start()
         self._start_control_plane()
 
         self._stop.clear()
@@ -267,6 +280,9 @@ class CollectorService:
         self._ready.clear()
         self._stop.set()
         self._stop_control_plane()
+        # Jobs are cooperative: close() cancels them between batches and joins
+        # the worker before the Store/HWM are closed below.
+        self._backfill_runner.close()
 
         # Stop both publishing threads before the Streaming Interface: they
         # must not observe a closed socket (publish is a no-op after stop, but
@@ -344,6 +360,16 @@ class CollectorService:
         server.register("ping", lambda _payload: {"pong": True})
         server.register(
             FEED_SUBSCRIPTION_SYNC_ACTION, self._handle_subscription_sync
+        )
+        # Ticket 06: Backfill Jobs execute here, never in the API process.
+        server.register(
+            BACKFILL_JOB_START_ACTION, self._backfill_runner.handle_start
+        )
+        server.register(
+            BACKFILL_JOB_STATUS_ACTION, self._backfill_runner.handle_status
+        )
+        server.register(
+            BACKFILL_JOB_CANCEL_ACTION, self._backfill_runner.handle_cancel
         )
         server.start()
         self._control_server = server

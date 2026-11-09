@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from mdgw.admin.auth.oidc import OidcTransport
     from mdgw.admin.auth.store import SessionRecord
     from mdgw.admin.feed.runtime import FeedAdminRuntime
+    from mdgw.admin.jobs.runtime import BackfillJobRuntime
     from mdgw.api.ws_hub import WebSocketHub
     from mdgw.config import AdminConfig
     from mdgw.metrics import MetricsRegistry
@@ -140,6 +141,8 @@ class AdminContext:
         self._startup_done = False
         self._feed: FeedAdminRuntime | None = None
         self._feed_lock = threading.Lock()
+        self._backfill: BackfillJobRuntime | None = None
+        self._backfill_lock = threading.Lock()
         self._built_adapters: set[str] = set(_BUILT_ADAPTERS)
         self._built_capabilities: set[str] = set(_BUILT_CAPABILITIES)
         self._capability_details: dict[str, dict[str, object]] = {
@@ -354,6 +357,29 @@ class AdminContext:
             return self._feed
 
     @property
+    def backfill(self) -> BackfillJobRuntime:
+        """Backfill Job store + Collector dispatcher/poller for this API."""
+        existing = self._backfill
+        if existing is not None:
+            return existing
+        with self._backfill_lock:
+            if self._backfill is None:
+                if not self.enabled:
+                    msg = "Admin API is disabled"
+                    raise RuntimeError(msg)
+                self.ensure_open()
+                # Imported lazily to keep the foundation context imports small.
+                from mdgw.admin.jobs.runtime import (  # ruff: ignore[import-outside-top-level]
+                    BackfillJobRuntime,
+                )
+
+                runtime = BackfillJobRuntime(self)
+                runtime.start()
+                self._backfill = runtime
+                self.register_cleanup(runtime.close)
+            return self._backfill
+
+    @property
     def client_ip_resolver(self) -> ClientIpResolver:
         """Trusted-proxy resolver used by the admin request context."""
         if self._client_ip_resolver is None:
@@ -535,6 +561,7 @@ class AdminContext:
                     extra={"event": "admin.audit.close_failed"},
                 )
         self._feed = None
+        self._backfill = None
         self._startup_done = False
         self._startup_callbacks.clear()
         database = self.db
