@@ -74,6 +74,14 @@ _Avoid_: Watermark（在 Flink/Beam 中特指事件时间完整性断言，语�
 按 HWM 从数据源历史接口补采缺失 K 线的过程。
 _Avoid_: Replay（Replay 是模拟行情，Backfill 是补真实缺口）
 
+**Feed Freshness**:
+某一 `(feed, instrument_id, interval)` 最近接收事件的年龄及其阈值状态，表达实时采集是否失活。
+_Avoid_: Dataset Freshness、Network Latency
+
+**Dataset Freshness**:
+某一 Dataset 或 Bar Interval 最近持久化数据的时间状态，表达历史读取可见数据的更新程度；它不等同于 Feed Freshness。
+_Avoid_: Feed Freshness、Realtime Freshness
+
 ### 数据质量（Data Quality）
 
 **Normalization**:
@@ -190,6 +198,44 @@ _Avoid_: Role（单独使用时）、Worker、Process
 整个行情网关系统，包含全部 Service Role 与 Data Contract。
 _Avoid_: Server（只指某一进程时）
 
+### 管理控制台（Operator Console）
+
+**Operator Console**:
+供内部人员观察 Gateway、查询规范数据并执行授权管理动作的操作界面。
+_Avoid_: Admin Backend、Management Server
+
+**Access Role**:
+Operator Console 使用者的权限类别：`SuperAdmin` 拥有全部权限，`Operator` 没有生命周期与身份管理权限，`Auditor` 仅可读取与导出。
+_Avoid_: Role（单独使用时）、Service Role
+
+**Service Instance**:
+某一 Service Role 的一个实际运行实例，是运行状态与生命周期管理的对象；它不等同于 Service Role 本身。
+_Avoid_: Node、Master、Worker（在不存在相应集群语义时）
+
+**Feed Subscription**:
+Collector 从 Venue 持续获取指定 Instrument 数据的订阅关系，决定网关的实际采集范围。
+_Avoid_: Dynamic Subscription（不限定语义时）、Topic Subscription
+
+**WebSocket Session Subscription**:
+单个 WebSocket 会话按 Topic 前缀筛选接收消息的订阅关系；它不改变 Feed Subscription。
+_Avoid_: Feed Subscription、Global Subscription
+
+**Operator Audit Event**:
+一次带操作者身份的管理动作记录，表达操作者、动作、对象、变更与结果；它不属于 Quarantine 或 Rule Version 数据血缘。
+_Avoid_: Audit（单独使用时）、System Log
+
+**Backfill Job**:
+一次按 InstrumentId、Bar Interval 与时间区间执行的手动 Backfill 生命周期，具有独立状态与进度；它区别于自动 HWM Backfill 和离线归档导入。
+_Avoid_: Backfill Task、Replay、Archive Import
+
+**Export Job**:
+一次按 InstrumentId、Bar Interval 与时间区间异步生成原始数据文件的独立生命周期，具有结果文件与过期时间；它不改变 Dataset，也不是 Backfill Job。
+_Avoid_: CSV Download（泛指异步任务时）、Backfill Job
+
+**Unrecoverable Backfill Gap**:
+自动 Backfill 因数据源不支持历史查询或补采超过上限而无法修复的数据缺口；它不是对任意来源 Sequence 连续性的通用断言。
+_Avoid_: Sequence Gap（泛指当前缺口记录时）、Data Hole
+
 ## Renamed Terms（本次标准化）
 
 | 旧名（已废弃） | 规范名 | 原因 |
@@ -205,7 +251,12 @@ _Avoid_: Server（只指某一进程时）
 | Snapshot（单独） | **Instrument Snapshot** | Iceberg 的 snapshot 指表状态，易混淆 |
 | `recv_ts` | `ingest_ts` | 对应 Flink 的 ingestion time |
 | `msg_type` | `data_type` | 与 Data Type 统一 |
-| Role | **Service Role** | 明确是进程职责，不是业务角色 |
+| Role | **Service Role / Access Role** | 进程职责与控制台使用者权限必须区分 |
+| Dynamic Subscription | **Feed Subscription / WebSocket Session Subscription** | 采集范围与单会话 Topic 过滤是不同概念 |
+| Audit（泛指管理动作时） | **Operator Audit Event** | 区别于 Quarantine 与 Rule Version 数据血缘 |
+| Backfill Task | **Backfill Job** | 统一表示具有独立生命周期的手动补采 |
+| Sequence Gap（泛指当前缺口记录时） | **Unrecoverable Backfill Gap** | 当前记录只表示补采不可恢复，不是通用 Sequence 连续性检测 |
+| Data Freshness（不限定语义时） | **Feed Freshness / Dataset Freshness** | 实时采集失活与历史数据落盘程度是不同概念 |
 | Instrument Registry | **Instrument Reference Data** | 行业标准叫法 |
 
 ## Terminology Basis
