@@ -73,7 +73,7 @@ export function resolveWsTarget(
     );
   }
 
-  const entry = capability.document?.capabilities.ws_admin_session;
+  const entry = capability.document?.capabilities[WS_ADMIN_SESSION_KEY];
   const declaredPath =
     typeof entry?.path === "string" && entry.path.length > 0
       ? entry.path

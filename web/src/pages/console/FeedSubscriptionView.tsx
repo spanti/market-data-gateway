@@ -533,6 +533,11 @@ export function FeedSubscriptionView() {
                               size="sm"
                               variant="destructive"
                               disabled={actionReason !== null || busy}
+                              aria-describedby={
+                                actionReason
+                                  ? `feed-${subscription.subscription_id}-reason`
+                                  : undefined
+                              }
                               onClick={() => setDeleteTarget(subscription)}
                             >
                               删除

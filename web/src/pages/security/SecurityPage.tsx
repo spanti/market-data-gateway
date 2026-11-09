@@ -3,29 +3,21 @@ import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
 import { OperatorAuditQuerySection } from "@/pages/security/OperatorAuditQuerySection";
 import { IdentityPanel } from "@/pages/security/IdentityPanel";
-import { capabilityDisabledReason } from "@/runtime/permissions";
+import {
+  adminCapabilityAvailability,
+  CAPABILITY_KEYS,
+} from "@/runtime/capability-gates";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
 
 export function SecurityPage() {
   const { capability, role } = useRuntimeMode();
 
-  const auditCapabilityReason = (() => {
-    if (!capability || capability.mode !== "admin-api") {
-      return null;
-    }
-    if (capability.compatible === false) {
-      return {
-        code: "backend-unsupported" as const,
-        message: "Admin API 版本不兼容",
-      };
-    }
-    if (!capability.document) {
-      return null;
-    }
-    return capabilityDisabledReason(
-      capability.document.capabilities.operator_audit,
-    );
-  })();
+  const auditAvailability =
+    capability?.mode === "admin-api"
+      ? adminCapabilityAvailability(capability, CAPABILITY_KEYS.operatorAudit)
+      : null;
+  const auditCapabilityReason =
+    auditAvailability?.kind === "disabled" ? auditAvailability.reason : null;
 
   return (
     <>
