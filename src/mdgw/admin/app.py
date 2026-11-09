@@ -22,6 +22,7 @@ from mdgw.admin.auth.routes import (
 )
 from mdgw.admin.capabilities import build_capabilities_document
 from mdgw.admin.export.routes import create_export_router
+from mdgw.admin.lifecycle.routes import create_lifecycle_router
 from mdgw.admin.monitoring.routes import create_monitoring_router
 
 if TYPE_CHECKING:
@@ -63,6 +64,9 @@ register_feature(create_monitoring_router)
 register_feature(create_audit_router)
 #: Ticket 08: persistent CSV Export Jobs, quotas, expiry and Range downloads.
 register_feature(create_export_router)
+
+#: Ticket 05: Service Instance lifecycle + Operation query routes.
+register_feature(create_lifecycle_router)
 
 
 def create_admin_router(context: AdminContext) -> APIRouter:

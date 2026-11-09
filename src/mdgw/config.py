@@ -682,6 +682,35 @@ class AdminControlConfig(_ConfigModel):
     socket_path: Path | None = None
     timeout_s: float = Field(default=5.0, gt=0)
     max_message_bytes: int = Field(default=65_536, ge=1)
+    host: str = "127.0.0.1"
+    port: int = Field(default=0, ge=0, le=65_535)
+    token_env: str = "MDGW_SUPERVISOR_CONTROL_TOKEN"  # ruff: ignore[hardcoded-password-string]
+    grace_s: float = Field(default=10.0, gt=0)
+
+    @field_validator("host")
+    @classmethod
+    def _loopback_host(cls, value: str) -> str:
+        cleaned = value.strip()
+        if cleaned == "localhost":
+            return cleaned
+        try:
+            address = ipaddress.ip_address(cleaned)
+        except ValueError as exc:
+            msg = "control.host must be a loopback address"
+            raise ValueError(msg) from exc
+        if not address.is_loopback:
+            msg = "control.host must be a loopback address"
+            raise ValueError(msg)
+        return cleaned
+
+    @field_validator("token_env")
+    @classmethod
+    def _token_env_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            msg = "control.token_env must be a non-empty environment name"
+            raise ValueError(msg)
+        return cleaned
 
 
 class AdminLimitsConfig(_ConfigModel):

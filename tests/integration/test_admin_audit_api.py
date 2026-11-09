@@ -722,8 +722,9 @@ def test_capabilities_announce_operator_audit_when_enabled(
         "edit": False,
         "delete": False,
     }
-    # Later tickets add further migrations; this only pins that 003 ran.
-    assert schema_version >= 3
+    # Later tickets add further migrations; this pins that 003 and the
+    # lifecycle migration (ticket 05, 005) ran.
+    assert schema_version >= 5
 
 
 def test_operator_audit_stays_unsupported_when_the_adapter_is_disabled(

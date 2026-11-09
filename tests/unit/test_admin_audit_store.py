@@ -189,8 +189,8 @@ def test_migration_003_upgrades_a_version_2_database_in_place(
             )
 
     with AdminStore(path) as upgraded:
-        # Later tickets add migrations; 003 must still have run.
-        assert upgraded.schema_version >= 3
+        # Later tickets add migrations; 003 and 005 must still have run.
+        assert upgraded.schema_version >= 5
         with upgraded.transaction() as connection:
             subject = connection.execute(
                 "SELECT subject FROM admin_sessions"
