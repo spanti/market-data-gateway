@@ -16,6 +16,7 @@ from fastapi import FastAPI
 
 from mdgw.admin.app import mount_admin
 from mdgw.api.errors import install_exception_handlers
+from mdgw.api.history_cursor import CursorCodec, resolve_cursor_key
 from mdgw.api.middleware import RequestContextMiddleware
 from mdgw.api.openapi import install_openapi
 from mdgw.api.rate_limit import RateLimitMiddleware
@@ -46,6 +47,7 @@ def create_app(  # ruff: ignore[too-many-arguments]  # keyword-only app configur
     service_role: str | None = None,
     rate_limit: RateLimitConfig | None = None,
     admin: AdminContext | None = None,
+    cursor_key: bytes | None = None,
 ) -> FastAPI:
     """Build the FastAPI application.
 
@@ -91,7 +93,16 @@ def create_app(  # ruff: ignore[too-many-arguments]  # keyword-only app configur
     app.include_router(
         instruments.create_router(instrument_store=instrument_store)
     )
-    app.include_router(bars.create_router(store=store))
+    app.include_router(
+        bars.create_router(
+            store=store,
+            cursor_codec=CursorCodec(
+                cursor_key
+                if cursor_key is not None
+                else resolve_cursor_key(None)
+            ),
+        )
+    )
     if ws_hub is not None:
         app.include_router(
             websocket.create_router(

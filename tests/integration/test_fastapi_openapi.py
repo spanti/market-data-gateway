@@ -41,6 +41,7 @@ DECIMAL_TEXT = re.compile(r"-?\d+(?:\.\d+)?")
 REST_PATHS = (
     "/api/v1/bars",
     "/api/v1/bars/export",
+    "/api/v2/bars",
     "/api/v1/instruments",
     "/api/v1/instruments/{instrument_id}",
     "/api/v1/status",
@@ -347,6 +348,46 @@ def test_query_parameters_are_documented_without_hidden_validation(
     ]
     assert export_format["enum"] == ["parquet", "arrow"]
     assert export_format["default"] == "parquet"
+
+
+# -- revision-safe v2 surface ----------------------------------------------
+
+
+def test_v2_bars_documents_required_bounded_limit_and_opaque_cursor(
+    schema: dict[str, Any],
+) -> None:
+    bars = _parameters(schema, "/api/v2/bars")
+
+    assert bars["interval"]["required"] is True
+    assert bars["interval"]["schema"]["enum"] == [
+        "1m",
+        "5m",
+        "15m",
+        "1h",
+        "1d",
+    ]
+    assert bars["instrument"]["required"] is True
+    assert bars["limit"]["required"] is True
+    assert bars["limit"]["schema"]["type"] == "integer"
+    assert bars["limit"]["schema"]["minimum"] == 1
+    assert bars["limit"]["schema"]["maximum"] == 100_000
+
+    cursor = bars["cursor"]["schema"]
+    assert cursor["type"] == "string"
+    assert "opaque" in cursor["description"].lower()
+    assert "invalid_cursor" in cursor["description"]
+
+    assert bars["format"]["schema"]["enum"] == ["json"]
+    for name in ("start", "end"):
+        assert bars[name]["required"] is False
+
+    content = _operation(schema, "/api/v2/bars")["responses"]["200"]["content"]
+    assert set(content) == {JSON}
+    response = _resolve(schema, content[JSON]["schema"])
+    assert set(response["required"]) == {"bars", "page"}
+    page = response["properties"]["page"]
+    assert set(page["required"]) == {"has_more", "next_cursor"}
+    assert page["properties"]["next_cursor"]["type"] == ["string", "null"]
 
 
 # -- docs endpoints ---------------------------------------------------------

@@ -32,9 +32,11 @@ from mdgw.core.schema import (
 from mdgw.core.time import datetime_to_ns, ns_to_iso
 from mdgw.normalize.version import NORMALIZATION_RULE_VERSIONS, normalize_rule_versions
 from mdgw.store.duckdb_reader import (
+    PAGE_SCHEMA,
     DuckDBArrowScanner,
     DuckDBConnectionCache,
     DuckDBOptions,
+    PagePosition,
     ReplayScanBranch,
     ensure_supported_duckdb,
 )
@@ -989,6 +991,65 @@ class StoreRead:
         if not batches:
             return empty_logical_table()
         return pa.Table.from_batches(batches, schema=BAR_SCHEMA)
+
+    def read_ordered_page_bars(
+        self,
+        *,
+        keep: int,
+        after: PagePosition | None = None,
+    ) -> pa.Table:
+        """Materialize the next revision-safe page on this Snapshot.
+
+        Rows are ordered by ``(open_ts, revision, ingest_ts,
+        row_fingerprint)`` ascending. ``after`` is the total-order key of the
+        last row of the previous page; the returned rows are strictly after
+        it. The table carries the contract Bar columns plus the internal
+        ``_row_fingerprint`` column (``PAGE_SCHEMA``) so the route can encode
+        the next cursor from the last returned row. Raw Revisions are never
+        deduplicated and no Manifest state is pinned by the cursor.
+
+        The request always filters one Bar Interval (the REST `interval`
+        parameter); a read without an Interval filter is rejected rather than
+        guessing the partition restoration.
+        """
+        if keep < 1:
+            msg = "keep must be a positive row count"
+            raise ValueError(msg)
+        self._ensure_open()
+        query = self._resolve_query(_UNSET, _UNSET, _UNSET, _UNSET)
+        self._scans += 1
+        groups = self._arrow_scan_groups(query)
+        if not groups:
+            return PAGE_SCHEMA.empty_table()
+        if len(groups) != 1:
+            msg = "revision-safe page reads require a single Bar Interval"
+            raise RuntimeError(msg)
+        interval, files = groups[0]
+        scanner = DuckDBArrowScanner(self._store.duckdb_connections)
+        with self._close_lock:
+            if self._closed:
+                msg = "StoreRead is closed"
+                raise RuntimeError(msg)
+            self._active_scanner = scanner
+        try:
+            batches = list(
+                scanner.ordered_page_batches(
+                    files,
+                    interval,
+                    query,
+                    after=after,
+                    keep=keep,
+                    batch_size=self._store.duckdb.arrow_batch_size,
+                )
+            )
+        finally:
+            scanner.close()
+            with self._close_lock:
+                if self._active_scanner is scanner:
+                    self._active_scanner = None
+        if not batches:
+            return PAGE_SCHEMA.empty_table()
+        return pa.Table.from_batches(batches, schema=PAGE_SCHEMA)
 
     def close(self) -> None:
         """Release the lease and any DuckDB scan. Safe from any thread."""

@@ -57,13 +57,13 @@ function envelope(
 
 function pageResponse(
   bars: BarMessageEnvelope[],
-  options: { hasMore?: boolean; nextStart?: string | null } = {},
+  options: { hasMore?: boolean; nextCursor?: string | null } = {},
 ) {
   return HttpResponse.json({
     bars,
     page: {
       has_more: options.hasMore ?? false,
-      next_start: options.nextStart ?? null,
+      next_cursor: options.nextCursor ?? null,
     },
   });
 }
@@ -90,7 +90,7 @@ describe("Bars page filter and URL state", () => {
   it("defaults to the latest 24 hours and never invents a query", async () => {
     let barsRequests = 0;
     server.use(
-      http.get("*/api/v1/bars", () => {
+      http.get("*/api/v2/bars", () => {
         barsRequests += 1;
         return pageResponse([]);
       }),
@@ -133,7 +133,7 @@ describe("Bars page filter and URL state", () => {
     const user = userEvent.setup();
     const requested: URL[] = [];
     server.use(
-      http.get("*/api/v1/bars", ({ request }) => {
+      http.get("*/api/v2/bars", ({ request }) => {
         requested.push(new URL(request.url));
         return pageResponse([envelope()]);
       }),
@@ -177,7 +177,7 @@ describe("Bars page filter and URL state", () => {
     const user = userEvent.setup();
     const requested: URL[] = [];
     server.use(
-      http.get("*/api/v1/bars", ({ request }) => {
+      http.get("*/api/v2/bars", ({ request }) => {
         requested.push(new URL(request.url));
         return pageResponse([envelope({ openTs: "2024-02-01T10:00:00.000000000Z" })]);
       }),
@@ -208,7 +208,7 @@ describe("Bars page filter and URL state", () => {
   it("rejects a chart range over 31 UTC days without querying JSON and points to Export Job", async () => {
     let barsRequests = 0;
     server.use(
-      http.get("*/api/v1/bars", () => {
+      http.get("*/api/v2/bars", () => {
         barsRequests += 1;
         return pageResponse([]);
       }),
@@ -254,7 +254,7 @@ describe("Bars page data and revision views", () => {
       envelope({ revision: 0, close: "65005.5" }),
       envelope({ revision: 2, close: "0.000000000000000001" }),
     ];
-    server.use(http.get("*/api/v1/bars", () => pageResponse(rows)));
+    server.use(http.get("*/api/v2/bars", () => pageResponse(rows)));
 
     renderApp({ initialEntries: [barsUrl(HISTORICAL)] });
 
@@ -290,11 +290,11 @@ describe("Bars page data and revision views", () => {
   it("stops on a non-advancing cursor and reports partial results honestly", async () => {
     let requests = 0;
     server.use(
-      http.get("*/api/v1/bars", () => {
+      http.get("*/api/v2/bars", () => {
         requests += 1;
         return pageResponse([envelope()], {
           hasMore: true,
-          nextStart: "2024-01-01T00:00:00.000Z",
+          nextCursor: "same-cursor",
         });
       }),
     );
@@ -302,17 +302,17 @@ describe("Bars page data and revision views", () => {
     renderApp({ initialEntries: [barsUrl(HISTORICAL)] });
 
     expect(
-      await screen.findByText(/分页已停止：next_start 未严格前进/),
+      await screen.findByText(/分页已停止：next_cursor 未前进或重复/),
     ).toBeInTheDocument();
     expect(screen.getByTestId("history-summary")).toHaveTextContent(
       "分页已停止（部分结果）",
     );
-    expect(requests).toBe(1);
+    expect(requests).toBe(2);
   });
 
   it("maps the 100,000-row JSON ceiling to a shrink-range message with Request ID", async () => {
     server.use(
-      http.get("*/api/v1/bars", () =>
+      http.get("*/api/v2/bars", () =>
         HttpResponse.json(
           {
             error: {
@@ -359,6 +359,7 @@ describe("Bars page CSV direct path", () => {
 
   it("downloads the exact server Blob with the Content-Disposition filename", async () => {
     server.use(
+      http.get("*/api/v2/bars", () => pageResponse([envelope()])),
       http.get("*/api/v1/bars", ({ request }) => {
         const url = new URL(request.url);
         if (url.searchParams.get("format") === "csv") {
@@ -413,6 +414,7 @@ describe("Bars page CSV direct path", () => {
 
   it("surfaces a Blob error envelope with the Request ID", async () => {
     server.use(
+      http.get("*/api/v2/bars", () => pageResponse([envelope()])),
       http.get("*/api/v1/bars", ({ request }) => {
         const url = new URL(request.url);
         if (url.searchParams.get("format") === "csv") {
@@ -452,6 +454,7 @@ describe("Bars page CSV direct path", () => {
 
   it("supports aborting an in-flight download", async () => {
     server.use(
+      http.get("*/api/v2/bars", () => pageResponse([envelope()])),
       http.get("*/api/v1/bars", async ({ request }) => {
         const url = new URL(request.url);
         if (url.searchParams.get("format") === "csv") {
@@ -492,7 +495,7 @@ describe("Bars page export boundary", () => {
   }
 
   it("enables direct CSV at exactly 31 days and does not offer an Export Job", async () => {
-    server.use(http.get("*/api/v1/bars", () => pageResponse([envelope()])));
+    server.use(http.get("*/api/v2/bars", () => pageResponse([envelope()])));
     renderApp({ initialEntries: [rangeUrl(31)] });
 
     expect(
@@ -502,7 +505,7 @@ describe("Bars page export boundary", () => {
   });
 
   it("routes 31–366 days away from Blob downloads", async () => {
-    server.use(http.get("*/api/v1/bars", () => pageResponse([])));
+    server.use(http.get("*/api/v2/bars", () => pageResponse([])));
     renderApp({ initialEntries: [rangeUrl(45)] });
 
     expect(
@@ -578,7 +581,7 @@ describe("Bars page live follow", () => {
       now.getTime() - 10 * 60 * 1000,
     ).toISOString();
     server.use(
-      http.get("*/api/v1/bars", () =>
+      http.get("*/api/v2/bars", () =>
         pageResponse([
           envelope({
             openTs: new Date(now.getTime() - 30 * 60 * 1000).toISOString(),
@@ -602,7 +605,7 @@ describe("Bars page live follow", () => {
 
   it("does not connect for a historical-only range", async () => {
     const factory = vi.fn();
-    server.use(http.get("*/api/v1/bars", () => pageResponse([envelope()])));
+    server.use(http.get("*/api/v2/bars", () => pageResponse([envelope()])));
     renderApp({
       initialEntries: [barsUrl(HISTORICAL)],
       wsFactory: factory,
@@ -686,7 +689,7 @@ describe("Bars page live follow", () => {
           { status: 500 },
         ),
       ),
-      http.get("*/api/v1/bars", () => pageResponse([envelope()])),
+      http.get("*/api/v2/bars", () => pageResponse([envelope()])),
     );
     const factory = vi.fn();
     const now = new Date();
