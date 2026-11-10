@@ -4,7 +4,7 @@
 
 **Blocked by:** None（需要维护者契约决策）
 
-**Status:** ready-for-human
+**Status:** ready-for-agent
 
 - [ ] 明确是否版本化公开 API，以及 ADR-0012 是否需要 supersede。
 - [ ] 保证 Revision 组不会跨页造成重复、跳行或死循环。
@@ -18,3 +18,5 @@
 ADR-0016 只授权 Admin API 架构归属，不授权改变公开历史 Data Contract；本 issue 需要自己的契约决策。
 
 **Comment (2026-11-10):** Tickets 01-09 are resolved and the Admin API is merged on `integration/gateway-admin-api`. This decision remains open for the maintainer: the branch did not change public `/api/v1/bars` pagination or Revision-heavy Time Cursor semantics, and the frontend non-advance guard remains in place. ADR-0017 covers only the Admin control channel and does not authorize a public history contract change.
+
+**Decision (2026-11-10):** 维护者选择候选 A。`/api/v1/bars` 与 ADR-0012 保持原样；新增 revision-safe 的 `GET /api/v2/bars`（JSON、单 Instrument、返回全部 raw Revisions、不透明行级 keyset 游标）。游标键与排序均为 `(open_ts, revision, ingest_ts, 行指纹)`；首页使用 `start`/`end`，后续页使用 `cursor`；`limit` 为 1..100000；响应为 `{"bars":[...],"page":{"has_more":...,"next_cursor":...}}`。新增 ADR-0018；同步 data-contract、GLOSSARY、OpenAPI、SDK 与前端。Status 切到 ready-for-agent 以实施。
