@@ -10,12 +10,31 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The Admin migration gate compares added files with the Git base.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: pip
       - name: Install
         run: python -m pip install --upgrade pip && python -m pip install -e ".[test]"
+      - name: Admin deployment and migration gates
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="origin/${{ github.base_ref }}"
+          elif [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            BASE="${{ github.event.before }}"
+          else
+            BASE=""
+          fi
+          if [ -n "$BASE" ]; then
+            python scripts/check_admin_migrations.py --base "$BASE"
+          else
+            python scripts/check_admin_migrations.py
+          fi
+          python -m pytest tests/integration/test_admin_full_deployment.py tests/unit/test_admin_migrations.py -q
       - name: Test (network tests are deselected by pyproject addopts)
         run: python -m pytest tests -q
 
