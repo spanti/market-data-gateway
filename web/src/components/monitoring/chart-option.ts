@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useState } from "react";
 import type { TrendPoint } from "@/api/monitoring/types";
 import { formatUtcTime } from "@/lib/format";
 
@@ -55,6 +56,49 @@ export function readChartPalette(
       (index) => read(`--chart-series-${index}`) || fallback.series[index - 1]!,
     ),
   };
+}
+
+function readThemeSnapshot(): "light" | "dark" {
+  if (typeof document === "undefined") {
+    return "light";
+  }
+  const root = document.documentElement;
+  return root.dataset.theme === "dark" || root.classList.contains("dark")
+    ? "dark"
+    : "light";
+}
+
+/** Re-read chart colors whenever the Operator Console theme changes. */
+export function useChartPalette(override?: ChartPalette): ChartPalette {
+  const [theme, setTheme] = useState<"light" | "dark">(readThemeSnapshot);
+
+  useEffect(() => {
+    if (override || typeof MutationObserver === "undefined") {
+      return;
+    }
+    const observer = new MutationObserver(() => {
+      setTheme(readThemeSnapshot());
+    });
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class", "data-theme"],
+    });
+    return () => observer.disconnect();
+  }, [override]);
+
+  return useMemo(() => {
+    if (override) {
+      return override;
+    }
+    const fallback = theme === "dark" ? DARK_CHART_PALETTE : LIGHT_CHART_PALETTE;
+    if (typeof window === "undefined") {
+      return fallback;
+    }
+    return readChartPalette(
+      window.getComputedStyle(document.documentElement),
+      fallback,
+    );
+  }, [override, theme]);
 }
 
 export interface ColoredTrendSeries {
