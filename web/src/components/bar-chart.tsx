@@ -32,6 +32,7 @@ import {
   buildBarChartOption,
 } from "@/lib/bar-chart-option";
 import { deriveMaxRevisionBars } from "@/lib/bar-data";
+import { useChartPalette } from "@/components/monitoring/chart-option";
 
 echarts.use([LineChart, GridComponent, TooltipComponent, AriaComponent, SVGRenderer]);
 
@@ -146,7 +147,11 @@ export function BarChart({
   className,
 }: BarChartProps) {
   const points = useMemo(() => deriveMaxRevisionBars(bars), [bars]);
-  const option = useMemo(() => buildBarChartOption(points), [points]);
+  const palette = useChartPalette();
+  const option = useMemo(
+    () => buildBarChartOption(points, undefined, palette),
+    [points, palette],
+  );
   const effectiveState: ChartPanelState =
     state === "ready" && points.length === 0 ? "empty" : state;
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -159,9 +164,9 @@ export function BarChart({
   const lastBar = points[points.length - 1] ?? null;
 
   const legend: ChartLegendItem[] = lastBar
-    ? BAR_CHART_SERIES.map((key) => ({
+    ? BAR_CHART_SERIES.map((key, index) => ({
         name: key,
-        color: BAR_CHART_COLORS[key],
+        color: palette.series[index] ?? BAR_CHART_COLORS[key],
         value: lastBar.payload[key],
       }))
     : [];

@@ -1,4 +1,8 @@
 import type { BarMessageEnvelope } from "@/api/endpoints/bars";
+import {
+  LIGHT_CHART_PALETTE,
+  type ChartPalette,
+} from "@/components/monitoring/chart-option";
 import type { LineSeriesOption } from "echarts/charts";
 import type {
   AriaComponentOption,
@@ -72,12 +76,16 @@ function formatCoordinate(value: unknown): string {
 export function buildBarChartOption(
   bars: readonly BarMessageEnvelope[],
   description = "最大 Revision Bar 图。只用图表坐标做数值转换，精确值见图例与数据表。",
+  palette: ChartPalette = LIGHT_CHART_PALETTE,
 ): BarChartOption {
   const categories = bars.map((bar) => formatUtcChartLabel(bar.payload.open_ts));
+  const colors = BAR_CHART_SERIES.map(
+    (key, index) => palette.series[index] ?? BAR_CHART_COLORS[key],
+  );
 
   return {
     animation: false,
-    color: BAR_CHART_SERIES.map((key) => BAR_CHART_COLORS[key]),
+    color: colors,
     aria: {
       enabled: true,
       description,
@@ -87,20 +95,22 @@ export function buildBarChartOption(
       trigger: "axis",
       axisPointer: {
         type: "line",
-        lineStyle: { color: "#c3c2b7", width: 1, type: "solid" },
+        lineStyle: { color: palette.axis, width: 1, type: "solid" },
       },
-      backgroundColor: "#fcfcfb",
-      borderColor: "#e1e0d9",
-      textStyle: { color: "#0b0b0b", fontSize: 12 },
+      backgroundColor: palette.surface,
+      borderColor: palette.grid,
+      textStyle: { color: palette.textPrimary, fontSize: 12 },
       valueFormatter: (value: unknown) => formatCoordinate(value),
     },
     xAxis: {
       type: "category",
       data: categories,
       boundaryGap: false,
-      axisLine: { lineStyle: { color: "#c3c2b7", width: 1, type: "solid" } },
+      axisLine: {
+        lineStyle: { color: palette.axis, width: 1, type: "solid" },
+      },
       axisTick: { show: false },
-      axisLabel: { color: "#898781", fontSize: 11, margin: 12 },
+      axisLabel: { color: palette.muted, fontSize: 11, margin: 12 },
     },
     yAxis: {
       type: "value",
@@ -108,10 +118,12 @@ export function buildBarChartOption(
       // entire series. Missing points stay gaps, not zero.
       scale: true,
       axisLine: { show: false },
-      axisLabel: { color: "#898781", fontSize: 11 },
-      splitLine: { lineStyle: { color: "#e1e0d9", width: 1, type: "solid" } },
+      axisLabel: { color: palette.muted, fontSize: 11 },
+      splitLine: {
+        lineStyle: { color: palette.grid, width: 1, type: "solid" },
+      },
     },
-    series: BAR_CHART_SERIES.map((key) => ({
+    series: BAR_CHART_SERIES.map((key, index) => ({
       name: key,
       type: "line",
       data: seriesData(bars, key),
@@ -120,13 +132,13 @@ export function buildBarChartOption(
       symbolSize: 8,
       lineStyle: {
         width: 2,
-        color: BAR_CHART_COLORS[key],
+        color: colors[index],
         cap: "round",
         join: "round",
       },
       itemStyle: {
-        color: BAR_CHART_COLORS[key],
-        borderColor: "#fcfcfb",
+        color: colors[index],
+        borderColor: palette.surface,
         borderWidth: 2,
       },
       emphasis: { focus: "series", scale: true },

@@ -17,9 +17,8 @@ import { ChartDataTable } from "@/components/monitoring/chart-data-table";
 import {
   alignTrendPoints,
   buildTrendChartOption,
-  LIGHT_CHART_PALETTE,
-  readChartPalette,
   seriesColors,
+  useChartPalette,
   type ChartPalette,
 } from "@/components/monitoring/chart-option";
 import type { UnknownCause } from "@/components/states";
@@ -86,17 +85,7 @@ export function TrendChart({
   const lastIndex = Math.max(0, aligned.timestamps.length - 1);
   const [activeIndex, setActiveIndex] = useState(lastIndex);
 
-  const resolvedPalette = useMemo<ChartPalette>(() => {
-    if (palette) {
-      return palette;
-    }
-    if (typeof window === "undefined") {
-      return LIGHT_CHART_PALETTE;
-    }
-    return readChartPalette(
-      window.getComputedStyle(document.documentElement),
-    );
-  }, [palette]);
+  const resolvedPalette = useChartPalette(palette);
 
   const colors = useMemo(
     () => seriesColors(series, resolvedPalette),
