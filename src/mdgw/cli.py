@@ -10,6 +10,7 @@ lazy so the maintenance commands stay lightweight.
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import sys
 import threading
@@ -564,23 +565,97 @@ def _run_up(
 
     from mdgw.service.supervisor import Supervisor  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
 
-    specs = _build_up_specs(
-        config, _resolved_config_path(config_path), data_root, level
+    resolved_config = _resolved_config_path(config_path)
+    specs = _build_up_specs(config, resolved_config, data_root, level)
+    lifecycle, audit = _build_lifecycle_adapter(config, data_root)
+    supervisor = Supervisor(
+        specs,
+        lifecycle=lifecycle,
+        grace_s=config.admin.control.grace_s,
+        validate_config=(
+            (lambda: load_config(resolved_config))
+            if resolved_config is not None
+            else None
+        ),
+        on_terminal=_terminal_audit_sink(audit),
     )
-    supervisor = Supervisor(specs)
+    control = None
+    if lifecycle is not None:
+        from mdgw.service.supervisor_control import (  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
+            SupervisorControlServer,
+        )
+
+        token = os.environ.get(config.admin.control.token_env, "")
+        control = SupervisorControlServer(
+            supervisor,
+            host=config.admin.control.supervisor_host,
+            port=config.admin.control.supervisor_port,
+            token=token,
+            max_message_bytes=config.admin.control.max_message_bytes,
+            request_timeout_s=config.admin.control.timeout_s,
+        )
     stop = threading.Event()
     _install_signal_handlers(stop)
-    try:
-        code = supervisor.run(stop)
+    try:  # ruff: ignore[too-many-statements-in-try-clause]
+        if control is not None:
+            control.start()
+        try:
+            code = supervisor.run(stop)
+        finally:
+            if control is not None:
+                control.stop()
     except Exception:
         logger.exception(
             "supervisor failed",
             extra={"event": "supervisor.failed"},
         )
         raise typer.Exit(code=1) from None
+    finally:
+        if lifecycle is not None:
+            lifecycle.close()
+        if audit is not None:
+            audit.close()
     if code:
         raise typer.Exit(code=code)
     return 0
+
+
+def _build_lifecycle_adapter(config, data_root):
+    """Build the persisted adapter when admin lifecycle is configured."""
+    from mdgw.admin.audit.store import AuditStore  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
+    from mdgw.admin.audit.writer import AuditWriter  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
+    from mdgw.admin.lifecycle.store import LifecycleStore  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
+
+    admin = config.admin
+    control_config = admin.control
+    if not (admin.enabled and admin.adapters.supervisor):
+        return None, None
+    token = os.environ.get(control_config.token_env, "")
+    if control_config.port <= 0 or not token:
+        logger.warning(
+            "supervisor lifecycle control is not configured",
+            extra={"event": "supervisor.control_not_configured"},
+        )
+        return None, None
+    db_path = admin.resolved_db_path(Path(data_root))
+    lifecycle = LifecycleStore(db_path)
+    try:
+        audit = AuditWriter(AuditStore(db_path))
+    except BaseException:
+        lifecycle.close()
+        raise
+    return lifecycle, audit
+
+
+def _terminal_audit_sink(audit):
+    """Build the Supervisor's terminal audit callback, if auditing is on."""
+    if audit is None:
+        return None
+    from mdgw.admin.lifecycle.audit import (  # ruff: ignore[import-outside-top-level] - lazy import keeps maintenance commands lightweight
+        terminal_audit_sink,
+    )
+
+    return terminal_audit_sink(audit)
 
 
 def _build_up_specs(
@@ -635,7 +710,32 @@ def _build_up_specs(
         ),
         ready_timeout_s=config.service.collector_ready_timeout_s,
     )
-    return [collector, api]
+    specs = [collector, api]
+    # A zero replay health port means the deployment has no replay health
+    # endpoint to probe, so replay cannot be supervised truthfully. The
+    # default configuration uses 8082 and starts replay after api.
+    if config.service.replay_health_port > 0:
+        specs.append(
+            ChildSpec(
+                role="replay",
+                command=[
+                    sys.executable,
+                    "-m",
+                    "mdgw",
+                    "run",
+                    "--service",
+                    "replay",
+                    *common,
+                ],
+                health_url=_local_url(
+                    config.service.health_host,
+                    config.service.replay_health_port,
+                    "/readyz",
+                ),
+                ready_timeout_s=config.service.collector_ready_timeout_s,
+            )
+        )
+    return specs
 
 
 def _resolved_config_path(config_path: Path | None) -> Path | None:

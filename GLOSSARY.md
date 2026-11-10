@@ -115,12 +115,16 @@ _Avoid_: Feed API、Pub/Sub API
 _Avoid_: Playback API
 
 **REST API**:
-api Service Role 对外提供的历史查询 HTTP 接口，包括 `/api/v1/instruments`、`/api/v1/bars`、`/api/v1/bars/export`、`/api/v1/status`，以及 `/healthz`、`/readyz`、`/metrics` 等运维端点。它只是 Data Contract 的一种读取方式，不定义第二套 schema、错误语义或排序契约。
+api Service Role 对外提供的历史查询 HTTP 接口，包括 `/api/v1/instruments`、`/api/v1/bars`、`/api/v1/bars/export`、`/api/v1/status`、`/api/v2/bars`，以及 `/healthz`、`/readyz`、`/metrics` 等运维端点。它只是 Data Contract 的一种读取方式，不定义第二套 schema、错误语义或排序契约。
 _Avoid_: 服务层、Service Layer、Web 层、API 层（api 是 Service Role，不是分层架构中的一层）
 
 **Time Cursor**:
-历史查询的读取游标，由闭区间 `start`、开区间 `end` 与分页响应给出的 `next_start` 组成。`next_start` 是第一条未返回 Bar 的 `open_ts`，下一次请求应把它作为闭区间 `start` 传回，从而逐页读取且不重不漏。它只表达时间位置，不携带行数或 offset。
+v1 历史查询的读取游标，由闭区间 `start`、开区间 `end` 与分页响应给出的 `next_start` 组成。`next_start` 是第一条未返回 Bar 的 `open_ts`，下一次请求应把它作为闭区间 `start` 传回。它只表达时间位置，不携带行数或 offset。它只用于 `/api/v1/bars`；同一 `open_ts` 存在多个 raw Revision 时，页边界落在组内会产生跨页重复与不可达行，这是已记录的 v1 契约缺口（[`docs/revision-heavy-time-cursor.md`](docs/revision-heavy-time-cursor.md)），需要完整遍历 raw Revision 的客户端使用 Revision-safe Cursor。
 _Avoid_: Offset、Page Token、Opaque Cursor、Watermark
+
+**Revision-safe Cursor**:
+`/api/v2/bars` 使用的不透明、带签名 keyset 游标。载荷编码上一页最后一条返回行的总序键 `(open_ts, revision, ingest_ts, row_fingerprint)` 与请求窗口的 `end`，以 HMAC-SHA256 签名、base64url 呈现；客户端只能原样回传 `next_cursor`。下一页严格从该位置之后开始，因此每条 raw Revision 恰好返回一次，且游标在 Manifest 切换、Compaction 与 GC 后仍然有效。它是位置令牌，不是授权凭证。
+_Avoid_: Time Cursor、Offset、Page Number、Snapshot ID
 
 **Message Envelope**:
 每条流式消息的统一封装头：`schema_version, data_type, instrument_id, event_ts, ingest_ts, feed, seq`。

@@ -6,6 +6,10 @@ from typing import TYPE_CHECKING
 
 from mdgw.core.instrument import InstrumentId
 from mdgw.ingest.ccxt_feed import build_feed_handler
+from mdgw.ingest.feed_status import (
+    FeedConnectionStatus,
+    handler_feed_statuses,
+)
 from mdgw.normalize.version import NORMALIZATION_RULE_VERSION
 
 if TYPE_CHECKING:
@@ -42,6 +46,11 @@ class CompositeFeedHandler:
             handler.supports_history for handler in self._handlers
         )
 
+    @property
+    def handlers(self) -> tuple[object, ...]:
+        """The child Feed Handlers, in configured order (public accessor)."""
+        return self._handlers
+
     def iter_bars(self) -> Iterator[RawBar]:
         for handler in self._handlers:
             yield from handler.iter_bars()
@@ -58,6 +67,19 @@ class CompositeFeedHandler:
             if parsed in handler.instrument_ids:
                 return handler.fetch_history(parsed, interval, start, end)
         return ()
+
+    def feed_status(self) -> tuple[FeedConnectionStatus, ...]:
+        """One real status per configured child Feed Handler.
+
+        The composite never aggregates children into a single synthetic state:
+        each Venue/Feed keeps its own truthful lifecycle in ``/status`` and in
+        the bounded-label metrics.
+        """
+        return tuple(
+            status
+            for handler in self._handlers
+            for status in handler_feed_statuses(handler)
+        )
 
     def close(self) -> None:
         for handler in self._handlers:
@@ -83,7 +105,7 @@ def attach_quarantine(
     if callable(attach):
         attach(quarantine, rule_version=rule_version)
         return
-    for child in getattr(handler, "_handlers", ()):
+    for child in getattr(handler, "handlers", ()):
         attach_quarantine(child, quarantine, rule_version=rule_version)
 
 

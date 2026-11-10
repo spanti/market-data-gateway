@@ -26,6 +26,9 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "websockets>=13",
+    # OIDC ID Token signature verification (RS256/ES256 via JWKS) in the
+    # Admin API. Deliberately the only crypto dependency; no PyJWT/authlib.
+    "cryptography>=42",
 ]
 
 [project.scripts]
@@ -39,6 +42,10 @@ nautilus = ["nautilus-trader>=2.0.0rc7", "numpy", "pandas"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# Admin schema migrations are data files discovered by the runner at runtime.
+"mdgw.admin" = ["migrations/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

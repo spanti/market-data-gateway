@@ -2,8 +2,6 @@ import axios from "axios";
 import { apiClient, blobClient, normalizeHeaders, toHttpFailure } from "@/api/http/client";
 import { normalizeRestFailure, parseBlobFailure } from "@/api/http/errors";
 import { HttpError } from "@/api/http/types";
-import { maxOpenTs } from "@/lib/bar-data";
-import { decideBarsPageStep, type BarsPageStop } from "@/lib/bar-pagination";
 import { parseContentDispositionFilename } from "@/lib/content-disposition";
 import type { BarInterval } from "@/lib/time-range";
 
@@ -93,79 +91,11 @@ export async function fetchBarsJson(
   return response.data;
 }
 
-/** Default page size for the JSON Time Cursor. */
-export const BARS_HISTORY_PAGE_LIMIT = 5000;
 /**
- * Safety cap: 20 pages x 5000 rows = 100,000 raw JSON rows, matching the
- * server's JSON ceiling. Reaching it surfaces partial results honestly.
+ * Non-paginated v1 JSON helper. Paginated revision-safe history lives in
+ * `bars-v2.ts` and uses `/api/v2/bars`; CSV/Arrow and the v1 endpoint remain
+ * available unchanged.
  */
-export const BARS_HISTORY_MAX_PAGES = 20;
-
-export interface BarsHistoryOptions {
-  instrument: string;
-  interval: BarInterval;
-  start: string;
-  end: string;
-  limit?: number;
-  maxPages?: number;
-}
-
-export interface BarsHistoryResult {
-  /** Every raw revision in ascending server response order; never deduped. */
-  bars: BarMessageEnvelope[];
-  pages: number;
-  complete: boolean;
-  /** Non-null when the guard stopped early; `bars` is then partial. */
-  stop: BarsPageStop | null;
-}
-
-/**
- * Paginated single-instrument JSON history with the contract's Time Cursor
- * guard. It never invents `start = next_start + interval`; a non-advancing or
- * revision-group boundary stops the walk and returns partial rows.
- */
-export async function fetchBarsHistory(
-  options: BarsHistoryOptions,
-  signal?: AbortSignal,
-): Promise<BarsHistoryResult> {
-  const limit = options.limit ?? BARS_HISTORY_PAGE_LIMIT;
-  const maxPages = options.maxPages ?? BARS_HISTORY_MAX_PAGES;
-  const bars: BarMessageEnvelope[] = [];
-  let cursor = options.start;
-  let pages = 0;
-
-  for (;;) {
-    const page = await fetchBarsJson(
-      {
-        instrument: options.instrument,
-        interval: options.interval,
-        start: cursor,
-        end: options.end,
-        limit,
-        format: "json",
-      },
-      signal,
-    );
-    pages += 1;
-    bars.push(...page.bars);
-
-    const step = decideBarsPageStep({
-      requestStart: cursor,
-      page,
-      lastReturnedOpenTs: maxOpenTs(bars),
-      pageCount: pages,
-      maxPages,
-    });
-
-    if (step.kind === "complete") {
-      return { bars, pages, complete: true, stop: null };
-    }
-    if (step.kind === "stop") {
-      return { bars, pages, complete: false, stop: step.stop };
-    }
-    cursor = step.nextStart;
-  }
-}
 
 export interface CsvProgress {
   loadedBytes: number;

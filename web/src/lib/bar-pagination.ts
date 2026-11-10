@@ -1,19 +1,19 @@
-import type { BarsResponse } from "@/api/endpoints/bars";
-import { parseIsoInstant } from "@/lib/time-range";
+import type { BarsV2Response } from "@/api/endpoints/bars-v2";
 
 /**
- * Cursor guard for the single-instrument JSON Time Cursor
- * (`GET /api/v1/bars?instrument=…&limit=…`).
+ * Cursor guard for the revision-safe v2 JSON history
+ * (`GET /api/v2/bars?instrument=…&limit=…&cursor=…`).
  *
- * The API contract has a known Revision-heavy defect: `next_start` is the
- * inclusive `open_ts` cursor, so a page boundary inside a revision group can
- * repeat the same page forever. This module never "fixes" that by advancing a
- * timestamp; it stops and reports the gap so the UI can show partial results.
+ * The server returns an opaque, signed `next_cursor` and guarantees strict
+ * progress in the total order `(open_ts, revision, ingest_ts,
+ * row_fingerprint)`. The cursor is opaque, so this module cannot verify that
+ * the position actually advanced by parsing it; it can only guarantee that
+ * the walk never loops or continues on a broken page. A missing, unchanged
+ * or already-seen cursor stops the walk with a user-visible error.
  */
 
 export type BarsPageStopReason =
   | "cursor_non_advance"
-  | "revision_group_boundary"
   | "cursor_protocol_error"
   | "page_cap";
 
@@ -24,38 +24,51 @@ export interface BarsPageStop {
 
 export type BarsPageStep =
   | { kind: "complete" }
-  | { kind: "continue"; nextStart: string }
+  | { kind: "continue"; nextCursor: string }
   | { kind: "stop"; stop: BarsPageStop };
 
 export interface BarsPageDecisionInput {
-  /** Inclusive `start` cursor used for the page that was just returned. */
-  requestStart: string;
-  page: BarsResponse;
-  /** Maximum `open_ts` returned across all pages so far, if any. */
-  lastReturnedOpenTs: string | null;
+  /** Cursor used for the page that was just returned; null on the first page. */
+  requestCursor: string | null;
+  page: BarsV2Response;
+  /** Cursors already followed in this walk, including `requestCursor`. */
+  seenCursors: readonly string[];
   pageCount: number;
   maxPages: number;
 }
 
 const CURSOR_GAP_MESSAGE =
-  "分页已停止：next_start 未严格前进。这是已知的 Revision-heavy Time Cursor 缺陷，剩余 Revision 无法通过该游标到达；下方为部分结果，请缩小范围。";
+  "分页已停止：next_cursor 未前进或重复。为避免无限循环，仅显示已返回的部分结果；请缩小时间范围后重试。";
+
+const PROTOCOL_MESSAGE =
+  "分页已停止：响应缺少有效的 page.next_cursor。下方为部分结果。";
 
 export function decideBarsPageStep(
   input: BarsPageDecisionInput,
 ): BarsPageStep {
   const info = input.page.page;
-  if (info === undefined) {
+  if (
+    info === undefined ||
+    typeof info.has_more !== "boolean" ||
+    (info.next_cursor !== null && typeof info.next_cursor !== "string")
+  ) {
     return {
       kind: "stop",
-      stop: {
-        reason: "cursor_protocol_error",
-        message:
-          "分页已停止：响应缺少 page 元数据（instrument + limit 时必须返回）。下方为部分结果。",
-      },
+      stop: { reason: "cursor_protocol_error", message: PROTOCOL_MESSAGE },
     };
   }
 
   if (!info.has_more) {
+    if (info.next_cursor !== null) {
+      return {
+        kind: "stop",
+        stop: {
+          reason: "cursor_protocol_error",
+          message:
+            "分页已停止：has_more=false 但 next_cursor 非空，违反 revision-safe cursor 契约。下方为部分结果。",
+        },
+      };
+    }
     return { kind: "complete" };
   }
 
@@ -65,17 +78,6 @@ export function decideBarsPageStep(
       stop: {
         reason: "page_cap",
         message: `已达到 ${input.maxPages} 页安全上限，仅显示部分结果；请缩小时间范围。`,
-      },
-    };
-  }
-
-  if (info.next_start === null) {
-    return {
-      kind: "stop",
-      stop: {
-        reason: "cursor_protocol_error",
-        message:
-          "分页已停止：has_more=true 但 next_start 为空，违反 Time Cursor 契约。下方为部分结果。",
       },
     };
   }
@@ -91,48 +93,26 @@ export function decideBarsPageStep(
     };
   }
 
-  const next = parseIsoInstant(info.next_start);
-  if (next === null) {
+  if (info.next_cursor === null || info.next_cursor.length === 0) {
     return {
       kind: "stop",
-      stop: {
-        reason: "cursor_protocol_error",
-        message:
-          "分页已停止：next_start 不是可解析的 ISO-8601 时间。下方为部分结果。",
-      },
+      stop: { reason: "cursor_protocol_error", message: PROTOCOL_MESSAGE },
     };
   }
 
-  const requestStart = parseIsoInstant(input.requestStart);
-  if (requestStart === null) {
-    return {
-      kind: "stop",
-      stop: {
-        reason: "cursor_protocol_error",
-        message: "分页已停止：请求 start 不是可解析的 ISO-8601 时间。",
-      },
-    };
-  }
-
-  if (next.getTime() <= requestStart.getTime()) {
+  if (info.next_cursor === input.requestCursor) {
     return {
       kind: "stop",
       stop: { reason: "cursor_non_advance", message: CURSOR_GAP_MESSAGE },
     };
   }
 
-  if (input.lastReturnedOpenTs !== null) {
-    const lastReturned = parseIsoInstant(input.lastReturnedOpenTs);
-    if (lastReturned !== null && next.getTime() <= lastReturned.getTime()) {
-      return {
-        kind: "stop",
-        stop: {
-          reason: "revision_group_boundary",
-          message: CURSOR_GAP_MESSAGE,
-        },
-      };
-    }
+  if (input.seenCursors.includes(info.next_cursor)) {
+    return {
+      kind: "stop",
+      stop: { reason: "cursor_non_advance", message: CURSOR_GAP_MESSAGE },
+    };
   }
 
-  return { kind: "continue", nextStart: info.next_start };
+  return { kind: "continue", nextCursor: info.next_cursor };
 }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
@@ -10,8 +11,14 @@ from typing import TYPE_CHECKING
 from mdgw.core.bar import RawBar
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import INTERVALS
-from mdgw.core.time import iso_to_ns, ns_to_datetime, to_utc, utc_now
+from mdgw.core.time import (
+    iso_to_ns,
+    ns_to_datetime,
+    to_utc,
+    utc_now,
+)
 from mdgw.ingest.composite import CompositeFeedHandler
+from mdgw.ingest.feed_status import FeedConnectionStatus
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
@@ -59,14 +66,54 @@ class FakeFeedHandler:
             if supports_history is not None
             else history is not None
         )
+        # Real in-process lifecycle: a fake handler is detached until the
+        # collector starts draining it, and stops when it is closed. Status is
+        # never inferred from Bar freshness.
+        self._status_lock = threading.Lock()
+        self._state = "stopped"
+        self._state_since = utc_now()
+        self._last_event_ts = None
 
     @property
     def instrument_ids(self) -> tuple[str, ...]:
         return (self.instrument_id,)
 
     def iter_bars(self) -> Iterator[RawBar]:
+        self._set_state("connected")
         for bar in self._bars:
+            self._mark_event_received()
             yield self._raw_bar(bar)
+
+    def close(self) -> None:
+        """Detach the fake handler from the collector pipeline."""
+        self._set_state("stopped")
+
+    def feed_status(self) -> tuple[FeedConnectionStatus, ...]:
+        with self._status_lock:
+            state = self._state
+            state_since = self._state_since
+            last_event_ts = self._last_event_ts
+        return (
+            FeedConnectionStatus(
+                feed=self.name,
+                venue=InstrumentId.parse(self.instrument_id).venue,
+                state=state,
+                state_since=state_since,
+                last_event_ts=last_event_ts,
+                heartbeat_supported=False,
+            ),
+        )
+
+    def _set_state(self, state: str) -> None:
+        with self._status_lock:
+            if self._state == state:
+                return
+            self._state = state
+            self._state_since = utc_now()
+
+    def _mark_event_received(self) -> None:
+        with self._status_lock:
+            self._last_event_ts = utc_now()
 
     def fetch_history(
         self,

@@ -11,8 +11,6 @@ body or turned into a normal end of stream.
 from __future__ import annotations
 
 import asyncio
-import csv
-import io
 import logging
 import shutil
 import tempfile
@@ -26,6 +24,7 @@ import pyarrow.parquet as pq
 from fastapi import APIRouter, Query
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
+from mdgw.api.csv_render import batch_to_csv, header_bytes
 from mdgw.api.formats import (
     ARROW_FILE_MEDIA_TYPE,
     ARROW_STREAM_MEDIA_TYPE,
@@ -35,18 +34,26 @@ from mdgw.api.formats import (
     PARQUET_MEDIA_TYPE,
     content_disposition,
 )
-from mdgw.core.envelope import decimal_to_str, table_to_messages
+from mdgw.api.history_cursor import (
+    CursorCodec,
+    CursorTokenError,
+    HistoryCursor,
+    resolve_cursor_key,
+)
+from mdgw.core.envelope import table_to_messages
 from mdgw.core.errors import (
     INVALID_FORMAT,
     RANGE_TOO_LARGE,
     GatewayError,
     InvalidInstrumentError,
     InvalidIntervalError,
+    InvalidParameterError,
     InvalidRangeError,
 )
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.schema import BAR_SCHEMA, INTERVALS
 from mdgw.core.time import iso_to_ns, ns_to_iso
+from mdgw.store.duckdb_reader import PAGE_FINGERPRINT_COLUMN, PagePosition
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
@@ -56,8 +63,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 JSON_ROW_LIMIT = 100_000
-TIMESTAMP_COLUMNS = ("open_ts", "close_ts", "event_ts", "ingest_ts")
-DECIMAL_COLUMNS = ("open", "high", "low", "close", "volume")
+#: `/api/v2/bars` requires an explicit page size and accepts at most the same
+#: raw-row ceiling as the JSON surface.
+V2_MAX_LIMIT = JSON_ROW_LIMIT
+V2_MIN_LIMIT = 1
 
 _EXPORT_PREFIX = "mdgw-export-"
 _READ_CHUNK_SIZE = 1_048_576
@@ -68,6 +77,13 @@ _INSTRUMENT_DESCRIPTION = "InstrumentId filter, for example binance:BTC/USDT"
 _START_DESCRIPTION = "Inclusive open_ts bound as an ISO-8601 timestamp"
 _END_DESCRIPTION = "Exclusive open_ts bound as an ISO-8601 timestamp"
 _LIMIT_DESCRIPTION = "Maximum number of Bars to return"
+_V2_LIMIT_DESCRIPTION = (
+    "Required page size: the maximum number of raw rows to return, 1..100000"
+)
+_CURSOR_DESCRIPTION = (
+    "Opaque next_cursor from the previous /api/v2/bars page. Do not parse, "
+    "edit or reuse it as a start timestamp."
+)
 
 
 class _InvalidFormatError(GatewayError):
@@ -117,9 +133,43 @@ class BarQuery:
     format: str
 
 
-def create_router(*, store: ParquetBarStore) -> APIRouter:
+@dataclass(frozen=True, slots=True)
+class _RawV2Query:
+    """Unvalidated `/api/v2/bars` query strings."""
+
+    interval: str | None
+    instrument: str | None
+    start: str | None
+    end: str | None
+    limit: str | None
+    cursor: str | None
+    format: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class BarsV2Query:
+    """Validated revision-safe pagination query."""
+
+    interval: str
+    instrument: str
+    start_ns: int | None
+    end_ns: int | None
+    limit: int
+    after: PagePosition | None
+
+
+def create_router(
+    *,
+    store: ParquetBarStore,
+    cursor_codec: CursorCodec | None = None,
+) -> APIRouter:
     """Build the Bar history router for one application instance."""
     router = APIRouter()
+    codec = (
+        cursor_codec
+        if cursor_codec is not None
+        else CursorCodec(resolve_cursor_key(None))
+    )
 
     @router.get("/api/v1/bars")
     async def list_bars(  # ruff: ignore[too-many-arguments,too-many-positional-arguments] - query contract
@@ -157,6 +207,44 @@ def create_router(*, store: ParquetBarStore) -> APIRouter:
         if query.format == "arrow":
             return await _stream_arrow(store, query)
         return await _stream_csv(store, query)
+
+    @router.get("/api/v2/bars")
+    async def list_bars_v2(  # ruff: ignore[too-many-arguments,too-many-positional-arguments] - query contract
+        interval: Annotated[
+            str | None, Query(description=_INTERVAL_DESCRIPTION)
+        ] = None,
+        instrument: Annotated[
+            str | None, Query(description=_INSTRUMENT_DESCRIPTION)
+        ] = None,
+        start: Annotated[
+            str | None, Query(description=_START_DESCRIPTION)
+        ] = None,
+        end: Annotated[
+            str | None, Query(description=_END_DESCRIPTION)
+        ] = None,
+        limit: Annotated[
+            str | None, Query(description=_V2_LIMIT_DESCRIPTION)
+        ] = None,
+        cursor: Annotated[
+            str | None, Query(description=_CURSOR_DESCRIPTION)
+        ] = None,
+        output_format: Annotated[
+            str | None, Query(alias="format")
+        ] = None,
+    ) -> Response:
+        query = _validate_v2_query(
+            _RawV2Query(
+                interval=interval,
+                instrument=instrument,
+                start=start,
+                end=end,
+                limit=limit,
+                cursor=cursor,
+                format=output_format,
+            ),
+            codec=codec,
+        )
+        return await _respond_v2_json(store, query, codec)
 
     @router.get("/api/v1/bars/export")
     async def export_bars(  # ruff: ignore[too-many-arguments,too-many-positional-arguments] - query contract
@@ -265,6 +353,152 @@ def _parse_limit(raw_limit: str | None) -> int | None:
     return limit
 
 
+def _validate_v2_query(
+    raw: _RawV2Query, *, codec: CursorCodec
+) -> BarsV2Query:
+    """Validate `/api/v2/bars` and resolve the cursor into a keyset position.
+
+    The v2 surface is single-Instrument, JSON-only and always paginated. A
+    cursor is a position token: `start` cannot accompany it, and the query
+    identity (`instrument`, `interval`, window `end`) must match the one that
+    produced it. Every mismatch names the offending parameter in
+    `details.field`.
+    """
+    if not raw.interval or raw.interval not in INTERVALS:
+        message = "query parameter 'interval' is required and must be a Bar Interval"
+        raise InvalidIntervalError(message)
+    if not raw.instrument:
+        message = (
+            "query parameter 'instrument' is required and must be an InstrumentId"
+        )
+        raise InvalidInstrumentError(message)
+    try:
+        InstrumentId.parse(raw.instrument)
+    except ValueError:
+        message = "query parameter 'instrument' must be an InstrumentId"
+        raise InvalidInstrumentError(message) from None
+
+    if raw.format is not None and raw.format != "json":
+        message = "query parameter 'format' must be 'json' on /api/v2/bars"
+        raise _InvalidFormatError(message)
+
+    limit = _parse_v2_limit(raw.limit)
+
+    if raw.cursor is not None and raw.start is not None:
+        message = "query parameter 'start' must not be combined with 'cursor'"
+        raise InvalidParameterError(message, details={"field": "cursor"})
+
+    start_ns = _parse_optional_ns(raw.start)
+    end_ns = _parse_optional_ns(raw.end)
+
+    if raw.cursor is None:
+        if (
+            start_ns is not None
+            and end_ns is not None
+            and start_ns > end_ns
+        ):
+            message = "query parameter 'start' must not be after 'end'"
+            raise InvalidRangeError(message)
+        return BarsV2Query(
+            interval=raw.interval,
+            instrument=raw.instrument,
+            start_ns=start_ns,
+            end_ns=end_ns,
+            limit=limit,
+            after=None,
+        )
+
+    try:
+        cursor = codec.decode(raw.cursor)
+    except CursorTokenError:
+        raise _invalid_cursor_error() from None
+
+    if cursor.instrument != raw.instrument:
+        message = "query parameter 'instrument' does not match the cursor"
+        raise InvalidParameterError(
+            message, details={"field": "instrument", "reason": "cursor_mismatch"}
+        )
+    if cursor.interval != raw.interval:
+        message = "query parameter 'interval' does not match the cursor"
+        raise InvalidParameterError(
+            message, details={"field": "interval", "reason": "cursor_mismatch"}
+        )
+    if end_ns is not None and end_ns != cursor.end_ns:
+        message = "query parameter 'end' does not match the cursor"
+        raise InvalidParameterError(
+            message, details={"field": "end", "reason": "cursor_mismatch"}
+        )
+
+    return BarsV2Query(
+        interval=raw.interval,
+        instrument=raw.instrument,
+        start_ns=cursor.open_ns,
+        end_ns=cursor.end_ns,
+        limit=limit,
+        after=PagePosition(
+            open_ns=cursor.open_ns,
+            revision=cursor.revision,
+            ingest_ns=cursor.ingest_ns,
+            fingerprint=cursor.fingerprint,
+        ),
+    )
+
+
+def _parse_v2_limit(raw_limit: str | None) -> int:
+    """Parse the required v2 page size; there is no `limit=0` probe."""
+    if raw_limit is None or not raw_limit.strip():
+        message = (
+            "query parameter 'limit' is required on /api/v2/bars "
+            f"and must be an integer between {V2_MIN_LIMIT} and {V2_MAX_LIMIT}"
+        )
+        raise InvalidParameterError(
+            message, details=_limit_details()
+        )
+    try:
+        limit = int(raw_limit)
+    except ValueError:
+        message = (
+            "query parameter 'limit' must be an integer between "
+            f"{V2_MIN_LIMIT} and {V2_MAX_LIMIT}"
+        )
+        raise InvalidParameterError(
+            message, details=_limit_details()
+        ) from None
+    if limit < V2_MIN_LIMIT:
+        message = (
+            "query parameter 'limit' must be at least "
+            f"{V2_MIN_LIMIT} on /api/v2/bars; use a cursor page to continue"
+        )
+        raise InvalidParameterError(
+            message, details=_limit_details()
+        )
+    if limit > V2_MAX_LIMIT:
+        message = (
+            "query parameter 'limit' must not exceed "
+            f"{V2_MAX_LIMIT} on /api/v2/bars"
+        )
+        raise _RangeTooLargeError(
+            message,
+            details={"field": "limit", "max_limit": V2_MAX_LIMIT},
+        )
+    return limit
+
+
+def _limit_details() -> dict[str, int | str]:
+    return {
+        "field": "limit",
+        "min_limit": V2_MIN_LIMIT,
+        "max_limit": V2_MAX_LIMIT,
+    }
+
+
+def _invalid_cursor_error() -> InvalidParameterError:
+    return InvalidParameterError(
+        "query parameter 'cursor' is not a valid cursor",
+        details={"field": "cursor", "reason": "invalid_cursor"},
+    )
+
+
 # -- storage access ---------------------------------------------------------
 #
 # One HTTP request owns one `StoreRead`: its row-ceiling count, its existence
@@ -345,6 +579,77 @@ def _build_json_payload(store: ParquetBarStore, query: BarQuery) -> dict:
             "bars": table_to_messages(table.slice(0, limit)),
             "page": {"has_more": has_more, "next_start": next_start},
         }
+
+
+# -- revision-safe JSON (v2) ------------------------------------------------
+
+
+async def _respond_v2_json(
+    store: ParquetBarStore,
+    query: BarsV2Query,
+    codec: CursorCodec,
+) -> Response:
+    payload = await asyncio.to_thread(
+        _build_v2_json_payload, store, query, codec
+    )
+    return JSONResponse(payload)
+
+
+def _build_v2_json_payload(
+    store: ParquetBarStore,
+    query: BarsV2Query,
+    codec: CursorCodec,
+) -> dict:
+    """Read one revision-safe page on its own Snapshot and Read Lease.
+
+    The page is the first ``limit + 1`` rows strictly after the cursor in the
+    total order ``(open_ts, revision, ingest_ts, row_fingerprint)``. The extra
+    row decides ``has_more``; ``next_cursor`` encodes the last returned row,
+    so the next page starts strictly after it and no row is repeated or
+    skipped. The cursor is logical: it never pins a Manifest Snapshot, and a
+    later page may observe newer Data Files or a compacted Dataset.
+    """
+    filters = {
+        "instrument_id": query.instrument,
+        "interval": query.interval,
+        "start_ns": query.start_ns,
+        "end_ns": query.end_ns,
+    }
+    with store.open_read(**filters) as read:
+        table = read.read_ordered_page_bars(
+            keep=query.limit + 1, after=query.after
+        )
+
+    has_more = table.num_rows > query.limit
+    page = table.slice(0, query.limit)
+    next_cursor: str | None = None
+    if has_more:
+        next_cursor = codec.encode(_cursor_for_last_row(page, query))
+    return {
+        "bars": table_to_messages(page.select(BAR_SCHEMA.names)),
+        "page": {"has_more": has_more, "next_cursor": next_cursor},
+    }
+
+
+def _cursor_for_last_row(
+    table: pa.Table, query: BarsV2Query
+) -> HistoryCursor:
+    """Encode the last returned row's total-order key as a cursor payload."""
+    index = table.num_rows - 1
+    return HistoryCursor(
+        instrument=query.instrument,
+        interval=query.interval,
+        end_ns=query.end_ns,
+        open_ns=_int64_at(table, "open_ts", index),
+        revision=_int64_at(table, "revision", index),
+        ingest_ns=_int64_at(table, "ingest_ts", index),
+        fingerprint=table.column(PAGE_FINGERPRINT_COLUMN)[index].as_py(),
+    )
+
+
+def _int64_at(table: pa.Table, column: str, index: int) -> int:
+    """Read a timestamp/revision cell exactly, never through a datetime."""
+    return int(table.column(column).cast(pa.int64())[index].as_py())
 
 
 # -- Arrow stream -----------------------------------------------------------
@@ -434,9 +739,9 @@ async def _csv_body(
     try:
         # The header is the first chunk; from then on each bounded DuckDB
         # batch is rendered and yielded as it arrives.
-        yield (",".join(BAR_SCHEMA.names) + "\n").encode("utf-8")
+        yield header_bytes()
         async for batch in _iter_arrow_batches(read, query):
-            text = _batch_to_csv(batch)
+            text = batch_to_csv(batch)
             if text:
                 yield text.encode("utf-8")
     finally:
@@ -471,29 +776,6 @@ async def _pump_batches(
     finally:
         with suppress(ValueError):  # pragma: no cover - generator executing
             iterator.close()
-
-
-def _batch_to_csv(batch: pa.RecordBatch) -> str:
-    """Render one batch as CSV without ever routing a price through float."""
-    columns: dict[str, list[Any]] = {}
-    for name in TIMESTAMP_COLUMNS:
-        columns[name] = [
-            ns_to_iso(value)
-            for value in batch.column(name).cast(pa.int64()).to_pylist()
-        ]
-    for name in DECIMAL_COLUMNS:
-        columns[name] = [
-            decimal_to_str(value) for value in batch.column(name).to_pylist()
-        ]
-    for name in BAR_SCHEMA.names:
-        if name not in columns:
-            columns[name] = batch.column(name).to_pylist()
-
-    buffer = io.StringIO()
-    writer = csv.writer(buffer, lineterminator="\n")
-    for index in range(batch.num_rows):
-        writer.writerow([columns[name][index] for name in BAR_SCHEMA.names])
-    return buffer.getvalue()
 
 
 # -- file export ------------------------------------------------------------

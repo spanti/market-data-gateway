@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mdgw.aggregate import BarAggregator
 from mdgw.backfill import BackfillReport, run_backfill
@@ -46,6 +46,9 @@ from mdgw.state.high_water_mark import HighWaterMarkStore
 from mdgw.store.composition import StorageComposition
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from contextlib import AbstractContextManager
+
     from mdgw.config import GatewayConfig
     from mdgw.core.bar import Bar, RawBar
     from mdgw.ingest.feed_handler import FeedHandler
@@ -54,6 +57,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 AssetClassResolver = Callable[[str], str]
+
+
+class BackfillGate(Protocol):
+    """Bounded write boundary shared by automatic and job Backfill."""
+
+    def hold(
+        self, keys: Iterable[tuple[str, str]]
+    ) -> AbstractContextManager[Any]: ...
 
 _NOT_OPEN_MESSAGE = "CollectorCore state is not open"
 _OPEN_BEFORE_INGEST_MESSAGE = (
@@ -145,6 +156,14 @@ class CollectorCore:
         self._asset_class_for_callback = asset_class_for
         self.instrument_store: InstrumentStore | None = None
         self.hwm: HighWaterMarkStore | None = None
+        #: Optional runtime subscription gate (feed subscription control).
+        #: Returning False stops future collection of that raw Bar before
+        #: normalization/persistence; ``None`` preserves the current behaviour.
+        self.subscription_filter: Callable[[str, str], bool] | None = None
+        #: Set by the Collector Service Role to bound Admin Backfill Job writes
+        #: together with automatic Backfill (see BackfillWriteGate). ``None``
+        #: keeps the single-process GatewayRuntime behaviour unchanged.
+        self.backfill_gate: BackfillGate | None = None
         self.bars_ingested = 0
         self.bars_written = 0
         self.last_ingest_ts: datetime | None = None
@@ -191,6 +210,12 @@ class CollectorCore:
 
         ingest_ts = utc_now()
         raws = list(self.feed_handler.iter_bars())
+        if self.subscription_filter is not None:
+            raws = [
+                raw
+                for raw in raws
+                if self.subscription_filter(raw.instrument_id, raw.interval)
+            ]
         if not raws:
             return 0, []
 
@@ -374,6 +399,22 @@ class CollectorCore:
     def run_backfill(self, now: datetime) -> BackfillReport:
         if self.hwm is None:
             raise RuntimeError(_NOT_OPEN_MESSAGE)
+        gate = self.backfill_gate
+        if gate is None:
+            return self._run_backfill_locked(now)
+        # Automatic Backfill and Admin Backfill Jobs share one bounded write
+        # boundary; holding every involved (instrument, 1m) key serializes
+        # them exactly like an explicit job for that instrument+interval.
+        keys = [
+            (instrument_id, self.config.aggregation.base_interval)
+            for instrument_id in self.feed_handler.instrument_ids
+        ]
+        with gate.hold(keys):
+            return self._run_backfill_locked(now)
+
+    def _run_backfill_locked(self, now: datetime) -> BackfillReport:
+        if self.hwm is None:  # pragma: no cover - guarded by run_backfill
+            raise RuntimeError(_NOT_OPEN_MESSAGE)
         return run_backfill(
             feed_handler=self.feed_handler,
             store=self.store,
@@ -384,6 +425,30 @@ class CollectorCore:
             now=now,
             backfill_hours=self.config.collector.backfill_hours,
         )
+
+    def persist_backfill_bars(self, bars: Sequence[Bar]) -> int:
+        """Write job-produced Bars synchronously and advance HWM/health.
+
+        Only the Collector calls this. The write is durable before the
+        monotonic HWM advances, exactly like the live pipeline's sink
+        callback, and an unknown Instrument fails before anything is written.
+        """
+        written = list(bars)
+        if not written:
+            return 0
+        groups: dict[str, list[Bar]] = defaultdict(list)
+        for bar in written:
+            groups[bar.instrument_id].append(bar)
+        asset_classes = {
+            instrument_id: self.asset_class_for(instrument_id)
+            for instrument_id in groups
+        }
+        for instrument_id, group in groups.items():
+            self.store.write_bars(
+                group, asset_class=asset_classes[instrument_id]
+            )
+        self._on_persisted(written)
+        return len(written)
 
     # -- collector state ---------------------------------------------------
 

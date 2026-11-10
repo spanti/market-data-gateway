@@ -33,6 +33,22 @@ if TYPE_CHECKING:
 
 DUCKDB_MAJOR_VERSION = 2
 
+#: Versioned marker prefixed to every canonical row-fingerprint input. A
+#: change to the marker, the column order or the hashing recipe requires a
+#: cursor-version bump so old cursors fail closed instead of addressing a
+#: different physical row set.
+ROW_FINGERPRINT_ALGORITHM = "mdgw-row-fingerprint-v1"
+
+#: Internal Arrow column carrying the row fingerprint for ORDER BY/keyset. It
+#: is stripped before any JSON rendering.
+PAGE_FINGERPRINT_COLUMN = "_row_fingerprint"
+
+#: Page-read Arrow schema: the contract Bar columns plus the internal
+#: fingerprint. Only Store/route code sees the extra column.
+PAGE_SCHEMA = BAR_SCHEMA.append(
+    pa.field(PAGE_FINGERPRINT_COLUMN, pa.string(), nullable=False)
+)
+
 _SELECT_PHYSICAL = ", ".join(PHYSICAL_SCHEMA.names)
 _END_OF_STREAM = object()
 
@@ -68,6 +84,21 @@ def ensure_supported_duckdb() -> None:
             f"{DUCKDB_MAJOR_VERSION}.x"
         )
         raise DuckDBUnavailableError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class PagePosition:
+    """The total-order key of the last row returned on a v2 page.
+
+    The key is ``(open_ts, revision, ingest_ts, row_fingerprint)``; ``open_ns``,
+    ``revision`` and ``ingest_ns`` are UTC nanoseconds/ints, ``fingerprint`` is
+    the lowercase hex SHA-256 produced by :data:`ROW_FINGERPRINT_ALGORITHM`.
+    """
+
+    open_ns: int
+    revision: int
+    ingest_ns: int
+    fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +357,43 @@ class DuckDBArrowScanner:
         finally:
             self.close()
 
+    def ordered_page_batches(  # ruff: ignore[too-many-arguments] - keyword-only page scope
+        self,
+        files: Sequence[str],
+        interval: str,
+        query: BarReadQuery,
+        *,
+        after: PagePosition | None = None,
+        keep: int,
+        batch_size: int,
+    ) -> Iterator[pa.RecordBatch]:
+        """Yield raw rows in the revision-safe v2 total order.
+
+        One static DuckDB query selects every Data File of the request
+        Snapshot, computes the canonical row fingerprint in SQL, applies the
+        strict keyset predicate after ``after`` (when supplied) and orders by
+        ``(open_ts, revision, ingest_ts, row_fingerprint)`` ascending before
+        limiting to ``keep`` rows. The fingerprint is carried as an internal
+        column so the route can encode the last returned row as the next
+        cursor; it is never part of the contract Arrow/JSON row.
+        """
+        try:  # ruff: ignore[too-many-statements-in-try-clause] - explicit resource scope
+            self._connect()
+            sql, params = _build_ordered_page_sql(
+                files, query, after=after, keep=keep
+            )
+            reader = self._open_sql_reader(sql, params, batch_size=batch_size)
+            try:
+                yield from self._reader_page_batches(reader, interval)
+            finally:
+                self._close_reader()
+            self._exhausted = True
+        except BaseException:
+            self._failed = True
+            raise
+        finally:
+            self.close()
+
     def iter_replay_batches(
         self,
         branches: Sequence[ReplayScanBranch],
@@ -428,6 +496,15 @@ class DuckDBArrowScanner:
             if physical is _END_OF_STREAM:
                 return
             yield _restore_partition_batch(physical, interval)
+
+    def _reader_page_batches(
+        self, reader: Any, interval: str
+    ) -> Iterator[pa.RecordBatch]:
+        while True:
+            physical = self._next_batch(reader)
+            if physical is _END_OF_STREAM:
+                return
+            yield _restore_partition_page_batch(physical, interval)
 
     @contextmanager
     def _busy(self):
@@ -598,6 +675,80 @@ def _build_earliest_sql(
     return sql, params
 
 
+def _row_fingerprint_sql() -> str:
+    """Canonical row fingerprint as static DuckDB SQL.
+
+    Algorithm (ADR-0018): take ``PHYSICAL_SCHEMA.names`` in schema order, emit
+    ``coalesce(CAST(col AS VARCHAR), chr(0))`` for each, join the fields with
+    ``chr(31)`` and prefix the versioned marker, then SHA-256 the UTF-8 bytes.
+    ``sha256`` returns the lowercase hex digest. The marker travels as a bound
+    parameter; column names are schema constants.
+    """
+    fields = ", ".join(
+        f"coalesce(CAST({name} AS VARCHAR), chr(0))"
+        for name in PHYSICAL_SCHEMA.names
+    )
+    return (
+        "sha256(concat_ws(chr(31), $fingerprint_marker, "
+        f"{fields}))"
+    )
+
+
+def _build_ordered_page_sql(
+    files: Sequence[str],
+    query: BarReadQuery,
+    *,
+    after: PagePosition | None,
+    keep: int,
+) -> tuple[str, dict[str, Any]]:
+    """Static revision-safe page SQL over the total order, with keyset seek.
+
+    The inner query computes the internal fingerprint column; the outer query
+    applies the strict keyset predicate after the last row of the previous
+    page. Every caller value (file list, Instrument, time bounds, cursor key)
+    is a named bound parameter, so the SQL text stays static.
+    """
+    if keep < 1:
+        msg = "ordered page row limit must be positive"
+        raise ValueError(msg)
+    params: dict[str, Any] = {
+        "files": [str(path) for path in files],
+        "row_limit": int(keep),
+        "fingerprint_marker": ROW_FINGERPRINT_ALGORITHM,
+    }
+    clauses = _predicate_clauses(query, params)
+    inner_where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    fingerprint = _row_fingerprint_sql()
+    sql = (
+        f"SELECT * FROM (SELECT {_SELECT_PHYSICAL}, "  # ruff: ignore[hardcoded-sql-expression] - schema constants only
+        f"{fingerprint} AS {PAGE_FINGERPRINT_COLUMN} "
+        "FROM read_parquet($files, hive_partitioning = false)"
+        f"{inner_where}) AS page_rows"
+    )
+    if after is not None:
+        sql += (
+            " WHERE (open_ts > $after_open::TIMESTAMPTZ_NS)"
+            " OR (open_ts = $after_open::TIMESTAMPTZ_NS"
+            " AND revision > $after_revision)"
+            " OR (open_ts = $after_open::TIMESTAMPTZ_NS"
+            " AND revision = $after_revision"
+            " AND ingest_ts > $after_ingest::TIMESTAMPTZ_NS)"
+            " OR (open_ts = $after_open::TIMESTAMPTZ_NS"
+            " AND revision = $after_revision"
+            " AND ingest_ts = $after_ingest::TIMESTAMPTZ_NS"
+            f" AND {PAGE_FINGERPRINT_COLUMN} > $after_fingerprint)"
+        )
+        params["after_open"] = ns_to_iso(int(after.open_ns))
+        params["after_revision"] = int(after.revision)
+        params["after_ingest"] = ns_to_iso(int(after.ingest_ns))
+        params["after_fingerprint"] = str(after.fingerprint)
+    sql = (
+        f"{sql} ORDER BY open_ts ASC, revision ASC, ingest_ts ASC, "
+        f"{PAGE_FINGERPRINT_COLUMN} ASC LIMIT $row_limit"
+    )
+    return sql, params
+
+
 def _build_count_sql(
     files: Sequence[str],
     query: BarReadQuery,
@@ -685,12 +836,32 @@ def _restore_partition_batch(
     return pa.RecordBatch.from_arrays(arrays, schema=BAR_SCHEMA)
 
 
+def _restore_partition_page_batch(
+    physical: pa.RecordBatch, interval: str
+) -> pa.RecordBatch:
+    """Rebuild the page schema: contract columns plus the fingerprint."""
+    arrays: list[pa.Array] = []
+    for field in BAR_SCHEMA:
+        if field.name == "interval":
+            arrays.append(
+                pa.array([interval] * physical.num_rows, type=field.type)
+            )
+        else:
+            arrays.append(physical.column(field.name))
+    arrays.append(physical.column(PAGE_FINGERPRINT_COLUMN))
+    return pa.RecordBatch.from_arrays(arrays, schema=PAGE_SCHEMA)
+
+
 __all__ = [
     "DUCKDB_MAJOR_VERSION",
+    "PAGE_FINGERPRINT_COLUMN",
+    "PAGE_SCHEMA",
+    "ROW_FINGERPRINT_ALGORITHM",
     "DuckDBArrowScanner",
     "DuckDBConnectionCache",
     "DuckDBOptions",
     "DuckDBUnavailableError",
+    "PagePosition",
     "ReplayScanBranch",
     "ensure_supported_duckdb",
 ]

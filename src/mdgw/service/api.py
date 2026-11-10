@@ -8,8 +8,10 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+from mdgw.admin.context import AdminContext
 from mdgw.api.app import create_app
 from mdgw.api.asgi_server import AsgiServer
+from mdgw.api.history_cursor import resolve_cursor_key
 from mdgw.api.ws_hub import WebSocketHub
 from mdgw.core.envelope import table_to_messages
 from mdgw.metrics import MetricsRegistry
@@ -43,9 +45,45 @@ class ApiService:
         self.config = config
         # The api only owns a Bars read dependency; Storage Composition owns
         # the root resolution and Store mapping.
-        self.store = StorageComposition(config, root=data_root).bars()
+        composition = StorageComposition(config, root=data_root)
+        self.store = composition.bars()
+        self._storage_root = composition.effective_root
         self.instrument_store = load_instrument_store(self.store.root)
         self.metrics = MetricsRegistry()
+
+        # Admin is off by default; when enabled the context owns the
+        # management SQLite lease and is closed before the Store in stop().
+        self._admin: AdminContext | None = (
+            AdminContext(
+                config=config.admin,
+                storage_root=self._storage_root,
+                store=self.store,
+                instrument_store=self.instrument_store,
+                metrics=self.metrics,
+                flow_control_defaults={
+                    "api_rate_limit": {
+                        "enabled": config.rate_limit.enabled,
+                        "requests_per_second": (
+                            config.rate_limit.requests_per_second
+                        ),
+                        "burst": config.rate_limit.burst,
+                        "max_ws_sessions_per_ip": (
+                            config.rate_limit.max_ws_sessions_per_ip
+                        ),
+                    },
+                    "ws_slow_consumer": {
+                        "enabled": True,
+                        "queue_size": config.streaming.queue_size,
+                        "lag_notice_interval_ms": (
+                            config.streaming.lag_notice_interval_ms
+                        ),
+                    },
+                },
+                feeds=config.feeds,
+            )
+            if config.admin.enabled
+            else None
+        )
 
         self._streaming: StreamingInterface | None = None
 
@@ -114,8 +152,12 @@ class ApiService:
     def stop(self) -> None:
         self._stop.set()
         # Stop accepting HTTP/WS traffic before tearing down the streaming
-        # fan-out the handlers feed.
+        # fan-out the handlers feed. Admin state (SQLite lease + workers) must
+        # close before the Bars Store is released.
         self._stop_http()
+        admin = self._admin
+        if admin is not None:
+            admin.close()
         streaming = self._streaming
         self._streaming = None
         self._started = False
@@ -298,6 +340,10 @@ class ApiService:
             queue_size=self.config.streaming.queue_size,
             lag_notice_interval_ms=self.config.streaming.lag_notice_interval_ms,
         )
+        # The Admin WebSocket reuses the public hub's bounded queue and
+        # lag_notice plumbing; attach it before the app mounts admin routes.
+        if self._admin is not None:
+            self._admin.ws_hub = self._hub
         app = create_app(
             self.store,
             instrument_store=self.instrument_store,
@@ -309,6 +355,8 @@ class ApiService:
             ready_provider=self.ready_payload,
             service_role="api",
             rate_limit=self.config.rate_limit,
+            admin=self._admin,
+            cursor_key=resolve_cursor_key(self.config.server.cursor_key_env),
         )
         self._http.start(
             app,

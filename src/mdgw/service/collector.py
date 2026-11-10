@@ -3,23 +3,52 @@
 from __future__ import annotations
 
 import logging
+import math
+import os
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
+from mdgw.aggregate.bar_aggregator import AGGREGATION_INTERNAL
+from mdgw.core.instrument import InstrumentId
+from mdgw.core.time import datetime_to_ns
 from mdgw.ingest.composite import (
     attach_quarantine,
     build_configured_feed_handler,
 )
+from mdgw.ingest.feed_status import (
+    FEED_ERROR_CODES,
+    FEED_STATES,
+    FeedConnectionStatus,
+    handler_feed_statuses,
+)
 from mdgw.metrics import MetricsRegistry
+from mdgw.service.backfill_jobs import BackfillJobRunner
 from mdgw.service.bar_sink import BufferedBarSink
 from mdgw.service.collector_core import CollectorCore
-from mdgw.service.common import iso_to_seconds, ns_iso, update_dataset_metrics
+from mdgw.service.common import (
+    advance_counter,
+    iso_to_seconds,
+    ns_iso,
+    update_dataset_metrics,
+)
+from mdgw.service.control_plane import (
+    BACKFILL_JOB_CANCEL_ACTION,
+    BACKFILL_JOB_START_ACTION,
+    BACKFILL_JOB_STATUS_ACTION,
+    FEED_SUBSCRIPTION_SYNC_ACTION,
+    GAPS_SNAPSHOT_ACTION,
+    ControlPlaneServer,
+    FeedSubscriptionSyncPayload,
+)
+from mdgw.service.gap_snapshot import gaps_snapshot_result
 from mdgw.service.health_server import ServiceHealthServer
 from mdgw.store.composition import StorageComposition
 from mdgw.streaming import StreamingInterface
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
     from datetime import datetime
     from pathlib import Path
 
@@ -34,6 +63,40 @@ POLL_INTERVAL_S = 0.05
 ERROR_BACKOFF_S = 1.0
 _NOT_STARTED_MESSAGE = "CollectorService.start() must be called first"
 
+REJECT_FEED_UNAVAILABLE = "feed_unavailable"
+REJECT_UNSUPPORTED_INSTRUMENT = "unsupported_instrument"
+REJECT_UNSUPPORTED_INTERVAL = "unsupported_interval"
+
+#: Ingestion Delay spans sub-second to Backfill-scale minutes. The help text
+#: names source clock skew: event time comes from the Venue clock. The Gateway
+#: has no protocol RTT measurement, so no metric is named Network Latency and
+#: this delay must never be mislabelled as one.
+INGESTION_DELAY_BUCKETS: tuple[float, ...] = (
+    0.1,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    30.0,
+    60.0,
+    120.0,
+    300.0,
+    600.0,
+    math.inf,
+)
+
+_INGESTION_DELAY_HELP = (
+    "Ingestion Delay: seconds from the Bar event time (close_ts) to the "
+    "collector ingest time (ingest_ts); includes source clock skew; this is "
+    "not a protocol RTT or Network Latency measurement"
+)
+_STORAGE_BYTES_HELP = (
+    "Bytes written to Parquet Data Files by the collector write buffer, as "
+    "reported by the Store write result (includes aggregated parent Bars and "
+    "buffered flushes; queue depth stays a separate metric)"
+)
+
 
 class CollectorService:
     """Owns the collector pipeline and its ZMQ PUB endpoint."""
@@ -45,6 +108,7 @@ class CollectorService:
         data_root: Path | None = None,
         feed_handler: FeedHandler | None = None,
         wait_for_api: bool | None = None,
+        environ: Mapping[str, str] | None = None,
     ) -> None:
         self.config = config
         # One joint composition owns both Store mappings and the effective
@@ -87,9 +151,38 @@ class CollectorService:
         self._last_quarantine_counts: dict[tuple[str, str], int] = {}
         self._last_quarantine_failures = 0
         self._quarantine_metric_lock = threading.Lock()
+        # Feed connection gauges/counters are refreshed from the real handler
+        # lifecycle; cumulative reconnect counters advance by source delta.
+        self._feed_metric_lock = threading.Lock()
+        self._last_feed_reconnects: dict[tuple[str, str], float] = {}
+        # Storage bytes are cumulative Store write results; advance by delta.
+        self._storage_metric_lock = threading.Lock()
+        self._last_storage_bytes_metric = 0.0
 
         self._streaming: StreamingInterface | None = None
         self._health_server: ServiceHealthServer | None = None
+
+        # Ticket 04 control plane: one shared desired subscription set, applied
+        # to the feed handlers and used as a raw/publish filter. Until the
+        # first successful sync the collector keeps its previous behaviour.
+        self.instance_id = f"collector-{uuid4().hex}"
+        self._environ = environ
+        self._control_server: ControlPlaneServer | None = None
+        self._configured_feeds = {
+            feed.name: feed for feed in getattr(config, "feeds", ())
+        }
+        self._subscriptions_synced = False
+        self._active_pairs: set[tuple[str, str]] = set()
+        self._active_instruments: set[str] = set()
+        self.core.subscription_filter = self._allows_raw_subscription
+
+        # Ticket 06: Admin Backfill Jobs execute in the Collector process on a
+        # background thread. The write gate is shared with automatic Backfill
+        # so both paths serialize through the same bounded write boundary.
+        self._backfill_runner = BackfillJobRunner(
+            core=self.core, config=config
+        )
+        self.core.backfill_gate = self._backfill_runner.write_gate
 
         # `None` means "use [service].wait_for_api_ready". The CLI overrides it
         # with --wait-for-api/--no-wait-for-api.
@@ -157,6 +250,9 @@ class CollectorService:
             help="Bar messages published on the collector PUB",
         )
 
+        self._backfill_runner.start()
+        self._start_control_plane()
+
         self._stop.clear()
         self._started = True
         self._started_at = time.monotonic()
@@ -185,6 +281,10 @@ class CollectorService:
     def stop(self) -> None:
         self._ready.clear()
         self._stop.set()
+        self._stop_control_plane()
+        # Jobs are cooperative: close() cancels them between batches and joins
+        # the worker before the Store/HWM are closed below.
+        self._backfill_runner.close()
 
         # Stop both publishing threads before the Streaming Interface: they
         # must not observe a closed socket (publish is a no-op after stop, but
@@ -229,6 +329,188 @@ class CollectorService:
             raise RuntimeError(_NOT_STARTED_MESSAGE)
         return self._health_server.base_url
 
+    @property
+    def control_port(self) -> int | None:
+        """Bound control-plane port, or ``None`` when not serving."""
+        server = self._control_server
+        return None if server is None else server.port
+
+    # -- control plane -----------------------------------------------------
+
+    def _start_control_plane(self) -> None:
+        if not self.config.admin.adapters.collector_control:
+            return
+        control = self.config.admin.control
+        source = self._environ if self._environ is not None else os.environ
+        token = str(source.get(control.token_env, "") or "")
+        if control.collector_port <= 0 or not token:
+            logger.warning(
+                "collector control plane is enabled but not configured",
+                extra={
+                    "event": "collector.control_plane_not_configured",
+                    "port": control.collector_port,
+                },
+            )
+            return
+        server = ControlPlaneServer(
+            host=control.collector_host,
+            port=control.collector_port,
+            token=token,
+            max_message_bytes=control.max_message_bytes,
+            request_timeout_s=control.timeout_s,
+        )
+        server.register("ping", lambda _payload: {"pong": True})
+        server.register(
+            FEED_SUBSCRIPTION_SYNC_ACTION, self._handle_subscription_sync
+        )
+        # Ticket 06: Backfill Jobs execute here, never in the API process.
+        server.register(
+            BACKFILL_JOB_START_ACTION, self._backfill_runner.handle_start
+        )
+        server.register(
+            BACKFILL_JOB_STATUS_ACTION, self._backfill_runner.handle_status
+        )
+        server.register(
+            BACKFILL_JOB_CANCEL_ACTION, self._backfill_runner.handle_cancel
+        )
+        # Ticket 07: read-only in-memory Gap snapshot for the Admin API.
+        server.register(
+            GAPS_SNAPSHOT_ACTION,
+            lambda _payload: gaps_snapshot_result(
+                self.core, collector_instance_id=self.instance_id
+            ),
+        )
+        server.start()
+        self._control_server = server
+        logger.info(
+            "collector control plane started",
+            extra={
+                "event": "collector.control_plane_started",
+                "port": server.port,
+            },
+        )
+
+    def _stop_control_plane(self) -> None:
+        server = self._control_server
+        self._control_server = None
+        if server is not None:
+            server.stop()
+
+    def _handle_subscription_sync(
+        self, payload: FeedSubscriptionSyncPayload
+    ) -> dict[str, Any]:
+        """Apply one full desired set and acknowledge every entry truthfully."""
+        desired_by_feed: dict[str, set[str]] = {}
+        active_pairs: set[tuple[str, str]] = set()
+        active_instruments: set[str] = set()
+        acknowledgements: list[dict[str, Any]] = []
+        for item in payload.subscriptions:
+            desired_by_feed.setdefault(item.feed, set())
+            if item.deleted:
+                acknowledgements.append(
+                    _ack(item, "applied", None)
+                )
+                continue
+            feed = self._configured_feeds.get(item.feed)
+            if feed is None:
+                acknowledgements.append(
+                    _ack(item, "rejected", REJECT_FEED_UNAVAILABLE)
+                )
+                continue
+            if item.interval not in self.config.aggregation.intervals:
+                acknowledgements.append(
+                    _ack(item, "rejected", REJECT_UNSUPPORTED_INTERVAL)
+                )
+                continue
+            handler = self._handler_for_feed(item.feed)
+            if handler is None:
+                acknowledgements.append(
+                    _ack(item, "rejected", REJECT_FEED_UNAVAILABLE)
+                )
+                continue
+            if not self._supports_item(handler, feed, item):
+                acknowledgements.append(
+                    _ack(item, "rejected", REJECT_UNSUPPORTED_INSTRUMENT)
+                )
+                continue
+            acknowledgements.append(_ack(item, "applied", None))
+            if item.enabled:
+                desired_by_feed[item.feed].add(item.instrument_id)
+                active_pairs.add((item.instrument_id, item.interval))
+                active_instruments.add(item.instrument_id)
+
+        # The sync payload is the full desired set: a configured feed omitted
+        # from it must also be removed from the feed handler's active set.
+        for feed_name in self._configured_feeds:
+            desired_by_feed.setdefault(feed_name, set())
+        self._apply_active_instruments(desired_by_feed)
+        self._active_pairs = active_pairs
+        self._active_instruments = active_instruments
+        self._subscriptions_synced = True
+        return {
+            "collector_instance_id": self.instance_id,
+            "sync_version": payload.sync_version,
+            "subscriptions": acknowledgements,
+        }
+
+    def _handler_for_feed(self, feed_name: str) -> Any:
+        def find(handler: Any) -> Any:
+            if getattr(handler, "name", None) == feed_name:
+                return handler
+            for child in getattr(handler, "handlers", ()):
+                found = find(child)
+                if found is not None:
+                    return found
+            return None
+
+        return find(self._feed_handler)
+
+    @staticmethod
+    def _supported_instruments(handler: Any) -> frozenset[str]:
+        supported = getattr(handler, "supported_instruments", None)
+        if callable(supported):
+            return frozenset(supported())
+        if supported is not None:
+            return frozenset(supported)
+        return frozenset(getattr(handler, "instrument_ids", ()))
+
+    def _supports_item(self, handler: Any, feed: Any, item: Any) -> bool:
+        try:
+            parsed = InstrumentId.parse(item.instrument_id)
+        except ValueError:
+            return False
+        if parsed.venue != item.venue or parsed.venue != feed.venue:
+            return False
+        supported = self._supported_instruments(handler)
+        return item.instrument_id in supported or parsed.value in supported
+
+    def _apply_active_instruments(
+        self, desired_by_feed: Mapping[str, set[str]]
+    ) -> None:
+        for feed_name, instruments in desired_by_feed.items():
+            handler = self._handler_for_feed(feed_name)
+            apply = getattr(handler, "apply_subscriptions", None)
+            if callable(apply):
+                apply(frozenset(instruments))
+
+    # -- subscription filtering -------------------------------------------
+
+    def _allows_raw_subscription(
+        self, instrument_id: str, _interval: str
+    ) -> bool:
+        if not self._subscriptions_synced:
+            return True
+        return instrument_id in self._active_instruments
+
+    def _publishable_bars(self, bars: Iterable[Bar]) -> list[Bar]:
+        if not self._subscriptions_synced:
+            return list(bars)
+        return [
+            bar
+            for bar in bars
+            if (bar.instrument_id, bar.interval) in self._active_pairs
+        ]
+
     # -- ingest loop -------------------------------------------------------
 
     def _run_ingest_loop(self) -> None:
@@ -256,6 +538,9 @@ class CollectorService:
                 continue
 
             if bars:
+                # Only live base Bars carry a meaningful ingest/event pair;
+                # aggregated parents reuse child ingest times.
+                self._record_ingestion_delay(bars)
                 self._publish_bars(bars)
                 self.metrics.inc(
                     "mdgw_collector_bars_ingested_total", amount=count
@@ -266,6 +551,9 @@ class CollectorService:
     def _publish_bars(self, bars: list[Bar]) -> None:
         streaming = self._streaming
         if streaming is None:
+            return
+        bars = self._publishable_bars(bars)
+        if not bars:
             return
         # `publish_bars` groups internally; the counter delta gives the exact
         # number of Bar frames actually sent without re-implementing grouping.
@@ -340,12 +628,23 @@ class CollectorService:
     def status_payload(self) -> dict:
         health = self.core.health_snapshot()
         sink = self.core.sink.stats()
+        feed_statuses = handler_feed_statuses(self._feed_handler)
         return {
             "service": "collector",
             "role": "collector",
             "ready": self._ready.is_set(),
             "uptime_s": self._uptime_s(),
             "feed": getattr(self._feed_handler, "name", None),
+            # Truthful upstream lifecycle. Venues/feeds come from the
+            # configured/runtime handlers, never from a hardcoded list.
+            "feeds": [status.to_dict() for status in feed_statuses],
+            "venues": sorted(
+                {
+                    status.venue
+                    for status in feed_statuses
+                    if status.venue
+                }
+            ),
             "last_ingest_ts": ns_iso(self.core.last_ingest_ts),
             "last_bar_ts": ns_iso(self._last_bar_ts),
             "bars_ingested": self.core.bars_ingested,
@@ -363,6 +662,20 @@ class CollectorService:
         }
 
     # -- metrics -----------------------------------------------------------
+
+    def _record_ingestion_delay(self, bars: list[Bar]) -> None:
+        """Observe ``ingest_ts - event_ts`` for live base Bars only."""
+        for bar in bars:
+            if bar.aggregation_source == AGGREGATION_INTERNAL:
+                continue
+            delay_s = (bar.ingest_ts - bar.event_ts).total_seconds()
+            self.metrics.observe(
+                "mdgw_collector_ingestion_delay_seconds",
+                delay_s,
+                labels={"feed": bar.feed},
+                help=_INGESTION_DELAY_HELP,
+                buckets=INGESTION_DELAY_BUCKETS,
+            )
 
     def render_metrics(self) -> str:
         self.metrics.set(
@@ -423,9 +736,103 @@ class CollectorService:
             sink.get("last_flush_duration_s") or 0.0,
             help="Duration of the last successful write-buffer flush",
         )
+        with self._storage_metric_lock:
+            if (
+                self.metrics.get(
+                    "mdgw_collector_storage_bytes_written_total"
+                )
+                is None
+            ):
+                # Expose an explicit zero series before the first write.
+                self.metrics.inc(
+                    "mdgw_collector_storage_bytes_written_total",
+                    amount=0,
+                    help=_STORAGE_BYTES_HELP,
+                )
+            self._last_storage_bytes_metric = advance_counter(
+                self.metrics,
+                "mdgw_collector_storage_bytes_written_total",
+                sink.get("bytes_written", 0) or 0.0,
+                self._last_storage_bytes_metric,
+                help=_STORAGE_BYTES_HELP,
+            )
         self._update_quarantine_metrics()
+        self._update_feed_metrics(handler_feed_statuses(self._feed_handler))
         update_dataset_metrics(self.metrics, self.core.store)
         return self.metrics.render()
+
+    def _update_feed_metrics(
+        self, statuses: tuple[FeedConnectionStatus, ...]
+    ) -> None:
+        """Expose upstream lifecycle with bounded ``feed``/``venue`` labels."""
+        with self._feed_metric_lock:
+            for status in statuses:
+                labels = {"feed": status.feed, "venue": status.venue}
+                for state in FEED_STATES:
+                    self.metrics.set(
+                        "mdgw_collector_feed_connection_state",
+                        1 if status.state == state else 0,
+                        labels={**labels, "state": state},
+                        help=(
+                            "Feed Handler connection state from real lifecycle "
+                            "transitions, never inferred from Feed Freshness "
+                            "(1 for the current state)"
+                        ),
+                    )
+                self.metrics.set(
+                    "mdgw_collector_feed_state_since_seconds",
+                    _timestamp_seconds(status.state_since),
+                    labels=labels,
+                    help=(
+                        "Unix time when the current Feed Handler connection "
+                        "state began"
+                    ),
+                )
+                self.metrics.set(
+                    "mdgw_collector_feed_last_event_ts_seconds",
+                    _timestamp_seconds(status.last_event_ts),
+                    labels=labels,
+                    help=(
+                        "Unix time when the last live watch event arrived "
+                        "from the Feed Handler (event arrival; not a protocol "
+                        "heartbeat)"
+                    ),
+                )
+                for code in FEED_ERROR_CODES:
+                    self.metrics.set(
+                        "mdgw_collector_feed_last_error_ts_seconds",
+                        _timestamp_seconds(status.last_error_at)
+                        if status.last_error_code == code
+                        else 0.0,
+                        labels={**labels, "error_code": code},
+                        help=(
+                            "Unix time of the last sanitized Feed Handler "
+                            "error by bounded category (0 = no such error)"
+                        ),
+                    )
+                key = (status.feed, status.venue)
+                if key not in self._last_feed_reconnects:
+                    # Expose an explicit zero series before the first failure.
+                    self.metrics.inc(
+                        "mdgw_collector_feed_reconnects_total",
+                        amount=0,
+                        labels=labels,
+                        help=(
+                            "Feed Handler reconnect attempts after upstream "
+                            "watch failures"
+                        ),
+                    )
+                self._last_feed_reconnects[key] = advance_counter(
+                    self.metrics,
+                    "mdgw_collector_feed_reconnects_total",
+                    status.reconnect_count,
+                    self._last_feed_reconnects.get(key, 0.0),
+                    labels=labels,
+                    help=(
+                        "Feed Handler reconnect attempts after upstream watch "
+                        "failures"
+                    ),
+                )
 
     def _update_quarantine_metrics(self) -> None:
         """Expose Quarantine records and write failures by stable labels."""
@@ -481,6 +888,21 @@ class CollectorService:
         if self._started_at is None:
             return 0.0
         return max(0.0, time.monotonic() - self._started_at)
+
+
+def _ack(item: Any, state: str, reason: str | None) -> dict[str, Any]:
+    return {
+        "subscription_id": item.subscription_id,
+        "version": item.version,
+        "state": state,
+        "reason": reason,
+    }
+
+
+def _timestamp_seconds(value: datetime | None) -> float:
+    if value is None:
+        return 0.0
+    return datetime_to_ns(value) / 1_000_000_000.0
 
 
 __all__ = ["CollectorService"]

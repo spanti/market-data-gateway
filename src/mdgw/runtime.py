@@ -16,6 +16,7 @@ from uuid import uuid4
 from mdgw.aggregate import BarAggregator
 from mdgw.api.app import create_app
 from mdgw.api.asgi_server import AsgiServer
+from mdgw.api.history_cursor import resolve_cursor_key
 from mdgw.api.ws_hub import WebSocketHub
 from mdgw.core.envelope import table_to_messages
 from mdgw.core.errors import UnknownInstrumentError
@@ -420,6 +421,7 @@ class GatewayRuntime:
             ws_hub=hub,
             ws_path=self.config.server.ws_path,
             rate_limit=self.config.rate_limit,
+            cursor_key=resolve_cursor_key(self.config.server.cursor_key_env),
         )
         self._http.start(
             app,

@@ -194,6 +194,7 @@ def _record_gap(  # ruff: ignore[too-many-arguments] -- keeps gap fields explici
         from_ts=from_ts,
         to_ts=to_ts,
         reason=reason,
+        feed=feed,
     )
     logger.warning(
         "gap_unrecoverable instrument=%s interval=%s from=%s to=%s reason=%s",

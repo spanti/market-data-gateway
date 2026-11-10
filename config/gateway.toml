@@ -5,6 +5,11 @@
 host = "127.0.0.1"
 http_port = 8080
 ws_path = "/ws"
+# Optional: environment variable name holding the HMAC key for opaque
+# `/api/v2/bars` cursors. If set, the variable must exist at startup (fail
+# closed); when unset, a random per-process key is used and cursors do not
+# survive a restart or work across multiple API instances.
+# cursor_key_env = "MDGW_CURSOR_KEY"
 
 [bus]
 # `transport` only describes the single-process `GatewayRuntime` internal

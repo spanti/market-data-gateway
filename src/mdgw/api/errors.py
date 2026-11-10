@@ -41,6 +41,11 @@ NOT_FOUND = "not_found"
 METHOD_NOT_ALLOWED = "method_not_allowed"
 RATE_LIMITED = "rate_limited"
 
+#: Admin validation failures always use `invalid_parameter`, even when the
+#: offending parameter name (`limit`, `start`, ...) has a more specific public
+#: Bars-query code. The public mapping below stays unchanged.
+ADMIN_PATH_PREFIX = "/api/v1/admin"
+
 # Stable parameter-name to error-code mapping (spec: REST error contract).
 _PARAMETER_CODES: dict[str, str] = {
     "interval": INVALID_INTERVAL,
@@ -93,6 +98,15 @@ def error_response(  # ruff: ignore[too-many-arguments]  # explicit wire contrac
     )
 
 
+def is_admin_path(path: str | None) -> bool:
+    """True for the admin API subtree (never for a lookalike prefix)."""
+    if not isinstance(path, str):
+        return False
+    return path == ADMIN_PATH_PREFIX or path.startswith(
+        ADMIN_PATH_PREFIX + "/"
+    )
+
+
 def validation_error_code(
     errors: Sequence[Mapping[str, Any]],
 ) -> str:
@@ -139,8 +153,14 @@ def _handle_validation_error(
     exc: RequestValidationError,
 ) -> JSONResponse:
     errors = exc.errors()
+    path = request.scope.get("path")
+    code = (
+        INVALID_PARAMETER
+        if is_admin_path(path if isinstance(path, str) else None)
+        else validation_error_code(errors)
+    )
     return error_response(
-        code=validation_error_code(errors),
+        code=code,
         message=_validation_message(errors),
         status=400,
         request_id=get_request_id(request),
@@ -190,6 +210,7 @@ def _handle_unexpected_exception(
 
 
 __all__ = [
+    "ADMIN_PATH_PREFIX",
     "METHOD_NOT_ALLOWED",
     "NOT_FOUND",
     "RATE_LIMITED",
@@ -197,5 +218,6 @@ __all__ = [
     "error_response",
     "get_request_id",
     "install_exception_handlers",
+    "is_admin_path",
     "validation_error_code",
 ]

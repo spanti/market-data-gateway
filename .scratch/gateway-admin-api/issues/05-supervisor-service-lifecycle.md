@@ -4,7 +4,7 @@
 
 **Blocked by:** 01, 02, 03
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] 仅 SuperAdmin 可调用，所有动作有原因、审计、Operation ID 和超时。
 - [ ] Start 等待真实 ready，PID 不作为 ready。
@@ -15,3 +15,5 @@
 - [ ] 受控测试进程覆盖启动顺序、drain、强停、重载、IPC 非法命令和未知恢复。
 
 ## Comments
+
+**Resolved (2026-11-10):** Supervisor 控制的 Service Instance 生命周期已合并 `63a1134`（feature `e79e631`）。迁移 005；collector/api/replay 统一管理，Start 等待真实 ready，Graceful Stop 撤销 ready→排空→超时强制，Reload 先校验配置（失败零重启）；Operation 持久化 accepted/running/succeeded/failed/unknown，202 后断连不是失败，重启将未确认操作标为 unknown/interrupted；Idempotency-Key 与审计接入。合并时 1644 passed / 5 个既有 CLI 失败。评审拆分 supervisor 控制端口（S3）并补 ADR-0017。

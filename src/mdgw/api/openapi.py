@@ -318,6 +318,58 @@ def _bars_response_schema() -> dict[str, Any]:
     }
 
 
+def _bars_v2_response_schema() -> dict[str, Any]:
+    return {
+        "title": "BarsV2Response",
+        "type": "object",
+        "description": (
+            "One revision-safe page of raw Bar Revisions. `bars` contains "
+            "every stored raw Revision in `(open_ts, revision, ingest_ts, "
+            "row_fingerprint)` ascending order; rows are never deduplicated."
+        ),
+        "required": ["bars", "page"],
+        "properties": {
+            "bars": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/MessageEnvelope"},
+            },
+            "page": {
+                "type": "object",
+                "description": (
+                    "Cursor metadata. `next_cursor` is an opaque signed "
+                    "token; never parse or edit it."
+                ),
+                "required": ["has_more", "next_cursor"],
+                "properties": {
+                    "has_more": {
+                        "type": "boolean",
+                        "description": (
+                            "True when a raw row exists strictly after the "
+                            "last returned row inside the request window."
+                        ),
+                        "example": True,
+                    },
+                    "next_cursor": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Opaque cursor encoding the last returned row's "
+                            "total-order key. Pass it back unchanged as "
+                            "`cursor`; null when `has_more` is false. It is "
+                            "logical, so it remains valid across Manifest "
+                            "Snapshot changes, Compaction and GC."
+                        ),
+                        "example": "eyJ2IjoxLCJpIjoiYmluYW5jZTpCVEMvVVNEVCJ9.signature",
+                    },
+                },
+            },
+        },
+        "example": {
+            "bars": [_ENVELOPE_EXAMPLE],
+            "page": {"has_more": False, "next_cursor": None},
+        },
+    }
+
+
 def _instrument_schema() -> dict[str, Any]:
     return {
         "title": "Instrument",
@@ -587,6 +639,36 @@ def _limit_parameter() -> dict[str, Any]:
     }
 
 
+def _v2_limit_parameter() -> dict[str, Any]:
+    return {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 100_000,
+        "description": (
+            "Required page size: maximum number of raw rows to return, "
+            "1..100000. `limit=0` is not a probe on v2 and is rejected with "
+            "`invalid_parameter`; values above 100000 are rejected with "
+            "`range_too_large`."
+        ),
+        "example": 5000,
+    }
+
+
+def _cursor_parameter() -> dict[str, Any]:
+    return {
+        "type": "string",
+        "description": (
+            "Opaque `next_cursor` from a previous page. Cannot be combined "
+            "with `start`; `instrument`, `interval` and a supplied `end` "
+            "must match the cursor. Invalid, tampered or unknown-version "
+            "tokens return 400 `invalid_parameter` with "
+            "`details.field = 'cursor'` and "
+            "`details.reason = 'invalid_cursor'`."
+        ),
+        "example": "eyJ2IjoxLCJpIjoiYmluYW5jZTpCVEMvVVNEVCJ9.signature",
+    }
+
+
 def _format_parameter(
     description: str, values: tuple[str, ...], default: str
 ) -> dict[str, Any]:
@@ -670,6 +752,106 @@ def _document_operation(  # ruff: ignore[too-many-arguments] - explicit docs fie
         responses[status] = _error_response(status)
 
 
+def _document_v2_bars_operation(operation: dict[str, Any]) -> None:
+    """Replace the generated v2 operation with the revision-safe contract.
+
+    Parameters are re-declared instead of overridden because v2 changes
+    `limit` from optional string to a required bounded integer, makes
+    `instrument` required and adds the opaque `cursor`.
+    """
+    _document_operation(
+        operation,
+        tag="Bars",
+        summary="List raw Bar Revisions with revision-safe pages",
+        description=(
+            "Revision-safe raw Bar history (Data Contract v2). Every stored "
+            "raw Revision is returned exactly once across a cursor walk. The "
+            "total order is `(open_ts, revision, ingest_ts, row_fingerprint)` "
+            "ascending across all Data Files of one Manifest Snapshot. The "
+            "first page accepts `start` (inclusive) and `end` (exclusive); "
+            "later pages send the opaque `next_cursor` from the previous "
+            "response and must not send `start`. The cursor is logical, so it "
+            "survives Manifest Snapshot changes, Compaction and GC; it is not "
+            "an authorization credential and must be treated as opaque. "
+            "`/api/v1/bars` is unchanged and keeps the Time Cursor contract."
+        ),
+        response_description="One revision-safe page of raw Bar Revisions.",
+        content={
+            JSON_MEDIA_TYPE: {
+                "schema": {"$ref": "#/components/schemas/BarsV2Response"},
+            },
+        },
+        parameters={},
+    )
+    operation["operationId"] = "list_bars_v2_api_v2_bars_get"
+    operation["parameters"] = [
+        {
+            "name": "interval",
+            "in": "query",
+            "required": True,
+            "schema": _interval_parameter(),
+            "description": "Bar Interval.",
+        },
+        {
+            "name": "instrument",
+            "in": "query",
+            "required": True,
+            "schema": _instrument_parameter(),
+            "description": _INSTRUMENT_ID_DESCRIPTION,
+        },
+        {
+            "name": "limit",
+            "in": "query",
+            "required": True,
+            "schema": _v2_limit_parameter(),
+            "description": _v2_limit_parameter()["description"],
+        },
+        {
+            "name": "start",
+            "in": "query",
+            "required": False,
+            "schema": _start_parameter(),
+            "description": (
+                "Inclusive lower bound on `open_ts` for the first page. "
+                "Cannot be combined with `cursor`."
+            ),
+        },
+        {
+            "name": "end",
+            "in": "query",
+            "required": False,
+            "schema": _end_parameter(),
+            "description": (
+                "Exclusive upper bound on `open_ts`. May be repeated on a "
+                "cursor page but must equal the cursor's end."
+            ),
+        },
+        {
+            "name": "cursor",
+            "in": "query",
+            "required": False,
+            "schema": _cursor_parameter(),
+            "description": _cursor_parameter()["description"],
+        },
+        {
+            "name": "format",
+            "in": "query",
+            "required": False,
+            "schema": {
+                "type": "string",
+                "enum": ["json"],
+                "default": "json",
+                "description": (
+                    "Only `json` is accepted on v2; any other value returns "
+                    "400 `invalid_format`."
+                ),
+                "example": "json",
+            },
+            "description": "Output format. v2 is JSON only.",
+        },
+    ]
+
+
 def _status_operation() -> dict[str, Any]:
     operation: dict[str, Any] = {
         "operationId": "get_dataset_status_api_v1_status_get",
@@ -702,6 +884,7 @@ def _decorate(schema: dict[str, Any]) -> None:
         {
             "BarPayload": _bar_payload_schema(),
             "BarsResponse": _bars_response_schema(),
+            "BarsV2Response": _bars_v2_response_schema(),
             "DatasetStatus": _dataset_status_schema(),
             "ErrorEnvelope": _error_envelope_schema(),
             "Instrument": _instrument_schema(),
@@ -750,6 +933,7 @@ def _decorate(schema: dict[str, Any]) -> None:
             ),
         ),
     )
+    _document_v2_bars_operation(paths["/api/v2/bars"]["get"])
     _document_operation(
         paths["/api/v1/bars/export"]["get"],
         tag="Bars",

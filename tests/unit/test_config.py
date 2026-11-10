@@ -480,3 +480,19 @@ def test_feed_proxy_is_optional_stripped_and_validated() -> None:
             symbols=("BTC/USDT",),
             proxy="127.0.0.1:12334",
         )
+
+
+def test_cursor_key_env_defaults_to_none_and_accepts_an_env_name() -> None:
+    assert GatewayConfig().server.cursor_key_env is None
+
+    config = GatewayConfig.model_validate(
+        {"server": {"cursor_key_env": "MDGW_CURSOR_KEY"}}
+    )
+    assert config.server.cursor_key_env == "MDGW_CURSOR_KEY"
+
+
+def test_cursor_key_env_rejects_an_invalid_environment_variable_name() -> None:
+    with pytest.raises(ValidationError, match="cursor_key_env"):
+        GatewayConfig.model_validate(
+            {"server": {"cursor_key_env": "not a name"}}
+        )

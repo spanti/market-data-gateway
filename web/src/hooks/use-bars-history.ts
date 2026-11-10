@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import {
-  fetchBarsHistory,
-  type BarsHistoryResult,
-} from "@/api/endpoints/bars";
+  fetchBarsV2History,
+  type BarsV2HistoryResult,
+} from "@/api/endpoints/bars-v2";
 import type { BarInterval } from "@/lib/time-range";
 
 export interface UseBarsHistoryOptions {
@@ -32,13 +32,13 @@ export function barsHistoryQueryKey(
  */
 export function useBarsHistory(options: UseBarsHistoryOptions) {
   const { instrumentId, interval, start, end } = options;
-  return useQuery<BarsHistoryResult>({
+  return useQuery<BarsV2HistoryResult>({
     queryKey: barsHistoryQueryKey(options),
     queryFn: ({ signal }) => {
       if (!instrumentId || !interval) {
         throw new Error("Bars history requires InstrumentId and Bar Interval");
       }
-      return fetchBarsHistory(
+      return fetchBarsV2History(
         {
           instrument: instrumentId,
           interval,
