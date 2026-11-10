@@ -163,6 +163,77 @@ pagination is not offered for multi-Instrument queries: queries missing
 either `instrument` or `limit` keep exactly the `{"bars": [...]}` shape.
 `/api/v1/instruments`, Arrow, CSV and export are never paginated.
 
+### Revision-safe JSON Bars (v2)
+
+`GET /api/v2/bars` is the revision-safe single-Instrument history surface
+(ADR-0018). It is JSON-only, always paginated and returns **every stored raw
+Revision**. `/api/v1/bars` is unchanged and keeps the Time Cursor contract;
+v2 is additive. The v1 Revision-heavy gap remains documented in
+[`docs/revision-heavy-time-cursor.md`](revision-heavy-time-cursor.md).
+
+Query parameters:
+
+| Parameter | Required | Meaning |
+|---|---|---|
+| `interval` | yes | Bar Interval (`1m`, `5m`, `15m`, `1h`, `1d`). |
+| `instrument` | yes | One InstrumentId; multi-Instrument v2 is not offered. |
+| `limit` | yes | Integer page size `1..100000`; counts raw rows. `limit=0` is rejected (`invalid_parameter`), it is not a probe. |
+| `start` | first page only | Inclusive lower bound on `open_ts`; must not accompany `cursor`. |
+| `end` | optional | Exclusive upper bound on `open_ts`; on a cursor page, if supplied it must equal the cursor's recorded end. |
+| `cursor` | later pages | Opaque `next_cursor` from the previous page. Do not parse, edit or treat it as `start`. |
+| `format` | optional | Only `json` is accepted; any other value is `invalid_format`. |
+
+Response:
+
+```json
+{
+  "bars": ["<Message Envelope>", "..."],
+  "page": {"has_more": true, "next_cursor": "<opaque>"}
+}
+```
+
+`has_more=false` implies `next_cursor=null`. The page is the first `limit`
+rows strictly after the cursor position in the total order
+`(open_ts ASC, revision ASC, ingest_ts ASC, row_fingerprint ASC)`, plus the
+first unreturned row to decide `has_more`; `next_cursor` encodes the last
+returned row, so following it never repeats or skips a row. The order is
+defined over the whole request Snapshot selection, not over storage order.
+Raw Revisions and duplicate rows are never deduplicated. The 100,000 ceiling
+is per response and counts raw rows.
+
+The row fingerprint is internal: a canonical SHA-256 over
+`PHYSICAL_SCHEMA.names` in schema order, each column cast to text with NULL
+represented as `\x00`, joined with `\x1f` after the version marker
+`mdgw-row-fingerprint-v1`. It is selected for ordering/keyset only and is
+stripped before rendering; it never appears in `bars`. Changing the algorithm
+requires a cursor-version bump, after which old cursors fail with
+`invalid_cursor`.
+
+The cursor is a signed, opaque position token:
+
+- payload: compact key-sorted JSON
+  `{v,i,n,e,o,r,g,f}` (`i` instrument, `n` interval, `e` end ns or null,
+  `o` open ns, `r` revision, `g` ingest ns, `f` fingerprint);
+- token: unpadded `base64url(payload).base64url(HMAC-SHA256(payload))`;
+- the HMAC key comes from the environment variable named by
+  `[server].cursor_key_env`. If the name is configured but the variable is
+  missing or empty, startup fails closed. If no name is configured, the
+  server generates a random per-process key and logs one warning: cursors
+  then do not survive a restart or work across instances;
+- verification is constant-time. Invalid, corrupt, tampered, truncated or
+  version-unknown cursors return `400 invalid_parameter` with
+  `details.field="cursor"`, `details.reason="invalid_cursor"`;
+- `cursor` with `start` returns `400 invalid_parameter` with
+  `details.field="cursor"`. A cursor whose `instrument`, `interval` or
+  explicit `end` does not match the request returns `400 invalid_parameter`
+  naming the offending parameter in `details.field`.
+
+Each request opens its own Manifest Snapshot and Dataset Read Lease. The
+cursor pins no Snapshot: it stays valid across Manifest switches, Compaction
+and GC, and rows deleted behind it are irrelevant. It is a position token,
+not an authorization credential; it never contains secrets and does not
+replace server-side authorization.
+
 ## 4. Instrument
 
 `INSTRUMENT_SCHEMA` in `src/mdgw/core/schema.py`:
@@ -590,13 +661,14 @@ Bars as a unique series.
 Aggregated parent Bars follow the rule too: a changed child can move the
 parent to `parent_revision + 1`.
 
-Raw Revisions also interact with the single-value Time Cursor: when a page
+Raw Revisions also interact with the single-value v1 Time Cursor: when a page
 boundary falls inside an `open_ts` revision group, a client following
 `next_start` can see duplicates and unreachable rows. This is a pre-existing
-contract gap, not an engine migration behavior, and it is tracked separately in
-[`docs/revision-heavy-time-cursor.md`](revision-heavy-time-cursor.md). The
-gateway neither deduplicates REST output nor introduces a composite/opaque
-cursor to hide it.
+v1 contract gap, not an engine migration behavior, and it is tracked separately
+in [`docs/revision-heavy-time-cursor.md`](revision-heavy-time-cursor.md). The
+gateway neither deduplicates REST output nor changes v1 to hide it; the
+revision-safe `/api/v2/bars` surface (ADR-0018) is the fix for clients that
+need a complete raw-Revision walk.
 
 ## 10. History freshness
 
@@ -657,3 +729,5 @@ For real-time data, consume the Streaming Interface instead of polling history.
   bounded Replay, seek generations and `reason="error"`.
 - [`docs/revision-heavy-time-cursor.md`](revision-heavy-time-cursor.md):
   the independent Revision-heavy Time Cursor contract gap.
+- [`ADR-0018`](adr/0018-revision-safe-history-pagination.md): revision-safe
+  `/api/v2/bars` pagination, opaque cursors and the row fingerprint.

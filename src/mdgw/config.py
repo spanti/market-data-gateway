@@ -31,6 +31,9 @@ if TYPE_CHECKING:
 SUPPORTED_BUS_TRANSPORTS = frozenset({"inproc", "tcp"})
 SUPPORTED_FEED_KINDS = frozenset({"ccxt", "fake"})
 
+# Environment variable *names* (never values) are configured for secrets.
+_CONTROL_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 class _ConfigModel(BaseModel):
     """Immutable config model; unknown keys are ignored for forward compatibility."""
@@ -42,6 +45,22 @@ class ServerConfig(_ConfigModel):
     host: str = "127.0.0.1"
     http_port: int = Field(default=8080, ge=0, le=65535)
     ws_path: str = "/ws"
+    # Name of the environment variable holding the HMAC key for opaque
+    # `/api/v2/bars` cursors. The key itself is never stored in config. When
+    # unset, a random per-process key is used and a warning is logged; when
+    # set but missing at startup, the API fails closed.
+    cursor_key_env: str | None = None
+
+    @field_validator("cursor_key_env")
+    @classmethod
+    def _cursor_key_env_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if _CONTROL_ENV_RE.match(cleaned) is None:
+            msg = "server.cursor_key_env must be a valid environment variable name"
+            raise ValueError(msg)
+        return cleaned
 
 
 def _tcp_endpoint(value: str) -> str:
@@ -653,9 +672,6 @@ class AdminExportConfig(_ConfigModel):
             msg = "export min_days must not exceed max_days"
             raise ValueError(msg)
         return self
-
-
-_CONTROL_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class AdminControlConfig(_ConfigModel):

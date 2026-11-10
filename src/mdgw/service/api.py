@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from mdgw.admin.context import AdminContext
 from mdgw.api.app import create_app
 from mdgw.api.asgi_server import AsgiServer
+from mdgw.api.history_cursor import resolve_cursor_key
 from mdgw.api.ws_hub import WebSocketHub
 from mdgw.core.envelope import table_to_messages
 from mdgw.metrics import MetricsRegistry
@@ -355,6 +356,7 @@ class ApiService:
             service_role="api",
             rate_limit=self.config.rate_limit,
             admin=self._admin,
+            cursor_key=resolve_cursor_key(self.config.server.cursor_key_env),
         )
         self._http.start(
             app,
