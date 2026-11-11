@@ -1,4 +1,4 @@
-# ruff: file-ignore[implicit-namespace-package,import-private-name,unused-method-argument]
+# ruff: file-ignore[implicit-namespace-package,unused-method-argument]
 """The deep Backfill execution seam.
 
 One execution is one InstrumentId plus one actual fetch range. These tests
@@ -10,15 +10,13 @@ evidence. They do not assert private call counts or class shapes.
 
 from __future__ import annotations
 
-import threading
-from datetime import datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import pytest
 
-from mdgw.aggregate import BarAggregator
-from mdgw.backfill_common import MergeResult, interval_ns, merge_bar_batch
+from mdgw.backfill_common import MergeResult, interval_ns
 from mdgw.backfill_execution import (
     BackfillExecution,
     BackfillRange,
@@ -26,19 +24,13 @@ from mdgw.backfill_execution import (
 )
 from mdgw.core.time import datetime_to_ns
 from mdgw.normalize.batch import BatchNormalizationError
-from mdgw.service.backfill_jobs import (
-    BATCH_BARS,
-    _JobCancelledError,
-    _JobExecutionStrategy,
-    _JobState,
-)
 from mdgw.store.parquet_dataset import ParquetBarStore
 from tests.characterization.backfill_support import (
     FEED,
     INSTRUMENT,
     StaticHistoryFeed,
     at,
-    config,
+    bar_aggregator,
     raw_bar,
 )
 from tests.characterization.dataset_builder import make_bar
@@ -47,20 +39,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _aggregator() -> BarAggregator:
-    settings = config().aggregation
-    return BarAggregator(
-        intervals=settings.intervals,
-        base_interval=settings.base_interval,
-        retention_parent_periods=settings.retention_parent_periods,
-    )
-
-
 def _execution(store: ParquetBarStore, feed: StaticHistoryFeed) -> BackfillExecution:
     return BackfillExecution(
         feed=feed,
         store=store,
-        aggregator=_aggregator(),
+        aggregator=bar_aggregator(),
     )
 
 
@@ -471,7 +454,7 @@ def test_read_bounds_hook_is_used_for_each_batch(tmp_path: Path) -> None:
     execution = BackfillExecution(
         feed=feed,
         store=store,
-        aggregator=_aggregator(),
+        aggregator=bar_aggregator(),
         merge=merge,
     )
     try:
@@ -499,148 +482,54 @@ def test_read_bounds_hook_is_used_for_each_batch(tmp_path: Path) -> None:
         store.close()
 
 
-# -- the Backfill Job adapter strategy -------------------------------------
+# -- the cancellation boundary after merge ---------------------------------
 
 
-def _job_strategy(*, start_ns: int, end_ns: int):
-    job = _JobState(
-        job_id="bf_strategy",
-        instrument_id=INSTRUMENT,
-        interval="1m",
-        start_ns=start_ns,
-        end_ns=end_ns,
-        mode="native_interval",
-    )
-    return job, _JobExecutionStrategy(lock=threading.RLock(), job=job)
+class _StopAfterMergeError(Exception):
+    """Test sentinel raised by the observer at the second merge boundary."""
 
 
-def _minute_ns(minute: int) -> int:
-    return datetime_to_ns(at(0) + timedelta(minutes=minute))
+class _CancelAfterSecondMerge(_RecordingObserver):
+    """A test-local observer that aborts at the second batch's merge."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.merges = 0
+
+    def after_merge(self, merged) -> None:
+        super().after_merge(merged)
+        self.merges += 1
+        if self.merges == 2:
+            raise _StopAfterMergeError
 
 
-def test_job_strategy_keeps_raw_rules_gap_evidence_and_500_row_batches(
+def test_after_merge_cancellation_skips_only_the_current_batch_persist(
     tmp_path: Path,
 ) -> None:
     store = ParquetBarStore(tmp_path / "bars")
-    start_ns = _minute_ns(0)
-    end_ns = _minute_ns(600)
-    job, strategy = _job_strategy(start_ns=start_ns, end_ns=end_ns)
-    missing = {10, 11, 12}
-    raws = [
-        # Naive `open_ts` (unreadable identity) and a wrong-interval row are
-        # both dropped by the Job's raw rules, not by Normalization.
-        raw_bar(datetime(2024, 1, 1, 0, 7)),
-        raw_bar(at(0) + timedelta(minutes=5), interval="5m"),
-        *(raw_bar(at(0) + timedelta(minutes=minute)) for minute in range(600)
-          if minute not in missing),
-        # Raw de-duplication happens before Normalization: the last row for an
-        # `open_ts` wins.
-        raw_bar(at(0), close="200", high="201"),
-        # A 1m row outside the execution range is ignored, not rejected.
-        raw_bar(at(0) + timedelta(minutes=600)),
-    ]
-    feed = StaticHistoryFeed(history=raws, filter_by_range=False)
-    calls: list[list] = []
-    execution = BackfillExecution(
-        feed=feed,
-        store=store,
-        aggregator=_aggregator(),
-    )
-    try:
-        result = execution.execute(
-            BackfillRange(INSTRUMENT, start_ns, end_ns),
-            persist=lambda bars: calls.append(list(bars)),
-            ingest_ts=at(0) + timedelta(hours=11),
-            batch_size=BATCH_BARS,
-            prepare=strategy.prepare,
-            handle_rejections=strategy.handle_rejections,
-            read_bounds=strategy.read_bounds,
-            observer=strategy,
-        )
-
-        assert feed.requests == [
-            (INSTRUMENT, "1m", start_ns, end_ns)
-        ]
-        assert result.fetched_bars == len(raws)
-        assert result.accepted_bars == 597
-        assert result.rejected_bars == 1
-        assert result.gap_ranges == [(_minute_ns(10), _minute_ns(13))]
-        assert job.counters["gap_bars"] == 3
-        assert job.counters["rejected_bars"] == 1
-        assert job.counters["backfilled_bars"] == 597
-        assert job.gap_ranges == [(_minute_ns(10), _minute_ns(13))]
-
-        # 597 accepted rows are normalized/merged/persisted in 500-row slices.
-        assert len(calls) == 2
-        base_counts = [
-            sum(1 for bar in call if bar.interval == "1m") for call in calls
-        ]
-        assert base_counts == [500, 97]
-        assert sum(len(call) for call in calls) == result.written_bars
-        assert job.counters["written_bars"] == result.written_bars
-        written_base = {
-            datetime_to_ns(bar.open_ts): bar
-            for call in calls
-            for bar in call
-            if bar.interval == "1m"
-        }
-        assert written_base[_minute_ns(0)].close == Decimal(200)
-        assert written_base[_minute_ns(5)].interval == "1m"
-        for minute in missing:
-            assert _minute_ns(minute) not in written_base
-        assert _minute_ns(600) not in written_base
-    finally:
-        store.close()
-
-
-def test_job_strategy_cancel_after_merge_skips_that_batch_persist(
-    tmp_path: Path,
-) -> None:
-    store = ParquetBarStore(tmp_path / "bars")
-    start_ns = _minute_ns(0)
-    end_ns = _minute_ns(600)
-    job, strategy = _job_strategy(start_ns=start_ns, end_ns=end_ns)
     feed = StaticHistoryFeed(
         history=[
             raw_bar(at(0) + timedelta(minutes=minute)) for minute in range(600)
         ]
     )
-    calls: list[list] = []
-    merges = 0
-
-    def merging(**kwargs):
-        nonlocal merges
-        merged = merge_bar_batch(**kwargs)
-        merges += 1
-        if merges == 2:
-            # Cancellation lands after the second batch's merge.
-            job.cancel_event.set()
-        return merged
-
-    execution = BackfillExecution(
-        feed=feed,
-        store=store,
-        aggregator=_aggregator(),
-        merge=merging,
-    )
+    calls, persist = _recording_persistence()
     try:
-        with pytest.raises(_JobCancelledError):
-            execution.execute(
-                BackfillRange(INSTRUMENT, start_ns, end_ns),
-                persist=lambda bars: calls.append(list(bars)),
-                ingest_ts=at(0) + timedelta(hours=11),
-                batch_size=BATCH_BARS,
-                prepare=strategy.prepare,
-                handle_rejections=strategy.handle_rejections,
-                read_bounds=strategy.read_bounds,
-                observer=strategy,
+        with pytest.raises(_StopAfterMergeError):
+            _execution(store, feed).execute(
+                BackfillRange(
+                    instrument_id=INSTRUMENT,
+                    start_ns=datetime_to_ns(at(0)),
+                    end_ns=datetime_to_ns(at(0) + timedelta(minutes=600)),
+                ),
+                persist=persist,
+                ingest_ts=at(0, hour=11),
+                batch_size=500,
+                observer=_CancelAfterSecondMerge(),
             )
 
-        # The first batch was merged and persisted; the cancelled second merge
-        # never reaches the persistence adapter.
+        # The first 500-row batch is durable; the second merge never reaches
+        # the persistence adapter.
         assert len(calls) == 1
         assert sum(1 for bar in calls[0] if bar.interval == "1m") == 500
-        assert job.counters["backfilled_bars"] == 600
-        assert job.counters["written_bars"] == len(calls[0])
     finally:
         store.close()

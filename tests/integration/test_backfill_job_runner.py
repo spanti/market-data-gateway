@@ -27,6 +27,7 @@ from mdgw.service.backfill_jobs import BackfillJobRunner
 from mdgw.service.collector_core import CollectorCore
 from mdgw.state.high_water_mark import HighWaterMarkStore
 from mdgw.store.parquet_dataset import ParquetBarStore
+from tests.characterization.backfill_support import raw_bar
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
@@ -496,6 +497,67 @@ def test_missing_and_rejected_rows_make_the_job_partially_succeed(dataset) -> No
     assert snapshot["counters"]["rejected_bars"] == 1
     assert snapshot["counters"]["backfilled_bars"] == 57
     assert len(_rows(store, "1m")) == 57
+
+
+def test_raw_input_rules_are_visible_through_public_status_and_dataset(
+    dataset,
+) -> None:
+    store, _hwm = dataset
+    # Minute 7 is only present as an unreadable identity below.
+    missing = {3, 4, 7}
+    raws = [
+        raw_bar(_at(minute)) for minute in range(10) if minute not in missing
+    ]
+    raws.extend(
+        [
+            # Raw de-duplication happens before Normalization: last row wins.
+            raw_bar(_at(0), close="200", high="201"),
+            # A non-1m row and a 1m row outside the execution range are
+            # ignored, not rejected.
+            raw_bar(_at(2), interval="5m"),
+            raw_bar(_at(10)),
+            # An unreadable identity is counted as rejected.
+            raw_bar(datetime(2024, 1, 1, 0, 7)),
+        ]
+    )
+    feed = ScriptedHistoryFeed(factory=lambda _start, _end: raws)
+    runner = _start_runner(_core(feed, dataset))
+    try:
+        runner.start_job(
+            job_id="bf_raw_rules",
+            instrument_id=INSTRUMENT,
+            interval="1m",
+            start_ns=datetime_to_ns(_at(0)),
+            end_ns=datetime_to_ns(_at(10)),
+            mode="native_interval",
+        )
+        snapshot = _wait(runner, "bf_raw_rules")
+    finally:
+        runner.close()
+
+    assert snapshot["state"] == "partially_succeeded"
+    assert snapshot["counters"] == {
+        "scanned_bars": 10,
+        "gap_bars": 3,  # minutes 3, 4 and the unreadable minute 7
+        "backfilled_bars": 7,
+        "written_bars": 7,
+        "rejected_bars": 1,
+    }
+    assert snapshot["gap_ranges"] == [
+        [datetime_to_ns(_at(3)), datetime_to_ns(_at(5))],
+        [datetime_to_ns(_at(7)), datetime_to_ns(_at(8))],
+    ]
+
+    by_open = _by_open(store, "1m")
+    assert set(by_open) == {
+        datetime_to_ns(_at(minute)) for minute in (0, 1, 2, 5, 6, 8, 9)
+    }
+    # The duplicate's last raw value wins and is the only row for that minute.
+    assert [row["close"] for row in by_open[datetime_to_ns(_at(0))]] == [
+        Decimal(200)
+    ]
+    # Wrong-interval and out-of-range rows never reached the Dataset.
+    assert _rows(store, "5m") == []
 
 
 def test_terminal_snapshot_exposes_feed_and_observed_one_minute_gap_ranges(
