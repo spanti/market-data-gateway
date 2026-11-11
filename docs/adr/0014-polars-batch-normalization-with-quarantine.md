@@ -10,7 +10,7 @@ Feed Handler 继续负责 Venue 协议、原始报文、闭合识别、重连和
 
 ## 整批与整文件失败原子性
 
-实时批次中只要有一行 Normalization 或 Instrument Validation rejection，Collector 先为该批所有被拒行写 Quarantine，再抛出批次错误：Aggregation 状态、HWM 和 freshness 都不推进，已接受的行也不会部分落盘；修复参考数据后同一批可以重试。Archive 保持整文件原子性：任何一行 Normalization 失败都会使整个文件失败，不写入未经批准的部分归档，同时为整个文件记录一条带来源定位的 Quarantine Record。CCXT 单行解析失败是唯一允许逐行跳过的来源：该行先成功写入 Quarantine，之后才跳过并继续处理来源；如果 Quarantine 写入失败，handler 进入 fail-closed 终止状态，不重连越过该行，也不确认消费。Backfill 复用同一批量规则，但它的 rejection 仍以 `BatchNormalizationError` 直接让整批失败且不写 Quarantine；它不伪造审计记录。队列溢出仍走 HWM 缺口与 Backfill，不会被伪装成 Validation Quarantine。
+实时批次中只要有一行 Normalization 或 Instrument Validation rejection，Collector 先为该批所有被拒行写 Quarantine，再抛出批次错误：Aggregation 状态、HWM 和 freshness 都不推进，已接受的行也不会部分落盘；修复参考数据后同一批可以重试。Archive 保持整文件原子性：任何一行 Normalization 失败都会使整个文件失败，不写入未经批准的部分归档，同时为整个文件记录一条带来源定位的 Quarantine Record。CCXT 单行解析失败是唯一允许逐行跳过的来源：该行先成功写入 Quarantine，之后才跳过并继续处理来源；如果 Quarantine 写入失败，handler 进入 fail-closed 终止状态，不重连越过该行，也不确认消费。这里的 Backfill 按 GLOSSARY 专指自动 HWM Backfill：它复用同一批量规则，rejection 仍以 `BatchNormalizationError` 直接让整批失败且不写 Quarantine；它不伪造审计记录。Backfill Job 是 GLOSSARY 中独立的手动生命周期（见 ADR-0016）：其 Validation rejection 计入 `rejected_bars`，有效 Bars 可继续写入，并依据 gap/rejection 与产出决定 `partially_succeeded` 或 `failed`；它同样不写 Quarantine。该差异于 2026-11-11 确认：partial-outcome 是 Backfill Job 的既有公共语义，不是对自动 HWM Backfill 原子性的放宽。队列溢出仍走 HWM 缺口与 Backfill，不会被伪装成 Validation Quarantine。
 
 ## 稳定的 Reason Code 与 Source Stage
 
