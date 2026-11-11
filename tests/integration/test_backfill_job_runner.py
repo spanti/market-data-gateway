@@ -96,6 +96,32 @@ class RecordingHistoryFeed(FakeFeedHandler):
         return super().fetch_history(instrument_id, interval, start, end)
 
 
+class FailingHistoryFeed:
+    """A history-capable Feed Handler whose fetch raises on demand."""
+
+    name = "failing"
+    instrument_ids = (INSTRUMENT,)
+    supports_history = True
+
+    def __init__(self) -> None:
+        self.error: Exception = RuntimeError("venue history unavailable")
+
+    def iter_bars(self) -> Iterator[RawBar]:
+        return iter(())
+
+    def feed_status(self):
+        return ()
+
+    def fetch_history(
+        self,
+        instrument_id: str,
+        interval: str,
+        start: datetime,
+        end: datetime,
+    ) -> Iterable[RawBar]:
+        raise self.error
+
+
 class ScriptedHistoryFeed:
     """A history-only Feed Handler that can block between chunks."""
 
@@ -545,6 +571,46 @@ def test_history_unsupported_fails_without_faking_success(dataset) -> None:
     assert snapshot["error"]["code"] == "history_unsupported"
     assert snapshot["counters"]["written_bars"] == 0
     assert _rows(store, "1m") == []
+
+
+def test_history_fetch_failures_keep_the_stable_error_document(dataset) -> None:
+    feed = FailingHistoryFeed()
+    runner = _start_runner(_core(feed, dataset))
+    try:
+        runner.start_job(
+            job_id="bf_fetch_failed",
+            instrument_id=INSTRUMENT,
+            interval="1m",
+            start_ns=datetime_to_ns(_at(0)),
+            end_ns=datetime_to_ns(_at(0, hour=1)),
+            mode="native_interval",
+        )
+        failed = _wait(runner, "bf_fetch_failed")
+        assert failed["state"] == "failed"
+        assert failed["error"] == {
+            "code": "backfill_failed",
+            "message": "the Backfill history fetch failed",
+            "details": {},
+        }
+
+        feed.error = NotImplementedError("no history source")
+        runner.start_job(
+            job_id="bf_fetch_unsupported",
+            instrument_id=INSTRUMENT,
+            interval="1h",
+            start_ns=datetime_to_ns(_at(0)),
+            end_ns=datetime_to_ns(_at(0, hour=1)),
+            mode="one_minute_plus_aggregation",
+        )
+        unsupported = _wait(runner, "bf_fetch_unsupported")
+        assert unsupported["state"] == "failed"
+        assert unsupported["error"] == {
+            "code": "history_unsupported",
+            "message": "the Feed Handler cannot serve Backfill history",
+            "details": {},
+        }
+    finally:
+        runner.close()
 
 
 def test_cancellation_between_chunks_keeps_written_revisions(dataset) -> None:
