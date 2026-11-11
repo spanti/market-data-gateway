@@ -4,7 +4,7 @@
 
 **Blocked by:** 01《用公共入口固定 Backfill 行为基线》
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] 新 execution module 以一个 InstrumentId 和一个实际 fetch range 为粒度，拥有 fetch、closed-window、Normalization、Revision/parent merge、持久化和执行结果收集的共同顺序。
 - [ ] module 通过显式注入使用 Feed Handler、Aggregator、clock、Normalization、merge 和持久化能力，不接受整个 CollectorCore 或 AdminContext，也不依赖 Admin Job/Gap stores。
@@ -17,3 +17,7 @@
 - [ ] 自动入口的旧重复 history orchestration 被移除，不增加新旧实现开关，也不要求尚未迁移的 Job 调用新 module。
 - [ ] 自动 Backfill、HWM、Revision、freshness、Normalization 聚焦测试通过，01 的 differential 在“自动新实现 + Job 旧实现”组合下通过。
 - [ ] live ingest 与 archive 相关测试保持通过，完整结果如实记录，不以跳过测试替代兼容验证。
+
+## Comments
+
+**Resolved (2026-11-11):** 已在 `feature/backfill-execution-02` 实现并合并（feature `a7d5df5`，merge `af28386`）。新增 `src/mdgw/backfill_execution.py`，由 `BackfillRange`/`PreparedInput`/`RawBatch`/`ExecutionObserver`/`BackfillExecutionResult`/`BackfillExecution` 拥有 fetch → closed-window → Normalization → Revision/parent merge → 持久化 adapter → 结构化结果与执行期 gap 证据的共同顺序；自动 `run_backfill` 改为薄 adapter，旧 `_normalize_history` 与内联 orchestration 已删除。自动路径保留 HWM/backfill_hours 选窗、inclusive HWM 重抓、history unsupported/backfill limit planning gap、单次全窗口 fetch、Core Aggregator、固定 now、整批 `BatchNormalizationError`、直接 Dataset+HWM 写入，且无 Core bars_written/逐 Bar health/expected-key/sink 副作用；`run_backfill` 关键字接口与 `BackfillReport` 字段/计数不变。新增 10 个 module-seam 测试；ticket 01 differential 在“自动新实现 + Job 旧实现”下 15 passed；全量 1916 passed，仅既有失败。共享 merge helper 未改动。

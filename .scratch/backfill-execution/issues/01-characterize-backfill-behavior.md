@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] 在旧实现上建立跨入口 differential，使用同一 InstrumentId、相同 history、固定 clock 和等价初始 Dataset，分别穿过自动 Backfill 与 Job Runner 公共入口。
 - [ ] differential 覆盖首次写入、相同内容幂等重跑和 source correction，比较逻辑 Bars、Revision、parent Bars 与最终 High-Water Mark。
@@ -17,3 +17,7 @@
 - [ ] 真实 Gap 组合测试覆盖 observed history missing，以及 succeeded 可解决完全包含的 open Gap、partially_succeeded 只关联不解决的现有语义。
 - [ ] 记录当前聚焦测试基线并确认新增 characterization 在旧实现上通过；若发现行为缺陷，只记录证据，不在本票夹带行为修复。
 - [ ] 不改变生产 interface、运行时语义、公共 wire 或既有测试断言来迎合新 differential。
+
+## Comments
+
+**Resolved (2026-11-11):** 已在 `feature/backfill-execution-01` 实现并合并（feature `21426e1`，merge `ffd08d7`）。新增 15 个测试：`tests/characterization/backfill_support.py` 提供共享夹具；`test_backfill_differential.py` 用同一 InstrumentId、相同 history、固定 clock 与等价初始 Dataset 分别穿过自动入口和 Job Runner，覆盖首次写入、相同内容幂等重跑和 source correction，比较逻辑 Bars、Revision、parent Bars 与最终 HWM；`test_backfill_characterization.py` 覆盖 BackfillReport 全字段映射、两条路径 rejection 语义、Dataset 写失败时 HWM/written 不推进且早期成功写入不回滚、自动无 Job 特有 Core counter/health/expected-key 副作用，以及 Job counters/逐 Bar health/expected keys/sink HWM cap；`test_admin_gaps_job_real.py` 用真实 Runner + 真实 Admin polling 覆盖 observed history missing、succeeded 解决完全包含的 open Gap、partially_succeeded 只关联不解决。基线记录于 `notes/baseline.md`（6 failed / 1890 passed / 1 skipped）；本票完成后全量 1905 passed，仅既有 6 个失败。生产代码未修改。
