@@ -472,7 +472,7 @@ class BackfillJobStore:
     def set_resolved_gap_ids(
         self, job_id: str, gap_ids: tuple[str, ...], now_ns: int
     ) -> bool:
-        """Persist the Gap ids a successful job resolved (ticket 07 linkage)."""
+        """Persist the Gap ids a successful job resolved (Admin reconcile)."""
         with self._lock:
             cursor = self._connection().execute(
                 "UPDATE backfill_jobs SET resolved_gap_ids_json = ?, "

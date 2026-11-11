@@ -12,8 +12,9 @@
 -- `{mode, source_intervals, target_interval, description}`; `current_range_json`
 -- is `{start_ns, end_ns}` (null when queued/finished); the five counter
 -- columns use the contract names; `error_json` is the stable
--- `{code, message, details}` document; `resolved_gap_ids_json` is the ticket 07
--- linkage list (empty in ticket 06).
+-- `{code, message, details}` document; `resolved_gap_ids_json` lists the
+-- persistent Gap ids the Admin polling/reconcile flow resolved after a real
+-- active->terminal transition (empty until then).
 --
 -- `dispatched_at_ns` records a successful Collector `backfill.job.start`
 -- acknowledgement, so a queued job that was never dispatched can be cancelled

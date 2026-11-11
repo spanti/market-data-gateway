@@ -20,13 +20,9 @@ observed transition. A Collector restart loses this registry: status for an
 in-flight job then becomes ``unknown`` and the API must record an
 ``interrupted`` failure, never success.
 
-Ticket 07 linkage
------------------
-Persistent Unrecoverable Backfill Gaps are ticket 07. This runner computes the
-missing 1m ranges it encountered inside the requested range and exposes one
-``gap_linker`` callback per finished job (see :class:`BackfillJobGapLink`).
-Ticket 07 can register a callback that records those gaps and returns the Gap
-ids it resolved; this ticket always leaves ``resolved_gap_ids`` empty.
+The terminal status document reports the missing 1m ranges the job observed;
+Admin polling/reconcile is the only owner of persistent Gaps. This runner
+never reads or writes the Gap store.
 """
 
 from __future__ import annotations
@@ -36,7 +32,6 @@ import logging
 import queue
 import threading
 import time
-from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -66,7 +61,7 @@ from mdgw.backfill_job_status import (
 from mdgw.core.time import datetime_to_ns, to_utc, utc_now
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Iterable, Sequence
     from datetime import datetime
 
     from mdgw.backfill_common import MergeResult
@@ -119,29 +114,6 @@ class _JobFailedError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
-
-
-@dataclass(frozen=True)
-class BackfillJobGapLink:
-    """Ticket 07 linkage: one finished job and the gaps it saw.
-
-    ``gap_ranges`` are contiguous groups of missing 1m identities inside the
-    requested range, as ``(start_ns, end_ns)`` half-open pairs. The callback
-    returns the persistent Gap ids (if any) that this job resolved; only a
-    ``succeeded`` job may resolve a gap, and that rule belongs to ticket 07.
-    """
-
-    job_id: str
-    instrument_id: str
-    interval: str
-    start_ns: int
-    end_ns: int
-    gap_ranges: tuple[tuple[int, int], ...]
-    outcome: str
-    feed: str = ""
-
-
-GapLinker = Callable[[BackfillJobGapLink], Iterable[str]]
 
 
 class BackfillWriteGate:
@@ -208,8 +180,8 @@ class _JobState:
             "job_id": self.job_id,
             "feed": self.feed,
             "state": self.state,
-            # Ticket 07 linkage: missing 1m ranges observed so far, bounded so
-            # one control-plane frame always fits. Pairs keep frames compact.
+            # Missing 1m ranges observed so far, bounded so one control-plane
+            # frame always fits. Pairs keep frames compact.
             "gap_ranges": [
                 [start_ns, end_ns]
                 for start_ns, end_ns in self.gap_ranges[
@@ -372,13 +344,11 @@ class BackfillJobRunner:
         core: CollectorCore,
         config: GatewayConfig,
         clock: Callable[[], int] | None = None,
-        gap_linker: GapLinker | None = None,
         gate: BackfillWriteGate | None = None,
     ) -> None:
         self._core = core
         self._config = config
         self._clock = time.time_ns if clock is None else clock
-        self.gap_linker = gap_linker
         self._gate = BackfillWriteGate() if gate is None else gate
         self._lock = threading.RLock()
         self._jobs: dict[str, _JobState] = {}
@@ -695,34 +665,6 @@ class BackfillJobRunner:
             job.error = error
             job.finished_at_ns = self._clock()
             job.current_range = None
-            gap_ranges = tuple(job.gap_ranges)
-        linker = self.gap_linker
-        if linker is not None:
-            event = BackfillJobGapLink(
-                job_id=job.job_id,
-                instrument_id=job.instrument_id,
-                interval=job.interval,
-                start_ns=job.start_ns,
-                end_ns=job.end_ns,
-                gap_ranges=gap_ranges,
-                outcome=state,
-                feed=job.feed,
-            )
-            try:
-                resolved = list(linker(event) or ())
-            except Exception:  # ticket 07 linkage must not corrupt the job
-                logger.exception(
-                    "backfill gap linkage failed",
-                    extra={
-                        "event": "collector.backfill_gap_link_failed",
-                        "job_id": job.job_id,
-                    },
-                )
-                resolved = []
-            with self._lock:
-                job.resolved_gap_ids = tuple(
-                    str(gap_id) for gap_id in resolved
-                )
 
 
 def _rejected(job_id: str, reason: str, message: str) -> dict[str, Any]:
@@ -786,8 +728,6 @@ __all__ = [
     "SUCCEEDED",
     "TERMINAL_STATES",
     "UNKNOWN",
-    "BackfillJobGapLink",
     "BackfillJobRunner",
     "BackfillWriteGate",
-    "GapLinker",
 ]

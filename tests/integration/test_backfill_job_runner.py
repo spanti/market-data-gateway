@@ -537,9 +537,11 @@ def test_terminal_snapshot_exposes_feed_and_observed_one_minute_gap_ranges(
         runner.close()
 
     assert snapshot["state"] == "partially_succeeded"
-    # Ticket 07 linkage: the terminal snapshot must carry the real Feed name
-    # and the observed missing 1m ranges as half-open [start_ns, end_ns].
+    # The terminal snapshot must carry the real Feed name and the observed
+    # missing 1m ranges as half-open [start_ns, end_ns]. The Runner never
+    # resolves Gaps itself; Admin reconciliation is the only producer of ids.
     assert snapshot["feed"] == "scripted"
+    assert snapshot["resolved_gap_ids"] == []
     assert snapshot["gap_ranges"] == [
         [datetime_to_ns(_at(10)), datetime_to_ns(_at(12))],
         [datetime_to_ns(_at(20)), datetime_to_ns(_at(21))],
