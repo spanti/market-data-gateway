@@ -8,11 +8,13 @@ documented names and meanings:
 * ``gap_bars`` — missing 1m source identities;
 * ``backfilled_bars`` — source Bars fetched and validated;
 * ``written_bars`` — Bars persisted, including generated parent Bars;
-* ``rejected_bars`` — rows rejected by Validation/Quarantine.
+* ``rejected_bars`` — rows rejected by Validation plus unreadable 1m identities.
 
-``resolved_gap_ids`` stays empty in this ticket: the persistent Gap store and
-the resolution rules belong to ticket 07. The Collector runner exposes the
-linkage hook (see ``mdgw.service.backfill_jobs``).
+``resolved_gap_ids`` lists the persistent Unrecoverable Backfill Gap ids this
+job resolved. Only the Admin polling/reconcile flow fills it, after an actual
+active->terminal transition: a ``succeeded`` document with no observed holes
+may resolve fully contained open Gaps, while other terminal states only link
+them. The Collector status document always reports an empty list.
 """
 
 from __future__ import annotations

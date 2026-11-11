@@ -6,7 +6,7 @@ Unlike ``test_admin_gaps_job_link.py``, the Collector here is a real
 ``BackfillJobRunner`` behind a real loopback control plane. The Admin dispatches
 a queued job through that control plane, polls the real Runner status document,
 persists the active->terminal transition through ``BackfillJobStore`` and only
-then reconciles persistent Gaps. No ``gap_linker`` is injected and the
+then reconciles persistent Gaps. Admin polling is the sole Gap owner; the
 active->terminal persistence gate is never bypassed.
 
 Covered outcomes:
