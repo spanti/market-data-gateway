@@ -27,6 +27,7 @@ from mdgw.service.backfill_jobs import BackfillJobRunner
 from mdgw.service.collector_core import CollectorCore
 from mdgw.state.high_water_mark import HighWaterMarkStore
 from mdgw.store.parquet_dataset import ParquetBarStore
+from tests.characterization.backfill_support import raw_bar
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
@@ -94,6 +95,32 @@ class RecordingHistoryFeed(FakeFeedHandler):
             msg = f"Backfill Job asked for a native {interval} history"
             raise AssertionError(msg)
         return super().fetch_history(instrument_id, interval, start, end)
+
+
+class FailingHistoryFeed:
+    """A history-capable Feed Handler whose fetch raises on demand."""
+
+    name = "failing"
+    instrument_ids = (INSTRUMENT,)
+    supports_history = True
+
+    def __init__(self) -> None:
+        self.error: Exception = RuntimeError("venue history unavailable")
+
+    def iter_bars(self) -> Iterator[RawBar]:
+        return iter(())
+
+    def feed_status(self):
+        return ()
+
+    def fetch_history(
+        self,
+        instrument_id: str,
+        interval: str,
+        start: datetime,
+        end: datetime,
+    ) -> Iterable[RawBar]:
+        raise self.error
 
 
 class ScriptedHistoryFeed:
@@ -472,6 +499,67 @@ def test_missing_and_rejected_rows_make_the_job_partially_succeed(dataset) -> No
     assert len(_rows(store, "1m")) == 57
 
 
+def test_raw_input_rules_are_visible_through_public_status_and_dataset(
+    dataset,
+) -> None:
+    store, _hwm = dataset
+    # Minute 7 is only present as an unreadable identity below.
+    missing = {3, 4, 7}
+    raws = [
+        raw_bar(_at(minute)) for minute in range(10) if minute not in missing
+    ]
+    raws.extend(
+        [
+            # Raw de-duplication happens before Normalization: last row wins.
+            raw_bar(_at(0), close="200", high="201"),
+            # A non-1m row and a 1m row outside the execution range are
+            # ignored, not rejected.
+            raw_bar(_at(2), interval="5m"),
+            raw_bar(_at(10)),
+            # An unreadable identity is counted as rejected.
+            raw_bar(datetime(2024, 1, 1, 0, 7)),
+        ]
+    )
+    feed = ScriptedHistoryFeed(factory=lambda _start, _end: raws)
+    runner = _start_runner(_core(feed, dataset))
+    try:
+        runner.start_job(
+            job_id="bf_raw_rules",
+            instrument_id=INSTRUMENT,
+            interval="1m",
+            start_ns=datetime_to_ns(_at(0)),
+            end_ns=datetime_to_ns(_at(10)),
+            mode="native_interval",
+        )
+        snapshot = _wait(runner, "bf_raw_rules")
+    finally:
+        runner.close()
+
+    assert snapshot["state"] == "partially_succeeded"
+    assert snapshot["counters"] == {
+        "scanned_bars": 10,
+        "gap_bars": 3,  # minutes 3, 4 and the unreadable minute 7
+        "backfilled_bars": 7,
+        "written_bars": 7,
+        "rejected_bars": 1,
+    }
+    assert snapshot["gap_ranges"] == [
+        [datetime_to_ns(_at(3)), datetime_to_ns(_at(5))],
+        [datetime_to_ns(_at(7)), datetime_to_ns(_at(8))],
+    ]
+
+    by_open = _by_open(store, "1m")
+    assert set(by_open) == {
+        datetime_to_ns(_at(minute)) for minute in (0, 1, 2, 5, 6, 8, 9)
+    }
+    # The duplicate's last raw value wins and is the only row for that minute.
+    assert [row["close"] for row in by_open[datetime_to_ns(_at(0))]] == [
+        Decimal(200)
+    ]
+    # Wrong-interval and out-of-range rows never reached the Dataset.
+    assert _rows(store, "5m") == []
+
+
 def test_terminal_snapshot_exposes_feed_and_observed_one_minute_gap_ranges(
     dataset,
 ) -> None:
@@ -511,9 +599,11 @@ def test_terminal_snapshot_exposes_feed_and_observed_one_minute_gap_ranges(
         runner.close()
 
     assert snapshot["state"] == "partially_succeeded"
-    # Ticket 07 linkage: the terminal snapshot must carry the real Feed name
-    # and the observed missing 1m ranges as half-open [start_ns, end_ns].
+    # The terminal snapshot must carry the real Feed name and the observed
+    # missing 1m ranges as half-open [start_ns, end_ns]. The Runner never
+    # resolves Gaps itself; Admin reconciliation is the only producer of ids.
     assert snapshot["feed"] == "scripted"
+    assert snapshot["resolved_gap_ids"] == []
     assert snapshot["gap_ranges"] == [
         [datetime_to_ns(_at(10)), datetime_to_ns(_at(12))],
         [datetime_to_ns(_at(20)), datetime_to_ns(_at(21))],
@@ -545,6 +635,46 @@ def test_history_unsupported_fails_without_faking_success(dataset) -> None:
     assert snapshot["error"]["code"] == "history_unsupported"
     assert snapshot["counters"]["written_bars"] == 0
     assert _rows(store, "1m") == []
+
+
+def test_history_fetch_failures_keep_the_stable_error_document(dataset) -> None:
+    feed = FailingHistoryFeed()
+    runner = _start_runner(_core(feed, dataset))
+    try:
+        runner.start_job(
+            job_id="bf_fetch_failed",
+            instrument_id=INSTRUMENT,
+            interval="1m",
+            start_ns=datetime_to_ns(_at(0)),
+            end_ns=datetime_to_ns(_at(0, hour=1)),
+            mode="native_interval",
+        )
+        failed = _wait(runner, "bf_fetch_failed")
+        assert failed["state"] == "failed"
+        assert failed["error"] == {
+            "code": "backfill_failed",
+            "message": "the Backfill history fetch failed",
+            "details": {},
+        }
+
+        feed.error = NotImplementedError("no history source")
+        runner.start_job(
+            job_id="bf_fetch_unsupported",
+            instrument_id=INSTRUMENT,
+            interval="1h",
+            start_ns=datetime_to_ns(_at(0)),
+            end_ns=datetime_to_ns(_at(0, hour=1)),
+            mode="one_minute_plus_aggregation",
+        )
+        unsupported = _wait(runner, "bf_fetch_unsupported")
+        assert unsupported["state"] == "failed"
+        assert unsupported["error"] == {
+            "code": "history_unsupported",
+            "message": "the Feed Handler cannot serve Backfill history",
+            "details": {},
+        }
+    finally:
+        runner.close()
 
 
 def test_cancellation_between_chunks_keeps_written_revisions(dataset) -> None:

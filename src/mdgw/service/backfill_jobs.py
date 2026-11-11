@@ -1,4 +1,4 @@
-# ruff: file-ignore[too-many-arguments,too-many-branches,too-many-locals,too-many-statements]
+# ruff: file-ignore[too-many-arguments]
 """Collector-side Backfill Job executor (Admin ticket 06).
 
 The Admin API never writes the Dataset. A Backfill Job is persisted by the
@@ -20,13 +20,9 @@ observed transition. A Collector restart loses this registry: status for an
 in-flight job then becomes ``unknown`` and the API must record an
 ``interrupted`` failure, never success.
 
-Ticket 07 linkage
------------------
-Persistent Unrecoverable Backfill Gaps are ticket 07. This runner computes the
-missing 1m ranges it encountered inside the requested range and exposes one
-``gap_linker`` callback per finished job (see :class:`BackfillJobGapLink`).
-Ticket 07 can register a callback that records those gaps and returns the Gap
-ids it resolved; this ticket always leaves ``resolved_gap_ids`` empty.
+The terminal status document reports the missing 1m ranges the job observed;
+Admin polling/reconcile is the only owner of persistent Gaps. This runner
+never reads or writes the Gap store.
 """
 
 from __future__ import annotations
@@ -36,13 +32,17 @@ import logging
 import queue
 import threading
 import time
-from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mdgw.aggregate import BarAggregator
-from mdgw.backfill_common import merge_bar_batch
+from mdgw.backfill_execution import (
+    BackfillExecution,
+    BackfillRange,
+    PreparedInput,
+    RawBatch,
+)
 from mdgw.backfill_job_plan import (
     BASE_INTERVAL,
     plan_for_interval,
@@ -58,14 +58,17 @@ from mdgw.backfill_job_status import (
     SUCCEEDED,
     TERMINAL_STATUSES,
 )
-from mdgw.core.time import datetime_to_ns, ns_to_datetime, to_utc, utc_now
-from mdgw.normalize.batch import normalize_batch
+from mdgw.core.time import datetime_to_ns, to_utc, utc_now
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Iterable, Sequence
+    from datetime import datetime
 
+    from mdgw.backfill_common import MergeResult
     from mdgw.config import GatewayConfig
-    from mdgw.core.bar import RawBar
+    from mdgw.core.bar import Bar, RawBar
+    from mdgw.ingest.feed_handler import FeedHandler
+    from mdgw.normalize.batch import BatchNormalization
     from mdgw.service.collector_core import CollectorCore
 
 logger = logging.getLogger(__name__)
@@ -111,29 +114,6 @@ class _JobFailedError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
-
-
-@dataclass(frozen=True)
-class BackfillJobGapLink:
-    """Ticket 07 linkage: one finished job and the gaps it saw.
-
-    ``gap_ranges`` are contiguous groups of missing 1m identities inside the
-    requested range, as ``(start_ns, end_ns)`` half-open pairs. The callback
-    returns the persistent Gap ids (if any) that this job resolved; only a
-    ``succeeded`` job may resolve a gap, and that rule belongs to ticket 07.
-    """
-
-    job_id: str
-    instrument_id: str
-    interval: str
-    start_ns: int
-    end_ns: int
-    gap_ranges: tuple[tuple[int, int], ...]
-    outcome: str
-    feed: str = ""
-
-
-GapLinker = Callable[[BackfillJobGapLink], Iterable[str]]
 
 
 class BackfillWriteGate:
@@ -200,8 +180,8 @@ class _JobState:
             "job_id": self.job_id,
             "feed": self.feed,
             "state": self.state,
-            # Ticket 07 linkage: missing 1m ranges observed so far, bounded so
-            # one control-plane frame always fits. Pairs keep frames compact.
+            # Missing 1m ranges observed so far, bounded so one control-plane
+            # frame always fits. Pairs keep frames compact.
             "gap_ranges": [
                 [start_ns, end_ns]
                 for start_ns, end_ns in self.gap_ranges[
@@ -221,6 +201,133 @@ class _JobState:
         }
 
 
+class _JobHistoryFeed:
+    """Narrow Feed proxy that keeps the Job's stable fetch error document.
+
+    The shared execution module performs the history fetch. A
+    ``NotImplementedError`` and any other fetch failure must still become the
+    same terminal ``error`` code and message the Runner produced before the
+    migration, so the translation lives at this adapter boundary instead of
+    leaking into the generic execution-failure path.
+    """
+
+    def __init__(self, feed: FeedHandler) -> None:
+        self._feed = feed
+        self.name = str(getattr(feed, "name", ""))
+
+    def fetch_history(
+        self,
+        instrument_id: str,
+        interval: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[RawBar]:
+        try:
+            return list(
+                self._feed.fetch_history(instrument_id, interval, start, end)
+            )
+        except NotImplementedError as exc:
+            raise _JobFailedError(
+                HISTORY_UNSUPPORTED,
+                "the Feed Handler cannot serve Backfill history",
+            ) from exc
+        except Exception as exc:
+            # Bounded detail only: no raw exception text, no venue call.
+            raise _JobFailedError(
+                BACKFILL_FAILED,
+                "the Backfill history fetch failed",
+            ) from exc
+
+
+class _JobExecutionStrategy:
+    """The Backfill Job's adapter for one shared execution range.
+
+    ``prepare`` keeps the Job's raw-input rules exactly: ignore non-``1m`` and
+    out-of-range rows, de-duplicate by ``open_ts`` before Normalization (last
+    row wins), count unreadable identities as rejected, and derive missing
+    minute ``gap_ranges`` against the full range grid. The observer maps each
+    shared phase to the Job's five counters at their historical points and
+    turns the cooperative cancel flag into the three in-range checkpoints.
+    Raising here aborts before the next persistence call.
+    """
+
+    def __init__(self, *, lock: Any, job: _JobState) -> None:
+        self._lock = lock
+        self._job = job
+
+    @staticmethod
+    def prepare(
+        raw_bars: Sequence[RawBar],
+        *,
+        start_ns: int,
+        end_ns: int,
+    ) -> PreparedInput:
+        by_open: dict[int, RawBar] = {}
+        unreadable = 0
+        for raw in raw_bars:
+            if getattr(raw, "interval", None) != BASE_INTERVAL:
+                continue
+            try:
+                open_ns = datetime_to_ns(to_utc(raw.open_ts))
+            except (TypeError, ValueError, OverflowError, OSError):
+                # Counted as a rejected row by Validation; one unreadable
+                # identity must not abort the whole range.
+                unreadable += 1
+                continue
+            if start_ns <= open_ns < end_ns:
+                by_open[open_ns] = raw
+        missing = sorted(
+            set(range(start_ns, end_ns, NANOS_PER_MINUTE)) - set(by_open)
+        )
+        ordered = sorted(by_open)
+        return PreparedInput(
+            rows=tuple(by_open[key] for key in ordered),
+            open_ns=tuple(ordered),
+            unreadable_bars=unreadable,
+            gap_ranges=tuple(_contiguous_ranges(missing, NANOS_PER_MINUTE)),
+        )
+
+    @staticmethod
+    def read_bounds(batch: RawBatch) -> tuple[int, int]:
+        return batch.open_ns[0], batch.open_ns[-1] + NANOS_PER_MINUTE
+
+    @staticmethod
+    def handle_rejections(_batch: BatchNormalization) -> None:
+        """Validation rejections are counted; accepted Bars keep flowing."""
+
+    def after_fetch(self, _raw_bars: Sequence[RawBar]) -> None:
+        self._raise_if_cancelled()
+
+    def after_prepare(self, prepared: PreparedInput) -> None:
+        missing = sum(
+            (end_ns - start_ns) // NANOS_PER_MINUTE
+            for start_ns, end_ns in prepared.gap_ranges
+        )
+        with self._lock:
+            self._job.counters["gap_bars"] += missing
+            self._job.counters["rejected_bars"] += prepared.unreadable_bars
+            self._job.gap_ranges.extend(prepared.gap_ranges)
+
+    def before_batch(self, _batch: RawBatch) -> None:
+        self._raise_if_cancelled()
+
+    def after_normalize(self, batch: BatchNormalization) -> None:
+        with self._lock:
+            self._job.counters["rejected_bars"] += len(batch.rejections)
+            self._job.counters["backfilled_bars"] += len(batch.bars)
+
+    def after_merge(self, _merged: MergeResult) -> None:
+        self._raise_if_cancelled()
+
+    def after_persist(self, written: Sequence[Bar]) -> None:
+        with self._lock:
+            self._job.counters["written_bars"] += len(written)
+
+    def _raise_if_cancelled(self) -> None:
+        if self._job.cancel_event.is_set():
+            raise _JobCancelledError
+
+
 class BackfillJobRunner:
     """Executes Admin Backfill Jobs inside the Collector process.
 
@@ -237,13 +344,11 @@ class BackfillJobRunner:
         core: CollectorCore,
         config: GatewayConfig,
         clock: Callable[[], int] | None = None,
-        gap_linker: GapLinker | None = None,
         gate: BackfillWriteGate | None = None,
     ) -> None:
         self._core = core
         self._config = config
         self._clock = time.time_ns if clock is None else clock
-        self.gap_linker = gap_linker
         self._gate = BackfillWriteGate() if gate is None else gate
         self._lock = threading.RLock()
         self._jobs: dict[str, _JobState] = {}
@@ -486,8 +591,15 @@ class BackfillJobRunner:
                 self._config.aggregation.retention_parent_periods
             ),
         )
+        execution = BackfillExecution(
+            feed=_JobHistoryFeed(feed),
+            store=self._core.store,
+            aggregator=aggregator,
+        )
+        strategy = _JobExecutionStrategy(lock=self._lock, job=job)
         chunk_start = slot_start
         while chunk_start < slot_end:
+            # Cancellation checkpoint 1: before the next fetch chunk.
             if job.cancel_event.is_set():
                 raise _JobCancelledError
             chunk_end = min(chunk_start + CHUNK_NS, slot_end)
@@ -498,85 +610,23 @@ class BackfillJobRunner:
                 }
                 expected = (chunk_end - chunk_start) // NANOS_PER_MINUTE
                 job.counters["scanned_bars"] += int(expected)
-            try:
-                raw_bars = feed.fetch_history(
-                    job.instrument_id,
-                    BASE_INTERVAL,
-                    ns_to_datetime(chunk_start),
-                    ns_to_datetime(chunk_end),
-                )
-                raws = list(raw_bars)
-            except NotImplementedError as exc:
-                raise _JobFailedError(
-                    HISTORY_UNSUPPORTED,
-                    "the Feed Handler cannot serve Backfill history",
-                ) from exc
-            except Exception as exc:
-                # Bounded detail only: no raw exception text, no venue call.
-                raise _JobFailedError(
-                    BACKFILL_FAILED,
-                    "the Backfill history fetch failed",
-                ) from exc
-            if job.cancel_event.is_set():
-                raise _JobCancelledError
-
-            by_open: dict[int, RawBar] = {}
-            unreadable = 0
-            for raw in raws:
-                if getattr(raw, "interval", None) != BASE_INTERVAL:
-                    continue
-                try:
-                    open_ns = datetime_to_ns(to_utc(raw.open_ts))
-                except (TypeError, ValueError, OverflowError, OSError):
-                    # Counted as a rejected row by Validation; one unreadable
-                    # identity must not abort the whole range.
-                    unreadable += 1
-                    continue
-                if chunk_start <= open_ns < chunk_end:
-                    by_open[open_ns] = raw
-            missing = sorted(
-                set(range(chunk_start, chunk_end, NANOS_PER_MINUTE))
-                - set(by_open)
-            )
-            gap_ranges = _contiguous_ranges(missing, NANOS_PER_MINUTE)
-            with self._lock:
-                job.counters["gap_bars"] += len(missing)
-                job.counters["rejected_bars"] += unreadable
-                job.gap_ranges.extend(gap_ranges)
-
-            ordered = sorted(by_open)
-            for offset in range(0, len(ordered), BATCH_BARS):
-                if job.cancel_event.is_set():
-                    raise _JobCancelledError
-                keys = ordered[offset : offset + BATCH_BARS]
-                batch = normalize_batch(
-                    [by_open[key] for key in keys],
-                    feed=feed.name,
-                    ingest_ts=utc_now(),
-                )
-                with self._lock:
-                    job.counters["rejected_bars"] += len(batch.rejections)
-                    job.counters["backfilled_bars"] += len(batch.bars)
-                bars = batch.bars
-                if not bars:
-                    continue
-                result = merge_bar_batch(
-                    store=self._core.store,
-                    aggregator=aggregator,
+            # The shared execution owns fetch, raw preparation, Normalization,
+            # Revision/parent merge, the Job persistence adapter and the three
+            # in-range cancellation checkpoints.
+            execution.execute(
+                BackfillRange(
                     instrument_id=job.instrument_id,
-                    base_bars=bars,
-                    read_start_ns=keys[0],
-                    read_end_ns=keys[-1] + NANOS_PER_MINUTE,
-                )
-                if job.cancel_event.is_set():
-                    # Cancellation lands between batches: Bars already merged
-                    # in this batch are not written, and nothing ever retracts
-                    # a previously written Revision.
-                    raise _JobCancelledError
-                if result.written:
-                    self._core.persist_backfill_bars(result.written)
-                    with self._lock:
-                        job.counters["written_bars"] += len(result.written)
+                    start_ns=chunk_start,
+                    end_ns=chunk_end,
+                ),
+                persist=self._core.persist_backfill_bars,
+                ingest_ts=utc_now,
+                batch_size=BATCH_BARS,
+                prepare=strategy.prepare,
+                handle_rejections=strategy.handle_rejections,
+                read_bounds=strategy.read_bounds,
+                observer=strategy,
+            )
             chunk_start = chunk_end
 
         with self._lock:
@@ -615,34 +665,6 @@ class BackfillJobRunner:
             job.error = error
             job.finished_at_ns = self._clock()
             job.current_range = None
-            gap_ranges = tuple(job.gap_ranges)
-        linker = self.gap_linker
-        if linker is not None:
-            event = BackfillJobGapLink(
-                job_id=job.job_id,
-                instrument_id=job.instrument_id,
-                interval=job.interval,
-                start_ns=job.start_ns,
-                end_ns=job.end_ns,
-                gap_ranges=gap_ranges,
-                outcome=state,
-                feed=job.feed,
-            )
-            try:
-                resolved = list(linker(event) or ())
-            except Exception:  # ticket 07 linkage must not corrupt the job
-                logger.exception(
-                    "backfill gap linkage failed",
-                    extra={
-                        "event": "collector.backfill_gap_link_failed",
-                        "job_id": job.job_id,
-                    },
-                )
-                resolved = []
-            with self._lock:
-                job.resolved_gap_ids = tuple(
-                    str(gap_id) for gap_id in resolved
-                )
 
 
 def _rejected(job_id: str, reason: str, message: str) -> dict[str, Any]:
@@ -706,8 +728,6 @@ __all__ = [
     "SUCCEEDED",
     "TERMINAL_STATES",
     "UNKNOWN",
-    "BackfillJobGapLink",
     "BackfillJobRunner",
     "BackfillWriteGate",
-    "GapLinker",
 ]
