@@ -1,4 +1,4 @@
-# ruff: file-ignore[implicit-namespace-package,hardcoded-password-string]
+# ruff: file-ignore[implicit-namespace-package]
 # ruff: file-ignore[no-self-use,unused-method-argument]
 """Real Runner terminal document -> Admin polling -> persistent Gap.
 
@@ -23,27 +23,17 @@ import time
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mdgw.admin.audit.models import AuditQuery
-from mdgw.admin.context import AdminContext
-from mdgw.admin.gaps.models import (
-    GAP_HISTORY_MISSING,
-    GAP_HISTORY_UNSUPPORTED,
-    SOURCE_COLLECTOR_PROCESS,
-)
+from mdgw.admin.gaps.models import GAP_HISTORY_MISSING
 from mdgw.admin.jobs.models import (
     PARTIALLY_SUCCEEDED,
     SUCCEEDED,
     BackfillJobRecord,
     BackfillJobRequest,
 )
-from mdgw.config import (
-    AdminAdaptersConfig,
-    AdminConfig,
-    AdminControlConfig,
-    load_config,
-)
+from mdgw.config import load_config
 from mdgw.core.bar import RawBar
 from mdgw.core.time import datetime_to_ns
 from mdgw.service.backfill_jobs import BackfillJobRunner
@@ -58,14 +48,20 @@ from mdgw.service.control_plane import (
 )
 from mdgw.state.high_water_mark import HighWaterMarkStore
 from mdgw.store.parquet_dataset import ParquetBarStore
+from tests.characterization.admin_gap_job_support import (
+    BTC,
+    FEED,
+    HOST,
+    TOKEN,
+    admin_context,
+    seed_gap,
+    wait_terminal,
+)
+
+if TYPE_CHECKING:
+    from mdgw.admin.context import AdminContext
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-HOST = "127.0.0.1"
-TOKEN_ENV = "MDGW_TEST_REAL_GAP_TOKEN"
-TOKEN = "real-gap-token"
-BTC = "binance:BTC/USDT"
-FEED = "binance_spot"
-TERMINAL = {SUCCEEDED, PARTIALLY_SUCCEEDED, "failed", "cancelled"}
 
 
 def _at(minute: int = 0, *, hour: int = 0) -> datetime:
@@ -168,27 +164,6 @@ class RealCollector:
         self.store.close()
 
 
-def _context(tmp_path: Path, port: int) -> AdminContext:
-    config = AdminConfig(
-        enabled=True,
-        db_path=tmp_path / "admin" / "admin.db",
-        adapters=AdminAdaptersConfig(
-            oidc=False, audit_store=True, collector_control=True
-        ),
-        control=AdminControlConfig(
-            collector_host=HOST,
-            collector_port=port,
-            token_env=TOKEN_ENV,
-            timeout_s=1.0,
-        ),
-    )
-    return AdminContext(
-        config=config,
-        storage_root=tmp_path,
-        environ={TOKEN_ENV: TOKEN},
-    )
-
-
 def _create_queued_job(
     context: AdminContext,
     job_id: str,
@@ -217,20 +192,6 @@ def _create_queued_job(
     return record
 
 
-def _wait_terminal(
-    context: AdminContext, job_id: str, *, timeout: float = 20.0
-) -> BackfillJobRecord:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        record = context.backfill.store.get(job_id)
-        if record is not None and record.status in TERMINAL:
-            return record
-        context.backfill.advance_once()
-        time.sleep(0.02)
-    msg = f"job did not finish: {context.backfill.store.get(job_id)}"
-    raise AssertionError(msg)
-
-
 def _wait_until(predicate, *, timeout: float = 10.0, message: str) -> Any:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -241,25 +202,6 @@ def _wait_until(predicate, *, timeout: float = 10.0, message: str) -> Any:
     raise AssertionError(message)
 
 
-def _seed_gap(
-    context: AdminContext,
-    *,
-    start_ns: int,
-    end_ns: int,
-) -> str:
-    gap = context.gaps.service.store.upsert_discovery(
-        source=SOURCE_COLLECTOR_PROCESS,
-        feed=FEED,
-        instrument_id=BTC,
-        interval="1m",
-        start_ns=start_ns,
-        end_ns=end_ns,
-        reason=GAP_HISTORY_UNSUPPORTED,
-        observed_at_ns=_ns(0),
-    )
-    return gap.gap_id
-
-
 def test_real_runner_observed_history_missing_becomes_a_persistent_gap(
     tmp_path: Path,
 ) -> None:
@@ -267,10 +209,10 @@ def test_real_runner_observed_history_missing_becomes_a_persistent_gap(
         tmp_path / "collector",
         feed=RealHistoryFeed([minute for minute in range(10) if minute not in {3, 4}]),
     )
-    context = _context(tmp_path, collector.port)
+    context = admin_context(tmp_path, collector.port)
     try:
         _create_queued_job(context, "bf_real_missing")
-        record = _wait_terminal(context, "bf_real_missing")
+        record = wait_terminal(context, "bf_real_missing")
         rows = _wait_until(
             lambda: (
                 found
@@ -328,11 +270,13 @@ def test_real_runner_success_resolves_a_contained_gap_and_audits_it(
         tmp_path / "collector",
         feed=RealHistoryFeed(list(range(10))),
     )
-    context = _context(tmp_path, collector.port)
+    context = admin_context(tmp_path, collector.port)
     try:
-        gap_id = _seed_gap(context, start_ns=_ns(2), end_ns=_ns(5))
+        gap_id = seed_gap(
+            context, start_ns=_ns(2), end_ns=_ns(5), observed_at_ns=_ns(0)
+        )
         _create_queued_job(context, "bf_real_success")
-        _wait_terminal(context, "bf_real_success")
+        wait_terminal(context, "bf_real_success")
         resolved_record = _wait_until(
             lambda: (
                 latest
@@ -391,11 +335,13 @@ def test_real_runner_partial_links_but_never_resolves_a_contained_gap(
         tmp_path / "collector",
         feed=RealHistoryFeed([minute for minute in range(10) if minute not in {3, 4}]),
     )
-    context = _context(tmp_path, collector.port)
+    context = admin_context(tmp_path, collector.port)
     try:
-        seeded_id = _seed_gap(context, start_ns=_ns(2), end_ns=_ns(5))
+        seeded_id = seed_gap(
+            context, start_ns=_ns(2), end_ns=_ns(5), observed_at_ns=_ns(0)
+        )
         _create_queued_job(context, "bf_real_partial")
-        record = _wait_terminal(context, "bf_real_partial")
+        record = wait_terminal(context, "bf_real_partial")
         seeded = _wait_until(
             lambda: (
                 current

@@ -16,7 +16,6 @@ fields, Job counters, health, gap types or terminal state.
 
 from __future__ import annotations
 
-import time
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -33,7 +32,6 @@ from tests.characterization.backfill_support import (
     BASE_INTERVALS,
     FEED,
     INSTRUMENT,
-    TERMINAL_STATES,
     StaticHistoryFeed,
     at,
     config,
@@ -41,6 +39,7 @@ from tests.characterization.backfill_support import (
     logical_bars,
     raw_bar,
     rows_by_open,
+    wait_for_terminal,
 )
 
 if TYPE_CHECKING:
@@ -55,17 +54,6 @@ def _history(*, corrected_minute: int | None = None) -> list:
         else:
             raws.append(raw_bar(at(minute)))
     return raws
-
-
-def _wait(runner: BackfillJobRunner, job_id: str) -> dict:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        snapshot = runner.status(job_id)
-        if snapshot["state"] in TERMINAL_STATES:
-            return snapshot
-        time.sleep(0.01)
-    msg = f"job did not finish: {runner.status(job_id)}"
-    raise AssertionError(msg)
 
 
 class _JobEntry:
@@ -101,7 +89,7 @@ class _JobEntry:
             mode="native_interval",
         )
         assert accepted["accepted"] is True, accepted
-        return _wait(self.runner, job_id)
+        return wait_for_terminal(self.runner, job_id)
 
     def set_history(self, history: list) -> None:
         self.feed.set_history(history)
@@ -272,7 +260,7 @@ def test_job_rejections_are_counted_and_accepted_bars_are_still_written(
             mode="native_interval",
         )
         assert accepted["accepted"] is True
-        snapshot = _wait(runner, "bf_partial_characterization")
+        snapshot = wait_for_terminal(runner, "bf_partial_characterization")
 
         assert snapshot["state"] == "partially_succeeded"
         assert snapshot["counters"] == {

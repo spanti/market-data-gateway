@@ -11,7 +11,7 @@ chunking, cancellation, counters, gap ownership and public result mapping:
 
 * the automatic adapter executes one whole-instrument window in one batch and
   uses the Core-owned Aggregator with one fixed ``now``;
-* the Backfill Job will execute one day chunk at a time in 500-row batches with
+* the Backfill Job executes one day chunk at a time in 500-row batches with
   a per-job Aggregator and per-batch ingest timestamps.
 
 Nothing here knows about ``CollectorCore``, Admin Job/Gap stores, write gates,

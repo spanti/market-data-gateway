@@ -9,6 +9,7 @@ characterized with these fixtures before the implementation moves.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mdgw.aggregate import BarAggregator
 from mdgw.config import load_config
 from mdgw.core.bar import RawBar
 from mdgw.core.time import datetime_to_ns, ns_to_iso
@@ -25,6 +27,8 @@ from mdgw.store.parquet_dataset import ParquetBarStore
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Sequence
+
+    from mdgw.service.backfill_jobs import BackfillJobRunner
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 INSTRUMENT = "binance:BTC/USDT"
@@ -40,6 +44,33 @@ def config(*, backfill_hours: float = 24):
     server = loaded.server.model_copy(update={"http_port": 0})
     collector = loaded.collector.model_copy(update={"backfill_hours": backfill_hours})
     return loaded.model_copy(update={"server": server, "collector": collector})
+
+
+def bar_aggregator() -> BarAggregator:
+    """The configured internal Aggregator used by both Backfill entries."""
+    settings = config().aggregation
+    return BarAggregator(
+        intervals=settings.intervals,
+        base_interval=settings.base_interval,
+        retention_parent_periods=settings.retention_parent_periods,
+    )
+
+
+def wait_for_terminal(
+    runner: BackfillJobRunner,
+    job_id: str,
+    *,
+    timeout_s: float = 15.0,
+) -> dict:
+    """Poll the public Runner status document until a terminal state."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        snapshot = runner.status(job_id)
+        if snapshot["state"] in TERMINAL_STATES:
+            return snapshot
+        time.sleep(0.01)
+    msg = f"job did not finish: {runner.status(job_id)}"
+    raise AssertionError(msg)
 
 
 def at(minute: int = 0, *, hour: int = 0, day: int = 1) -> datetime:

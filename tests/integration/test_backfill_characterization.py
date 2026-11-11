@@ -20,13 +20,11 @@ Covered here:
 
 from __future__ import annotations
 
-import time
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import pytest
 
-from mdgw.aggregate import BarAggregator
 from mdgw.backfill import run_backfill
 from mdgw.core.time import datetime_to_ns
 from mdgw.ingest.fake import FakeFeedHandler
@@ -44,6 +42,7 @@ from tests.characterization.backfill_support import (
     OTHER_INSTRUMENT,
     StaticHistoryFeed,
     at,
+    bar_aggregator,
     bar_input,
     config,
     count_rows,
@@ -51,20 +50,12 @@ from tests.characterization.backfill_support import (
     open_dataset,
     raw_bar,
     rows_by_open,
+    wait_for_terminal,
 )
 from tests.characterization.dataset_builder import make_bar
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-def _aggregator() -> BarAggregator:
-    settings = config().aggregation
-    return BarAggregator(
-        intervals=settings.intervals,
-        base_interval=settings.base_interval,
-        retention_parent_periods=settings.retention_parent_periods,
-    )
 
 
 def _run(  # ruff: ignore[too-many-arguments]
@@ -80,28 +71,12 @@ def _run(  # ruff: ignore[too-many-arguments]
         feed_handler=feed,
         store=store,
         hwm=hwm,
-        aggregator=_aggregator(),
+        aggregator=bar_aggregator(),
         health=health if health is not None else HealthTracker(),
         asset_class_for=lambda _instrument_id: "crypto",
         now=at(10) if now is None else now,
         backfill_hours=backfill_hours,
     )
-
-
-def _wait(runner: BackfillJobRunner, job_id: str) -> dict:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        snapshot = runner.status(job_id)
-        if snapshot["state"] in {
-            "succeeded",
-            "partially_succeeded",
-            "failed",
-            "cancelled",
-        }:
-            return snapshot
-        time.sleep(0.01)
-    msg = f"job did not finish: {runner.status(job_id)}"
-    raise AssertionError(msg)
 
 
 def _start_job(
@@ -120,7 +95,7 @@ def _start_job(
         mode="native_interval",
     )
     assert accepted["accepted"] is True, accepted
-    return _wait(runner, job_id)
+    return wait_for_terminal(runner, job_id)
 
 
 class RecordingHealth(HealthTracker):

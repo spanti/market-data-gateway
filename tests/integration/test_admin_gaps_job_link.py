@@ -1,4 +1,4 @@
-# ruff: file-ignore[implicit-namespace-package,hardcoded-password-string]
+# ruff: file-ignore[implicit-namespace-package]
 """Finished Backfill Jobs update persistent Gaps through the real API runtime.
 
 The Collector is simulated by a real loopback control plane that returns
@@ -15,24 +15,14 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from mdgw.admin.audit.models import AuditQuery
-from mdgw.admin.context import AdminContext
-from mdgw.admin.gaps.models import (
-    GAP_HISTORY_UNSUPPORTED,
-    SOURCE_COLLECTOR_PROCESS,
-)
+from mdgw.admin.gaps.models import GAP_HISTORY_UNSUPPORTED
 from mdgw.admin.gaps.runtime import GapRuntime
 from mdgw.admin.jobs.models import (
     PARTIALLY_SUCCEEDED,
     RUNNING,
     SUCCEEDED,
-    BackfillJobRecord,
     BackfillJobRequest,
     empty_counters,
-)
-from mdgw.config import (
-    AdminAdaptersConfig,
-    AdminConfig,
-    AdminControlConfig,
 )
 from mdgw.service.control_plane import (
     BACKFILL_JOB_CANCEL_ACTION,
@@ -42,13 +32,19 @@ from mdgw.service.control_plane import (
     ControlPlaneServer,
     collector_control_registry,
 )
+from tests.characterization.admin_gap_job_support import (
+    HOST,
+    TOKEN,
+    admin_context,
+    seed_gap,
+    wait_terminal,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-HOST = "127.0.0.1"
-TOKEN_ENV = "MDGW_TEST_GAP_LINK_TOKEN"
-TOKEN = "gap-link-token"
+    from mdgw.admin.context import AdminContext
+
 BTC = "binance:BTC/USDT"
 SECOND = 1_000_000_000
 BASE_NS = 1_700_000_000 * SECOND
@@ -119,27 +115,6 @@ class FakeCollector:
         self.server.stop()
 
 
-def _context(tmp_path: Path, port: int) -> AdminContext:
-    config = AdminConfig(
-        enabled=True,
-        db_path=tmp_path / "admin" / "admin.db",
-        adapters=AdminAdaptersConfig(
-            oidc=False, audit_store=True, collector_control=True
-        ),
-        control=AdminControlConfig(
-            collector_host=HOST,
-            collector_port=port,
-            token_env=TOKEN_ENV,
-            timeout_s=1.0,
-        ),
-    )
-    return AdminContext(
-        config=config,
-        storage_root=tmp_path,
-        environ={TOKEN_ENV: TOKEN},
-    )
-
-
 def test_the_snapshot_poller_refreshes_on_a_bounded_interval(
     tmp_path: Path,
 ) -> None:
@@ -156,7 +131,7 @@ def test_the_snapshot_poller_refreshes_on_a_bounded_interval(
         _terminal_status("bf_none", state=SUCCEEDED),
         snapshot_gaps=[event],
     )
-    context = _context(tmp_path, collector.port)
+    context = admin_context(tmp_path, collector.port)
     context.ensure_open()
     runtime = GapRuntime(context, poll_interval_s=0.02)
     runtime.start()
@@ -240,52 +215,15 @@ def _insert_running_job(
     context.backfill.store.mark_dispatched(job_id, BASE_NS)
 
 
-def _seed_gap(
-    context: AdminContext,
-    *,
-    start_ns: int = BASE_NS + MINUTE_NS,
-    end_ns: int = BASE_NS + 10 * MINUTE_NS,
-    instrument_id: str = BTC,
-) -> str:
-    gap = context.gaps.service.store.upsert_discovery(
-        source=SOURCE_COLLECTOR_PROCESS,
-        feed="binance_spot",
-        instrument_id=instrument_id,
-        interval="1m",
-        start_ns=start_ns,
-        end_ns=end_ns,
-        reason=GAP_HISTORY_UNSUPPORTED,
-        observed_at_ns=BASE_NS,
-    )
-    return gap.gap_id
-
-
-def _wait_terminal(context: AdminContext, job_id: str) -> BackfillJobRecord:
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        record = context.backfill.store.get(job_id)
-        if record is not None and record.status in {
-            SUCCEEDED,
-            PARTIALLY_SUCCEEDED,
-            "failed",
-            "cancelled",
-        }:
-            return record
-        context.backfill.advance_once()
-        time.sleep(0.02)
-    msg = f"job did not finish: {context.backfill.store.get(job_id)}"
-    raise AssertionError(msg)
-
-
 def test_a_succeeded_job_resolves_contained_gaps_and_persists_the_ids(
     tmp_path: Path,
 ) -> None:
     collector = FakeCollector(_terminal_status("bf_success", state=SUCCEEDED))
-    context = _context(tmp_path, collector.port)
+    context = admin_context(tmp_path, collector.port)
     try:
-        gap_id = _seed_gap(context)
+        gap_id = seed_gap(context)
         _insert_running_job(context, "bf_success")
-        record = _wait_terminal(context, "bf_success")
+        record = wait_terminal(context, "bf_success", timeout_s=10.0)
         gap = context.gaps.service.get(gap_id)
         audit_events = context.audit.store.query(
             AuditQuery(action="backfill_gap.resolve", order="asc")
@@ -314,13 +252,13 @@ def test_audit_unavailable_never_fails_or_rolls_back_a_completed_job(
     tmp_path: Path,
 ) -> None:
     collector = FakeCollector(_terminal_status("bf_audit", state=SUCCEEDED))
-    context = _context(tmp_path, collector.port)
+    context = admin_context(tmp_path, collector.port)
     try:
-        gap_id = _seed_gap(context)
+        gap_id = seed_gap(context)
         _insert_running_job(context, "bf_audit")
         # Simulate an audit store that became unavailable mid-flight.
         context.audit.close()
-        record = _wait_terminal(context, "bf_audit")
+        record = wait_terminal(context, "bf_audit", timeout_s=10.0)
         gap = context.gaps.service.get(gap_id)
     finally:
         context.close()
@@ -344,11 +282,11 @@ def test_a_partial_job_links_observed_gaps_but_never_resolves(
             gap_ranges=[observed],
         )
     )
-    context = _context(tmp_path, collector.port)
+    context = admin_context(tmp_path, collector.port)
     try:
-        seeded_id = _seed_gap(context)
+        seeded_id = seed_gap(context)
         _insert_running_job(context, "bf_partial")
-        record = _wait_terminal(context, "bf_partial")
+        record = wait_terminal(context, "bf_partial", timeout_s=10.0)
         seeded = context.gaps.service.get(seeded_id)
         rows = context.gaps.service.store.list_gaps(limit=10)
         observed_row = next(
