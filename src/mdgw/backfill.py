@@ -5,6 +5,12 @@ Bars, and appends only what is new or changed. Bars already stored with the same
 content are skipped, so repeated Backfill calls are idempotent. A changed source
 Bar at an existing `open_ts` is appended as `revision = max(stored) + 1`.
 
+The shared execution order (fetch, closed window, Normalization, Revision/parent
+merge, persistence) lives in :mod:`mdgw.backfill_execution`. This adapter owns
+the automatic window selection, planning gaps, the Core Aggregator and the
+direct Dataset/HWM persistence that distinguishes automatic Backfill from a
+Backfill Job.
+
 Backfilled Bars go through the same Bar Aggregator as live ingestion and are
 written alongside their parents. They are intentionally not published to ZMQ:
 the Streaming Interface carries live Bars, and historical consumers read the
@@ -21,12 +27,10 @@ from typing import TYPE_CHECKING
 from mdgw.backfill_common import (
     BASE_INTERVAL,
     group_bars_by_interval,
-    interval_ns,
-    merge_bar_batch,
 )
+from mdgw.backfill_execution import BackfillExecution, BackfillRange
 from mdgw.core.instrument import InstrumentId
 from mdgw.core.time import datetime_to_ns, ns_to_datetime, to_utc
-from mdgw.normalize.batch import BatchNormalizationError, normalize_batch
 from mdgw.state.health import (
     GAP_BACKFILL_LIMIT,
     GAP_HISTORY_UNSUPPORTED,
@@ -34,10 +38,10 @@ from mdgw.state.health import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Sequence
 
     from mdgw.aggregate import BarAggregator
-    from mdgw.core.bar import Bar, RawBar
+    from mdgw.core.bar import Bar
     from mdgw.ingest.feed_handler import FeedHandler
     from mdgw.state.high_water_mark import HighWaterMarkStore
     from mdgw.store.parquet_dataset import ParquetBarStore
@@ -93,6 +97,11 @@ def run_backfill(  # ruff: ignore[too-many-arguments] -- public entry point; par
             report.gap_events += 1
         return report
 
+    execution = BackfillExecution(
+        feed=feed_handler,
+        store=store,
+        aggregator=aggregator,
+    )
     for raw_instrument_id in feed_handler.instrument_ids:
         instrument_id = InstrumentId.parse(raw_instrument_id).value
         report.instruments += 1
@@ -116,65 +125,53 @@ def run_backfill(  # ruff: ignore[too-many-arguments] -- public entry point; par
             # Re-fetch the HWM Bar itself so a corrected last Bar can be fixed.
             start_ns = hwm_ns
 
-        fetched = list(
-            feed_handler.fetch_history(
-                instrument_id,
-                BASE_INTERVAL,
-                ns_to_datetime(start_ns),
-                now,
+        def persist(
+            bars: Sequence[Bar],
+            *,
+            persisted_instrument_id: str = instrument_id,
+            persisted_start_ns: int = start_ns,
+        ) -> None:
+            """Write the merged Bars once, then advance the per-interval HWM."""
+            store.write_bars(
+                bars,
+                asset_class=asset_class_for(persisted_instrument_id),
             )
-        )
-        report.fetched_bars += len(fetched)
+            # The HWM advances only after the Data Files and Manifest are
+            # durable.
+            for interval, group in group_bars_by_interval(bars).items():
+                hwm.set(
+                    persisted_instrument_id,
+                    interval,
+                    max(datetime_to_ns(bar.open_ts) for bar in group),
+                )
+            logger.info(
+                "backfill wrote %d Bar(s) for %s from %s",
+                len(bars),
+                persisted_instrument_id,
+                ns_to_datetime(persisted_start_ns).isoformat(),
+                extra={
+                    "event": "collector.backfill_written",
+                    "feed": feed_handler.name,
+                    "instrument_id": persisted_instrument_id,
+                },
+            )
 
-        history = _normalize_history(
-            fetched,
-            feed=feed_handler.name,
+        result = execution.execute(
+            BackfillRange(
+                instrument_id=instrument_id,
+                start_ns=start_ns,
+                end_ns=now_ns,
+            ),
+            persist=persist,
             ingest_ts=now,
-            start_ns=start_ns,
-            now_ns=now_ns,
         )
-        result = merge_bar_batch(
-            store=store,
-            aggregator=aggregator,
-            instrument_id=instrument_id,
-            base_bars=history,
-            read_start_ns=start_ns,
-            read_end_ns=now_ns,
-        )
-        report.skipped_bars += result.skipped
-
-        bars_to_write = result.written
-        if not bars_to_write:
-            continue
-
-        store.write_bars(
-            bars_to_write,
-            asset_class=asset_class_for(instrument_id),
-        )
-        report.written_bars += len(bars_to_write)
-
-        # The HWM advances only after the Data Files and Manifest are durable.
-        for interval, group in group_bars_by_interval(bars_to_write).items():
-            hwm.set(
-                instrument_id,
-                interval,
-                max(datetime_to_ns(bar.open_ts) for bar in group),
-            )
+        report.fetched_bars += result.fetched_bars
+        report.written_bars += result.written_bars
+        report.skipped_bars += result.skipped_bars
+        for interval, count in result.written_by_interval.items():
             report.written_by_interval[interval] = (
-                report.written_by_interval.get(interval, 0) + len(group)
+                report.written_by_interval.get(interval, 0) + count
             )
-
-        logger.info(
-            "backfill wrote %d Bar(s) for %s from %s",
-            len(bars_to_write),
-            instrument_id,
-            ns_to_datetime(start_ns).isoformat(),
-            extra={
-                "event": "collector.backfill_written",
-                "feed": feed_handler.name,
-                "instrument_id": instrument_id,
-            },
-        )
 
     return report
 
@@ -209,42 +206,3 @@ def _record_gap(  # ruff: ignore[too-many-arguments] -- keeps gap fields explici
             "instrument_id": instrument_id,
         },
     )
-
-
-def _normalize_history(
-    raw_bars: Iterable[RawBar],
-    *,
-    feed: str,
-    ingest_ts: datetime,
-    start_ns: int,
-    now_ns: int,
-) -> list[Bar]:
-    """Filter to the closed window, Normalize the batch, sort and dedupe.
-
-    Values are filtered and de-duplicated by `open_ts` exactly as before, but
-    the rules themselves now come from the one Polars batch implementation.
-    A rejected row fails the whole Backfill pass (the previous scalar rule
-    also raised); nothing is written for a failed batch.
-    """
-    width_ns = interval_ns(BASE_INTERVAL)
-    selected: list[RawBar] = []
-    for raw in raw_bars:
-        if raw.interval != BASE_INTERVAL:
-            continue
-        open_ns = datetime_to_ns(to_utc(raw.open_ts))
-        if open_ns < start_ns or open_ns >= now_ns:
-            continue
-        if open_ns + width_ns > now_ns:
-            # The caller/reference layer rejects forming Bars.
-            continue
-        selected.append(raw)
-    if not selected:
-        return []
-
-    batch = normalize_batch(selected, feed=feed, ingest_ts=ingest_ts)
-    if batch.rejections:
-        raise BatchNormalizationError(batch.rejections)
-    by_open_ts: dict[int, Bar] = {}
-    for bar in batch.bars:
-        by_open_ts[datetime_to_ns(bar.open_ts)] = bar
-    return [by_open_ts[key] for key in sorted(by_open_ts)]
