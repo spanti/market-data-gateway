@@ -393,6 +393,14 @@ test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
     await openServiceInstanceTab(page);
 
     // Real Admin instance identity, not a Current Contract /status fallback.
+    const region = page.getByRole("region", { name: "Service Instance" });
+    await expect(region).toBeVisible();
+    await expect(
+      region.getByRole("columnheader", { name: "Service Instance" }),
+    ).toBeVisible();
+    await expect(
+      region.getByRole("columnheader", { name: "Service Role" }),
+    ).toBeVisible();
     const row = page.getByTestId("service-instance-api-1");
     await expect(row).toContainText("API primary");
     await expect(row.getByText("api-1", { exact: true }).first()).toBeVisible();
@@ -400,6 +408,10 @@ test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
 
     await row.getByRole("button", { name: "Graceful Stop" }).click();
     const dialog = page.getByRole("dialog");
+    await expect(dialog).toContainText("确认 Graceful Stop api-1");
+    await expect(dialog).toContainText("目标 Service Instance api-1");
+    await expect(dialog).toContainText("排空");
+    await expectNoBannedUiSymbols(page, '[data-slot="dialog-content"]');
     const confirm = dialog.getByRole("button", { name: "确认执行" });
     await expect(confirm).toBeDisabled();
 
@@ -414,9 +426,11 @@ test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
     await expect(confirm).toBeEnabled();
     await confirm.click();
 
-    // The operation summary also contains the sentence "已接受 ≠ 成功", so the
-    // assertion must target the exact lifecycle status, not that substring.
+    // The operation summary also contains the sentence "已接受不等于成功", so
+    // the assertion must target the exact lifecycle status, not that substring.
     await expect(row.getByText("成功", { exact: true })).toBeVisible();
+    await expect(row.getByText("目标 api-1")).toBeVisible();
+    await expect(row.getByText("Request ID req_1")).toBeVisible();
     expect(postCount).toBe(1);
     expect(captured.body).toMatchObject({
       reason: "drain before certificate rotation",
@@ -493,12 +507,16 @@ test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
     await expect(page.getByTestId("global-http-notice")).toContainText(
       "缺少权限，需要 SuperAdmin 角色。",
     );
-    await expect(page.getByTestId("service-instance-api-1")).toContainText(
-      "forbidden: role denied",
-    );
+    const row = page.getByTestId("service-instance-api-1");
+    await expect(row).toContainText("forbidden: role denied");
+    await expect(row.getByText("Request ID req-403")).toBeVisible();
+    await expect(
+      row.locator('[data-raw-evidence="true"]', { hasText: "role denied" }),
+    ).toHaveText("role denied");
     await expect(
       page.getByTestId("runtime-mode-banner").getByText("SuperAdmin"),
     ).toBeVisible();
+    await expectNoBannedUiSymbols(page, "#main-content");
   });
 
   test("409 surfaces a manual-merge conflict", async ({ page }) => {
@@ -530,9 +548,14 @@ test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
     await expect(page.getByTestId("global-http-notice")).toContainText(
       "数据已被他人修改（409 冲突）",
     );
-    await expect(page.getByTestId("service-instance-api-1")).toContainText(
-      "conflict: version conflict",
-    );
+    const row = page.getByTestId("service-instance-api-1");
+    await expect(row).toContainText("conflict: version conflict");
+    await expect(row.getByText("Request ID req-409")).toBeVisible();
+    await expect(
+      row.locator('[data-raw-evidence="true"]', { hasText: "version conflict" }),
+    ).toHaveText("version conflict");
+    await expect(row.getByText("成功", { exact: true })).toHaveCount(0);
+    await expectNoBannedUiSymbols(page, "#main-content");
   });
 
   test("429 honours Retry-After", async ({ page }) => {
@@ -561,9 +584,16 @@ test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
     await expect(page.getByTestId("global-http-notice")).toContainText(
       "请求过于频繁，请在 7 秒后重试。",
     );
-    await expect(page.getByTestId("service-instance-api-1")).toContainText(
-      "rate_limited: too many requests",
-    );
+    const row = page.getByTestId("service-instance-api-1");
+    await expect(row).toContainText("rate_limited: too many requests");
+    await expect(row.getByText("Request ID req-429")).toBeVisible();
+    await expect(
+      row.getByRole("button", { name: "Graceful Stop" }),
+    ).toBeDisabled();
+    await expect(
+      row.getByText(/限流中，请在 \d+ 秒后重试/).first(),
+    ).toBeVisible();
+    await expectNoBannedUiSymbols(page, "#main-content");
   });
 
   test("shows the explicit Admin service-instance gap when the capability is unsupported", async ({
