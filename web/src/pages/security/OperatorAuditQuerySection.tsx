@@ -1,3 +1,4 @@
+import { LockKeyhole, ScrollText } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState, type FormEvent } from "react";
 import {
@@ -10,18 +11,19 @@ import {
 import type { OperatorAuditEvent, AuditResult } from "@/api/endpoints/admin";
 import { classifyHttpError } from "@/api/http/errors";
 import { HttpError } from "@/api/http/types";
-import { ErrorState, LoadingState } from "@/components/states";
+import { HelpTrigger } from "@/components/help-trigger";
+import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { StatusBadge } from "@/components/status-badge";
 import { Pagination } from "@/components/pagination";
 import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Panel,
-  PanelDescription,
-  PanelHeader,
-  PanelTitle,
-} from "@/components/ui/panel";
 import { Select } from "@/components/ui/select";
 import {
   Table,
@@ -176,9 +178,11 @@ function AuditQueryError({
     <ErrorState
       title="审计查询失败"
       description={
-        error.code === "invalid_parameter"
-          ? "筛选参数无效，请检查时间范围、Access Role 与结果值。"
-          : error.message
+        error.code === "invalid_parameter" ? (
+          "筛选参数无效，请检查时间范围、Access Role 与结果值。"
+        ) : (
+          <span data-raw-evidence="true">{error.message}</span>
+        )
       }
       requestId={error.requestId}
       onRetry={onRetry}
@@ -248,252 +252,285 @@ export function OperatorAuditQuerySection() {
   const items: OperatorAuditEvent[] = page?.items ?? [];
 
   return (
-    <Panel className="mt-6 p-5" aria-label="Operator Audit Event 查询">
-      <PanelHeader>
-        <div>
-          <PanelTitle>Operator Audit Event 查询</PanelTitle>
-          <PanelDescription>
-            服务端筛选与游标分页；from 为闭区间、to 为开区间，时间按 UTC
-            解释。首版不提供编辑、删除或导出。
-          </PanelDescription>
-        </div>
-        <span className="text-[11px] text-faint-foreground">
-          只读审计记录 · 请求 ID 可关联技术支持
-        </span>
-      </PanelHeader>
-
-      <form
-        onSubmit={apply}
-        aria-label="审计筛选条件"
-        className="mt-4 grid grid-cols-1 gap-3 border-y border-border py-4 sm:grid-cols-2 lg:grid-cols-4"
+    <>
+      <Card
+        role="region"
+        aria-label="Operator Audit Event 查询"
+        className="mt-4"
       >
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="audit-from">开始时间（UTC，含）</Label>
-          <Input
-            id="audit-from"
-            type="datetime-local"
-            value={form.from}
-            onChange={(event) => update("from", event.target.value)}
-          />
-        </div>
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="audit-to">结束时间（UTC，不含）</Label>
-          <Input
-            id="audit-to"
-            type="datetime-local"
-            value={form.to}
-            onChange={(event) => update("to", event.target.value)}
-          />
-        </div>
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="audit-actor">操作者 Subject</Label>
-          <Input
-            id="audit-actor"
-            value={form.actorSubject}
-            onChange={(event) => update("actorSubject", event.target.value)}
-            placeholder="oidc-subject-123"
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </div>
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="audit-role">Access Role（筛选）</Label>
-          <Select
-            id="audit-role"
-            value={form.accessRole}
-            onChange={(event) => update("accessRole", event.target.value)}
-          >
-            <option value="">全部角色</option>
-            {ACCESS_ROLES.map((role) => (
-              <option key={role} value={role}>
-                {role}
-              </option>
-            ))}
-          </Select>
-        </div>
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="audit-action">动作</Label>
-          <Input
-            id="audit-action"
-            value={form.action}
-            onChange={(event) => update("action", event.target.value)}
-            placeholder="feed_subscription.update"
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </div>
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="audit-target-type">对象类型</Label>
-          <Input
-            id="audit-target-type"
-            value={form.targetType}
-            onChange={(event) => update("targetType", event.target.value)}
-            placeholder="feed_subscription"
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </div>
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="audit-target-id">对象 ID</Label>
-          <Input
-            id="audit-target-id"
-            value={form.targetId}
-            onChange={(event) => update("targetId", event.target.value)}
-            placeholder="fsub_01JABCXYZ"
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </div>
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="audit-result">结果</Label>
-          <Select
-            id="audit-result"
-            value={form.result}
-            onChange={(event) => update("result", event.target.value)}
-          >
-            <option value="">全部结果</option>
-            {AUDIT_RESULTS.map((result) => (
-              <option key={result} value={result}>
-                {AUDIT_RESULT_LABEL[result]}
-              </option>
-            ))}
-          </Select>
-        </div>
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="audit-request-id">Request ID</Label>
-          <Input
-            id="audit-request-id"
-            value={form.requestId}
-            onChange={(event) => update("requestId", event.target.value)}
-            placeholder="req_01JABCXYZ"
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </div>
-        <div className="flex items-end gap-2">
-          <Button type="submit" size="sm">
-            查询
-          </Button>
-          <Button type="button" size="sm" variant="outline" onClick={reset}>
-            重置
-          </Button>
-        </div>
-        {formError ? (
-          <p role="alert" className="text-xs text-status-critical sm:col-span-2 lg:col-span-4">
-            {formError}
-          </p>
-        ) : null}
-      </form>
-
-      <div className="mt-4">
-        {query.isPending ? (
-          <LoadingState label="正在查询 Operator Audit Event…" />
-        ) : query.isError ? (
-          <AuditQueryError error={query.error} onRetry={() => void query.refetch()} />
-        ) : items.length === 0 ? (
-          <div className="px-4 py-8 text-center text-xs text-muted-foreground">
-            没有匹配的事件
+        <CardHeader className="p-5 pb-0">
+          <div className="flex min-w-0 items-start gap-2.5">
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-strong">
+              <ScrollText className="size-4" aria-hidden="true" />
+            </span>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <CardTitle>Operator Audit Event 查询</CardTitle>
+                <HelpTrigger
+                  label="审计查询说明"
+                  content="服务端筛选与游标分页。from 为闭区间，to 为开区间，时间按 UTC 解释。首版不提供编辑、删除或导出。"
+                  side="bottom"
+                />
+              </div>
+              <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-faint-foreground">
+                <LockKeyhole className="size-3.5 shrink-0" aria-hidden="true" />
+                只读审计记录，Request ID 可关联技术支持
+              </p>
+            </div>
           </div>
-        ) : (
-          <>
-            <div data-testid="audit-event-table">
-              <Table>
-                <caption className="sr-only">
-                  Operator Audit Event 查询结果，按 sequence 降序
-                </caption>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="text-right">Sequence</TableHead>
-                    <TableHead>时间（UTC）</TableHead>
-                    <TableHead>操作者</TableHead>
-                    <TableHead>Access Role</TableHead>
-                    <TableHead>动作</TableHead>
-                    <TableHead>对象</TableHead>
-                    <TableHead>结果</TableHead>
-                    <TableHead>Request ID</TableHead>
-                    <TableHead>详情</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {items.map((event) => (
-                    <TableRow key={event.event_id}>
-                      <TableCell className="text-right tabular-nums">
-                        {event.sequence}
-                      </TableCell>
-                      <TableCell className="whitespace-nowrap tabular-nums">
-                        {formatAuditTimestamp(event.occurred_at)}
-                      </TableCell>
-                      <TableCell>
-                        <div className="font-medium">
-                          {event.actor.display_name}
-                        </div>
-                        <div className="font-mono text-[11px] text-faint-foreground">
-                          {event.actor.subject}
-                        </div>
-                      </TableCell>
-                      <TableCell>{event.actor.access_role ?? "—"}</TableCell>
-                      <TableCell className="font-mono">{event.action}</TableCell>
-                      <TableCell>
-                        <div className="font-mono text-[11px]">
-                          {event.target.type}:{event.target.id}
-                        </div>
-                        <div className="text-faint-foreground">
-                          {event.target.display_name}
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <StatusBadge tone={AUDIT_RESULT_TONE[event.result]}>
-                          {AUDIT_RESULT_LABEL[event.result]}
-                        </StatusBadge>
-                      </TableCell>
-                      <TableCell className="font-mono text-[11px]">
-                        {event.request_id}
-                      </TableCell>
-                      <TableCell>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          aria-label={`查看详情 ${event.event_id}`}
-                          onClick={() => setSelectedEventId(event.event_id)}
-                        >
-                          查看详情
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
+        </CardHeader>
 
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-              <Pagination
-                hasMore={Boolean(page?.page.has_more && page.page.next_cursor)}
-                hasPrevious={cursors.length > 1}
-                onNext={() => {
-                  const next = page?.page.next_cursor;
-                  if (!next) {
-                    return;
-                  }
-                  setCursors((current) =>
-                    [...current.slice(-(MAX_CURSOR_HISTORY - 1)), next],
-                  );
-                }}
-                onPrevious={() => {
-                  setCursors((current) =>
-                    current.length > 1 ? current.slice(0, -1) : current,
-                  );
-                }}
-                label={`本页 ${items.length} 条 · 游标分页，不提供总数`}
+        <CardContent className="p-5 pt-4">
+          <form
+            onSubmit={apply}
+            aria-label="审计筛选条件"
+            className="grid grid-cols-1 gap-3 rounded-lg bg-surface-sunken p-3 sm:grid-cols-2 lg:grid-cols-4"
+          >
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="audit-from">开始时间（UTC，含）</Label>
+              <Input
+                id="audit-from"
+                type="datetime-local"
+                value={form.from}
+                onChange={(event) => update("from", event.target.value)}
               />
-              {page?.page.has_more && !page.page.next_cursor ? (
-                <span className="text-[11px] text-status-critical">
-                  服务端声明还有更多事件但未返回 next_cursor，已停止分页。
-                </span>
-              ) : null}
             </div>
-          </>
-        )}
-      </div>
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="audit-to">结束时间（UTC，不含）</Label>
+              <Input
+                id="audit-to"
+                type="datetime-local"
+                value={form.to}
+                onChange={(event) => update("to", event.target.value)}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="audit-actor">操作者 Subject</Label>
+              <Input
+                id="audit-actor"
+                value={form.actorSubject}
+                onChange={(event) => update("actorSubject", event.target.value)}
+                placeholder="oidc-subject-123"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="audit-role">Access Role（筛选）</Label>
+              <Select
+                id="audit-role"
+                value={form.accessRole}
+                onChange={(event) => update("accessRole", event.target.value)}
+              >
+                <option value="">全部角色</option>
+                {ACCESS_ROLES.map((role) => (
+                  <option key={role} value={role}>
+                    {role}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="audit-action">动作</Label>
+              <Input
+                id="audit-action"
+                value={form.action}
+                onChange={(event) => update("action", event.target.value)}
+                placeholder="feed_subscription.update"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="audit-target-type">对象类型</Label>
+              <Input
+                id="audit-target-type"
+                value={form.targetType}
+                onChange={(event) => update("targetType", event.target.value)}
+                placeholder="feed_subscription"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="audit-target-id">对象 ID</Label>
+              <Input
+                id="audit-target-id"
+                value={form.targetId}
+                onChange={(event) => update("targetId", event.target.value)}
+                placeholder="fsub_01JABCXYZ"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="audit-result">结果</Label>
+              <Select
+                id="audit-result"
+                value={form.result}
+                onChange={(event) => update("result", event.target.value)}
+              >
+                <option value="">全部结果</option>
+                {AUDIT_RESULTS.map((result) => (
+                  <option key={result} value={result}>
+                    {AUDIT_RESULT_LABEL[result]}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="audit-request-id">Request ID</Label>
+              <Input
+                id="audit-request-id"
+                value={form.requestId}
+                onChange={(event) => update("requestId", event.target.value)}
+                placeholder="req_01JABCXYZ"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+            <div className="flex items-end gap-2">
+              <Button type="submit" size="sm">
+                查询
+              </Button>
+              <Button type="button" size="sm" variant="outline" onClick={reset}>
+                重置
+              </Button>
+            </div>
+            {formError ? (
+              <p
+                role="alert"
+                className="text-xs text-status-critical sm:col-span-2 lg:col-span-4"
+              >
+                {formError}
+              </p>
+            ) : null}
+          </form>
+
+          <div className="mt-4">
+            {query.isPending ? (
+              <LoadingState label="正在查询 Operator Audit Event…" />
+            ) : query.isError ? (
+              <AuditQueryError
+                error={query.error}
+                onRetry={() => void query.refetch()}
+              />
+            ) : items.length === 0 ? (
+              <EmptyState
+                title="没有匹配的事件"
+                description="当前筛选条件没有匹配的 Operator Audit Event。"
+              />
+            ) : (
+              <>
+                <div data-testid="audit-event-table" className="min-w-0">
+                  <Table className="min-w-[1120px] text-xs">
+                    <caption className="sr-only">
+                      Operator Audit Event 查询结果，按 sequence 降序
+                    </caption>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="text-right">Sequence</TableHead>
+                        <TableHead>时间（UTC）</TableHead>
+                        <TableHead>操作者</TableHead>
+                        <TableHead>Access Role</TableHead>
+                        <TableHead>动作</TableHead>
+                        <TableHead>对象</TableHead>
+                        <TableHead>结果</TableHead>
+                        <TableHead>Request ID</TableHead>
+                        <TableHead>详情</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {items.map((event) => (
+                        <TableRow key={event.event_id}>
+                          <TableCell className="text-right tabular-nums">
+                            {event.sequence}
+                          </TableCell>
+                          <TableCell className="tabular-nums">
+                            {formatAuditTimestamp(event.occurred_at)}
+                          </TableCell>
+                          <TableCell>
+                            <div className="font-medium">
+                              {event.actor.display_name}
+                            </div>
+                            <div className="font-mono text-[11px] break-all text-faint-foreground">
+                              {event.actor.subject}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            {event.actor.access_role ?? "—"}
+                          </TableCell>
+                          <TableCell className="font-mono break-all">
+                            {event.action}
+                          </TableCell>
+                          <TableCell>
+                            <div className="font-mono text-[11px] break-all">
+                              {event.target.type}:{event.target.id}
+                            </div>
+                            <div className="text-faint-foreground">
+                              {event.target.display_name}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge tone={AUDIT_RESULT_TONE[event.result]}>
+                              {AUDIT_RESULT_LABEL[event.result]}
+                            </StatusBadge>
+                          </TableCell>
+                          <TableCell className="font-mono text-[11px] break-all">
+                            {event.request_id}
+                          </TableCell>
+                          <TableCell>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              aria-label={`查看详情 ${event.event_id}`}
+                              onClick={() => setSelectedEventId(event.event_id)}
+                            >
+                              查看详情
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                  <Pagination
+                    hasMore={Boolean(
+                      page?.page.has_more && page.page.next_cursor,
+                    )}
+                    hasPrevious={cursors.length > 1}
+                    onNext={() => {
+                      const next = page?.page.next_cursor;
+                      if (!next) {
+                        return;
+                      }
+                      setCursors((current) =>
+                        [
+                          ...current.slice(-(MAX_CURSOR_HISTORY - 1)),
+                          next,
+                        ],
+                      );
+                    }}
+                    onPrevious={() => {
+                      setCursors((current) =>
+                        current.length > 1 ? current.slice(0, -1) : current,
+                      );
+                    }}
+                    label={`本页 ${items.length} 条，游标分页，不提供总数`}
+                  />
+                  {page?.page.has_more && !page.page.next_cursor ? (
+                    <span className="text-[11px] text-status-critical">
+                      服务端声明还有更多事件但未返回 next_cursor，已停止分页。
+                    </span>
+                  ) : null}
+                </div>
+              </>
+            )}
+          </div>
+        </CardContent>
+      </Card>
 
       {selectedEventId ? (
         <OperatorAuditEventDetail
@@ -501,6 +538,6 @@ export function OperatorAuditQuerySection() {
           onClose={() => setSelectedEventId(null)}
         />
       ) : null}
-    </Panel>
+    </>
   );
 }

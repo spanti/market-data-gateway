@@ -1,12 +1,9 @@
+import { UserRound } from "lucide-react";
 import { useLocation } from "react-router-dom";
 import { DisabledAction } from "@/components/disabled-reason";
+import { HelpTrigger } from "@/components/help-trigger";
 import { StatusBadge } from "@/components/status-badge";
-import {
-  Panel,
-  PanelDescription,
-  PanelHeader,
-  PanelTitle,
-} from "@/components/ui/panel";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatUtcTimestamp } from "@/lib/format";
 import { buildLoginUrl } from "@/runtime/auth";
 import { loginDisabledReason } from "@/runtime/login-availability";
@@ -148,56 +145,66 @@ export function IdentityPanel() {
   })();
 
   return (
-    <Panel className="mt-5 p-5" aria-label="当前身份">
-      <PanelHeader>
-        <div>
-          <PanelTitle>当前身份</PanelTitle>
-          <PanelDescription>
-            身份、Access Role 和会话时间均由服务端返回；前端没有角色切换器，
-            服务端授权才是安全边界。
-          </PanelDescription>
+    <Card role="region" aria-label="当前身份" className="mt-4">
+      <CardHeader className="p-5 pb-0">
+        <div className="flex min-w-0 items-start gap-2.5">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-strong">
+            <UserRound className="size-4" aria-hidden="true" />
+          </span>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <CardTitle>当前身份</CardTitle>
+              <HelpTrigger
+                label="身份与 Access Role 说明"
+                content="身份、Access Role 和会话时间均由服务端返回。前端没有角色切换器，服务端授权才是安全边界。Access Role 是控制台使用者权限，与 Service Role 进程职责无关。"
+                side="bottom"
+              />
+            </div>
+          </div>
         </div>
         <StatusBadge tone={view.badge.tone}>{view.badge.label}</StatusBadge>
-      </PanelHeader>
+      </CardHeader>
 
-      <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-3 text-xs sm:grid-cols-2 lg:grid-cols-3">
-        <div>
-          <dt className="text-faint-foreground">操作者</dt>
-          <dd className="mt-1 font-medium">{view.name}</dd>
-        </div>
-        <div>
-          <dt className="text-faint-foreground">Subject</dt>
-          <dd className="mt-1 font-mono break-all">{view.subject}</dd>
-        </div>
-        <div>
-          <dt className="text-faint-foreground">Access Role</dt>
-          <dd className="mt-1">{view.roleLabel}</dd>
-        </div>
-        <div>
-          <dt className="text-faint-foreground">认证模式</dt>
-          <dd className="mt-1">{view.authMode}</dd>
-        </div>
-        <div>
-          <dt className="text-faint-foreground">会话签发</dt>
-          <dd className="mt-1 tabular-nums">
-            {formatUtcTimestamp(view.issuedAt)}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-faint-foreground">空闲到期</dt>
-          <dd className="mt-1 tabular-nums">
-            {formatUtcTimestamp(view.idleExpiresAt)}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-faint-foreground">绝对到期</dt>
-          <dd className="mt-1 tabular-nums">
-            {formatUtcTimestamp(view.absoluteExpiresAt)}
-          </dd>
-        </div>
-      </dl>
+      <CardContent className="p-5 pt-4">
+        <dl className="grid grid-cols-1 gap-x-6 gap-y-3 rounded-lg bg-surface-sunken p-3 text-xs sm:grid-cols-2 lg:grid-cols-3">
+          <div>
+            <dt className="text-faint-foreground">操作者</dt>
+            <dd className="mt-1 font-medium">{view.name}</dd>
+          </div>
+          <div>
+            <dt className="text-faint-foreground">Subject</dt>
+            <dd className="mt-1 font-mono break-all">{view.subject}</dd>
+          </div>
+          <div>
+            <dt className="text-faint-foreground">Access Role</dt>
+            <dd className="mt-1">{view.roleLabel}</dd>
+          </div>
+          <div>
+            <dt className="text-faint-foreground">认证模式</dt>
+            <dd className="mt-1">{view.authMode}</dd>
+          </div>
+          <div>
+            <dt className="text-faint-foreground">会话签发</dt>
+            <dd className="mt-1 tabular-nums">
+              {formatUtcTimestamp(view.issuedAt)}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-faint-foreground">空闲到期</dt>
+            <dd className="mt-1 tabular-nums">
+              {formatUtcTimestamp(view.idleExpiresAt)}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-faint-foreground">绝对到期</dt>
+            <dd className="mt-1 tabular-nums">
+              {formatUtcTimestamp(view.absoluteExpiresAt)}
+            </dd>
+          </div>
+        </dl>
 
-      <div className="mt-4 flex flex-wrap items-center gap-3">{loginEntry}</div>
-    </Panel>
+        <div className="mt-4 flex flex-wrap items-center gap-3">{loginEntry}</div>
+      </CardContent>
+    </Card>
   );
 }

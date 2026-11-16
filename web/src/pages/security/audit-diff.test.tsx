@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { AuditDiff } from "@/pages/security/AuditDiff";
+import { expectNoBannedUiSymbols } from "@/test/ui-copy";
 
 describe("Operator Audit Event redacted diff", () => {
   it("labels a creation where before is null", () => {
@@ -90,5 +91,41 @@ describe("Operator Audit Event redacted diff", () => {
 
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
+  });
+
+  it("preserves raw diff bytes containing banned separators and marks them as evidence", () => {
+    const before = "left · right：value";
+    const after = { note: "a·b：c" };
+    render(
+      <AuditDiff
+        before={before}
+        after={after}
+        redactedPaths={["/client·secret：x"]}
+      />,
+    );
+
+    const beforePre = screen.getByTestId("audit-diff-before");
+    expect(beforePre).toHaveAttribute("data-raw-evidence", "true");
+    expect(beforePre.textContent).toBe("left · right：value");
+
+    const afterPre = screen.getByTestId("audit-diff-after");
+    expect(afterPre).toHaveAttribute("data-raw-evidence", "true");
+    expect(afterPre.textContent).toBe(JSON.stringify(after, null, 2));
+
+    const redactedPath = screen.getByText("/client·secret：x");
+    expect(redactedPath).toHaveAttribute("data-raw-evidence", "true");
+    expect(redactedPath.textContent).toBe("/client·secret：x");
+  });
+
+  it("keeps the surrounding diff copy free of banned separators", () => {
+    const { container } = render(
+      <AuditDiff
+        before={{ note: "a·b：c" }}
+        after={null}
+        redactedPaths={["/secret·path：x"]}
+      />,
+    );
+
+    expectNoBannedUiSymbols(container);
   });
 });
