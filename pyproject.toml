@@ -18,9 +18,11 @@ dependencies = [
     "PyYAML>=6",
     "pydantic>=2.9",
     "ccxt>=4.5",
-    "typer>=0.9",
+    # `mdgw.cli` uses Typer's `click_type` for the `--service` choices; Typer
+    # 0.29 (observed 0.29.1) removed that argument and crashes at import time.
+    "typer>=0.9,<0.28",
     # Imported directly by mdgw.cli; newer Typer releases no longer pull it in.
-    "click>=8.1",
+    "click>=8.1,<8.6",
     # ASGI HTTP surface. Plain uvicorn (no [standard] extra) still needs a
     # WebSocket implementation for /ws; websockets also backs the SDK client.
     "fastapi>=0.115",
