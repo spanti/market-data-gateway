@@ -254,6 +254,7 @@ describe("Bars page D migration", () => {
     "最大 Revision Bar 图",
     "原始 Revision 表",
     "CSV 直接下载",
+    "Export Job",
     "实时跟随",
   ] as const;
 
@@ -292,6 +293,8 @@ describe("Bars page D migration", () => {
       "最大 Revision Bar 图说明",
       "原始 Revision 表说明",
       "小文件 CSV 直接下载说明",
+      "Export Job 说明",
+      "Export Job 状态说明",
       "实时跟随说明",
     ];
     for (const name of expectedHelp) {
