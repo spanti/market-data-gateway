@@ -7,12 +7,12 @@ import {
 } from "@/components/monitoring/series-metrics";
 
 function series(
-  id: string | undefined,
+  id: string,
   name: string,
   points: Array<[number, number | null]>,
 ): TrendSeries {
   return {
-    ...(id === undefined ? {} : { id }),
+    id,
     name,
     points: points.map(([ts, value]) => ({ ts, value })),
   };
@@ -41,10 +41,10 @@ describe("series identity is separate from display name", () => {
     expect(latestSeriesValue([p50], "p99")).toBeNull();
   });
 
-  it("falls back to the display name only when no identity was provided", () => {
-    const legacy = series(undefined, "P95", [[t2, 250]]);
+  it("ignores a series whose display name matches but whose identity differs", () => {
+    const p95 = series("p95", "P99", [[t2, 250]]);
 
-    expect(latestSeriesValue([legacy], "P95")).toBe(250);
+    expect(latestSeriesValue([p95], "P99")).toBeNull();
   });
 
   it("takes the maximum across lines that share one metric identity", () => {

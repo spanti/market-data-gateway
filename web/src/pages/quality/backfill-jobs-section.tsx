@@ -40,7 +40,7 @@ import { CAPABILITY_KEYS } from "@/runtime/capability-gates";
 import { queryErrorInfo } from "@/lib/errors";
 import { useRetryAfter } from "@/runtime/use-retry-after";
 import { BackfillJobCreateForm } from "./backfill-job-create-form";
-import { QualityCardHeading } from "./quality-card-heading";
+import { CardHeading } from "@/components/card-heading";
 import {
   formatRange,
   formatUtcTimestamp,
@@ -350,7 +350,7 @@ export function BackfillJobsSection({
       aria-label="Backfill Job"
       className={className}
     >
-      <QualityCardHeading
+      <CardHeading
         icon={ListChecks}
         title="Backfill Job"
         helpLabel="Backfill Job 说明"

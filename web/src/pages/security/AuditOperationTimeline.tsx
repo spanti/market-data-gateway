@@ -12,6 +12,7 @@ import {
   AUDIT_RESULT_TONE,
   formatAuditTimestamp,
 } from "@/pages/security/audit-presentation";
+import { IconTile } from "@/components/icon-tile";
 
 function hasDiffSide(value: unknown): boolean {
   return value !== null && value !== undefined;
@@ -40,9 +41,7 @@ export function AuditOperationTimeline({
     >
       <CardHeader className="p-4">
         <div className="flex min-w-0 items-start gap-2.5">
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-strong">
-            <History className="size-4" aria-hidden="true" />
-          </span>
+          <IconTile icon={History} />
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-1.5">
               <CardTitle>操作时间线</CardTitle>

@@ -87,6 +87,7 @@ import type { CapabilityState } from "@/api/capabilities";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
 import { usePermissionSubject } from "@/runtime/use-permission";
 import { useRetryAfter } from "@/runtime/use-retry-after";
+import { IconTile } from "@/components/icon-tile";
 
 /**
  * Service Instance console.
@@ -194,6 +195,49 @@ function describeError(error: unknown): string | null {
   return errorText(error, "加载失败");
 }
 
+interface RoleRowInput {
+  role: ServiceRole;
+  status: { uptime_s: number } | undefined;
+  ready: ReadyPayload | undefined;
+  statusReady?: boolean;
+  statusError: unknown;
+  readyError: unknown;
+  observedAt: number | null;
+  details: DetailItem[];
+}
+
+/**
+ * Current Contract rows share one scaffold: a Service Role identity, one
+ * readiness verdict, uptime, last observation and raw error. Only the detail
+ * fields differ per role.
+ */
+function buildRoleRow({
+  role,
+  status,
+  ready,
+  statusReady,
+  statusError,
+  readyError,
+  observedAt,
+  details,
+}: RoleRowInput): ServiceRow {
+  const readiness = readyFrom(ready, statusReady);
+  return {
+    key: role,
+    instanceId: null,
+    role,
+    displayName: null,
+    ready: readiness.ready,
+    readyReason: readiness.reason,
+    uptimeS: status?.uptime_s ?? null,
+    lastObservedAt: observedAt,
+    details,
+    error: describeError(statusError ?? readyError),
+    lastErrorRequestId: null,
+    availableActions: null,
+  };
+}
+
 function buildApiRow(
   status: ApiStatus | undefined,
   ready: ReadyPayload | undefined,
@@ -201,16 +245,13 @@ function buildApiRow(
   readyError: unknown,
   observedAt: number | null,
 ): ServiceRow {
-  const readiness = readyFrom(ready, undefined);
-  return {
-    key: "api",
-    instanceId: null,
+  return buildRoleRow({
     role: "api",
-    displayName: null,
-    ready: readiness.ready,
-    readyReason: readiness.reason,
-    uptimeS: status?.uptime_s ?? null,
-    lastObservedAt: observedAt,
+    status,
+    ready,
+    statusError,
+    readyError,
+    observedAt,
     details: status
       ? [
           {
@@ -243,10 +284,7 @@ function buildApiRow(
           },
         ]
       : [],
-    error: describeError(statusError ?? readyError),
-    lastErrorRequestId: null,
-    availableActions: null,
-  };
+  });
 }
 
 function buildCollectorRow(
@@ -256,16 +294,14 @@ function buildCollectorRow(
   readyError: unknown,
   observedAt: number | null,
 ): ServiceRow {
-  const readiness = readyFrom(ready, status?.ready);
-  return {
-    key: "collector",
-    instanceId: null,
+  return buildRoleRow({
     role: "collector",
-    displayName: null,
-    ready: readiness.ready,
-    readyReason: readiness.reason,
-    uptimeS: status?.uptime_s ?? null,
-    lastObservedAt: observedAt,
+    status,
+    ready,
+    statusReady: status?.ready,
+    statusError,
+    readyError,
+    observedAt,
     details: status
       ? [
           { label: "Feed", value: formatValue(status.feed) },
@@ -284,10 +320,7 @@ function buildCollectorRow(
           },
         ]
       : [],
-    error: describeError(statusError ?? readyError),
-    lastErrorRequestId: null,
-    availableActions: null,
-  };
+  });
 }
 
 function buildReplayRow(
@@ -297,16 +330,13 @@ function buildReplayRow(
   readyError: unknown,
   observedAt: number | null,
 ): ServiceRow {
-  const readiness = readyFrom(ready, undefined);
-  return {
-    key: "replay",
-    instanceId: null,
+  return buildRoleRow({
     role: "replay",
-    displayName: null,
-    ready: readiness.ready,
-    readyReason: readiness.reason,
-    uptimeS: status?.uptime_s ?? null,
-    lastObservedAt: observedAt,
+    status,
+    ready,
+    statusError,
+    readyError,
+    observedAt,
     details: status
       ? [
           {
@@ -333,10 +363,7 @@ function buildReplayRow(
           },
         ]
       : [],
-    error: describeError(statusError ?? readyError),
-    lastErrorRequestId: null,
-    availableActions: null,
-  };
+  });
 }
 
 function buildAdminRow(instance: ServiceInstanceRowData): ServiceRow {
@@ -889,9 +916,7 @@ export function ServiceInstanceView() {
       <CardHeader className="p-5 pb-0">
         <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-strong">
-              <ServerCog className="size-4" aria-hidden="true" />
-            </span>
+            <IconTile icon={ServerCog} />
             <CardTitle>Service Instance</CardTitle>
             <HelpTrigger
               label="Service Instance 说明"

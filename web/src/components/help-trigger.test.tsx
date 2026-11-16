@@ -75,6 +75,30 @@ describe("HelpTrigger", () => {
     await expectClosed();
   });
 
+  it("keeps toggling across repeated touch taps and Escape closes it", async () => {
+    const user = userEvent.setup();
+    renderHelp();
+    const trigger = screen.getByRole("button", {
+      name: "Realtime QPS 说明",
+    });
+    const tap = () => {
+      fireEvent.pointerDown(trigger, { pointerType: "touch", button: 0 });
+      fireEvent.pointerUp(trigger, { pointerType: "touch", button: 0 });
+      fireEvent.click(trigger);
+    };
+
+    tap();
+    expect(await screen.findByRole("tooltip")).toBeInTheDocument();
+    tap();
+    await expectClosed();
+    tap();
+    expect(await screen.findByRole("tooltip")).toBeInTheDocument();
+
+    trigger.focus();
+    await user.keyboard("{Escape}");
+    await expectClosed();
+  });
+
   it("keeps keyboard activation open after focus already showed help", async () => {
     const user = userEvent.setup();
     renderHelp();

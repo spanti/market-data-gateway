@@ -26,6 +26,7 @@ import {
   useChartPalette,
   type ChartPalette,
 } from "@/components/monitoring/chart-option";
+import { latestFiniteValue } from "@/components/monitoring/series-metrics";
 import type { UnknownCause } from "@/components/states";
 import type { TrendSeries } from "@/api/monitoring/types";
 import { formatNumber, formatUtcTime } from "@/lib/format";
@@ -51,16 +52,6 @@ export interface TrendChartProps {
   onRetry?: () => void;
   palette?: ChartPalette;
   className?: string;
-}
-
-function lastFiniteValue(points: TrendSeries["points"]): number | null {
-  for (let index = points.length - 1; index >= 0; index -= 1) {
-    const value = points[index]?.value;
-    if (value !== null && value !== undefined && Number.isFinite(value)) {
-      return value;
-    }
-  }
-  return null;
 }
 
 function pointCount(series: TrendSeries[]): number {
@@ -180,7 +171,7 @@ export function TrendChart({
   const legend = series.map((item, index) => ({
     name: item.name,
     color: colors[index]?.color ?? resolvedPalette.series[0]!,
-    value: formatNumber(lastFiniteValue(item.points), 3),
+    value: formatNumber(latestFiniteValue(item), 3),
     unit,
   }));
 

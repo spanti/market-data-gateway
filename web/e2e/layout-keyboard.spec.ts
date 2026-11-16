@@ -195,12 +195,21 @@ test.describe("narrow desktop layout 1024px", () => {
     await expect(
       page.getByRole("heading", { name: "监控总览" }),
     ).toBeVisible();
-    await expect(page.locator('[data-slot="metric-card"]')).toHaveCount(4);
-    await expect(page.locator('[data-slot="chart-panel"]')).toHaveCount(2);
+    for (const label of [
+      "Realtime QPS",
+      "Peak QPS",
+      "HTTP P99",
+      "Dataset Freshness",
+    ]) {
+      await expect(page.getByRole("group", { name: label })).toBeVisible();
+    }
+    for (const title of ["QPS 趋势", "HTTP 延迟趋势"]) {
+      await expect(page.getByRole("region", { name: title })).toBeVisible();
+    }
     await expect(
       page.getByRole("region", { name: "Feed Freshness", exact: true }),
     ).toBeVisible();
-    await expect(page.getByRole("region", { name: "Service Instance" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Service Role" })).toBeVisible();
     await expectNoHorizontalOverflow(page);
 
     // Bars remains operable at 1024px. Wide Revision tables scroll inside
@@ -213,14 +222,14 @@ test.describe("narrow desktop layout 1024px", () => {
     await expect(
       page.getByRole("button", { name: "应用筛选" }),
     ).toBeVisible();
-    const revisionScroller = page
-      .getByRole("region", { name: "原始 Revision 表" })
-      .locator('[data-slot="table-container"]');
-    const widths = await revisionScroller.evaluate((element) => ({
-      scrollWidth: element.scrollWidth,
-      clientWidth: element.clientWidth,
-    }));
-    expect(widths.scrollWidth).toBeGreaterThan(widths.clientWidth);
+    const revisionRegion = page.getByRole("region", {
+      name: "原始 Revision 表",
+    });
+    const tableBox = await revisionRegion.getByRole("table").boundingBox();
+    const regionBox = await revisionRegion.boundingBox();
+    expect(tableBox).not.toBeNull();
+    expect(regionBox).not.toBeNull();
+    expect(tableBox!.width).toBeGreaterThan(regionBox!.width);
     await expectNoHorizontalOverflow(page);
   });
 
@@ -247,17 +256,15 @@ test.describe("narrow desktop layout 1024px", () => {
     await expect(
       instanceRegion.getByRole("columnheader", { name: "Service Role" }),
     ).toBeVisible();
-    // The wide ledger scrolls inside its own card, not on the page.
-    const instanceScroller = instanceRegion.locator(
-      '[data-slot="table-container"]',
-    );
-    const instanceWidths = await instanceScroller.evaluate((element) => ({
-      scrollWidth: element.scrollWidth,
-      clientWidth: element.clientWidth,
-    }));
-    expect(instanceWidths.scrollWidth).toBeGreaterThan(
-      instanceWidths.clientWidth,
-    );
+    // The wide ledger is wider than its card but scrolls inside the card,
+    // not on the page.
+    const instanceTableBox = await instanceRegion
+      .getByRole("table")
+      .boundingBox();
+    const instanceRegionBox = await instanceRegion.boundingBox();
+    expect(instanceTableBox).not.toBeNull();
+    expect(instanceRegionBox).not.toBeNull();
+    expect(instanceTableBox!.width).toBeGreaterThan(instanceRegionBox!.width);
     await expectNoBannedUiSymbols(page, "#main-content");
     await expectNoHorizontalOverflow(page);
 
@@ -294,7 +301,13 @@ test.describe("narrow desktop layout 1024px", () => {
     await expect(
       page.getByRole("heading", { name: "Quality & Backfill" }),
     ).toBeVisible();
-    await expect(page.locator('[data-slot="card"]')).toHaveCount(3);
+    for (const name of [
+      "Unrecoverable Backfill Gap 当前快照",
+      "持久 Unrecoverable Backfill Gap",
+      "Backfill Job",
+    ]) {
+      await expect(page.getByRole("region", { name })).toBeVisible();
+    }
 
     // Current Contract: a real Collector snapshot, not accumulated history.
     const snapshot = page.getByRole("region", {
@@ -363,8 +376,17 @@ for (const width of [1280, 1440] as const) {
         page.getByRole("heading", { name: "监控总览" }),
       ).toBeVisible();
       await expectNoHorizontalOverflow(page);
-      await expect(page.locator('[data-slot="metric-card"]')).toHaveCount(4);
-      await expect(page.locator('[data-slot="chart-panel"]')).toHaveCount(2);
+      for (const label of [
+        "Realtime QPS",
+        "Peak QPS",
+        "HTTP P99",
+        "Dataset Freshness",
+      ]) {
+        await expect(page.getByRole("group", { name: label })).toBeVisible();
+      }
+      for (const title of ["QPS 趋势", "HTTP 延迟趋势"]) {
+        await expect(page.getByRole("region", { name: title })).toBeVisible();
+      }
 
       const nav = page.getByRole("navigation", { name: "一级模块导航" });
       await expect(nav).toBeVisible();
@@ -444,7 +466,13 @@ for (const width of [1280, 1440] as const) {
       await expect(
         page.getByRole("heading", { name: "Quality & Backfill" }),
       ).toBeVisible();
-      await expect(page.locator('[data-slot="card"]')).toHaveCount(3);
+      for (const name of [
+        "Unrecoverable Backfill Gap 当前快照",
+        "持久 Unrecoverable Backfill Gap",
+        "Backfill Job",
+      ]) {
+        await expect(page.getByRole("region", { name })).toBeVisible();
+      }
       await expectNoHorizontalOverflow(page);
 
       const pageHelp = await openHelpByHover(
@@ -796,7 +824,7 @@ test.describe("CONTRACT-ONLY service instance lifecycle keyboard", () => {
     await expect(dialog).toContainText("确认 Graceful Stop api-1");
     await expect(dialog).toContainText("目标 Service Instance api-1");
     await expect(dialog).toContainText("排空");
-    await expectNoBannedUiSymbols(page, '[data-slot="dialog-content"]');
+    await expectNoBannedUiSymbols(page);
     await expectNoHorizontalOverflow(page);
 
     // Escape cancels without a write.

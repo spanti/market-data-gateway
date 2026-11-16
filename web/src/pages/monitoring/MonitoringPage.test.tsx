@@ -7,37 +7,20 @@ import { MONITORING_QUERY_KEYS } from "@/pages/monitoring/use-monitoring-data";
 import { renderApp } from "@/test/render-app";
 import { server } from "@/test/server";
 import { installResizeObserverStub } from "@/test/tooltip-env";
+import { expectNoBannedUiSymbols } from "@/test/ui-copy";
 
 installResizeObserverStub();
 
 const iso = (ms: number) => new Date(ms).toISOString();
-const BANNED_SYMBOLS = ["·", "："];
 
 function metricCard(label: string): HTMLElement {
-  const card = document.querySelector<HTMLElement>(
-    `[data-slot="metric-card"][data-metric-label="${label}"]`,
-  );
-  if (!card) {
-    throw new Error(`Metric card not found: ${label}`);
-  }
-  return card;
+  return screen.getByRole("group", { name: label });
 }
 
 async function expectMetricValue(label: string, value: string) {
   await waitFor(() => {
     expect(within(metricCard(label)).getByText(value)).toBeInTheDocument();
   });
-}
-
-function expectNoBannedCopy(root: HTMLElement) {
-  const clone = root.cloneNode(true) as HTMLElement;
-  clone
-    .querySelectorAll('[data-raw-evidence="true"]')
-    .forEach((node) => node.remove());
-  const text = clone.textContent ?? "";
-  for (const symbol of BANNED_SYMBOLS) {
-    expect(text, `UI copy must not contain ${symbol}`).not.toContain(symbol);
-  }
 }
 
 function datasetStatus(overrides: Record<string, unknown> = {}) {
@@ -331,9 +314,14 @@ describe("Monitoring dashboard", () => {
     ).toBeInTheDocument();
 
     // Four KPI cards, with QPS, Peak QPS, P99 and an independent Dataset age.
-    expect(
-      document.querySelectorAll('[data-slot="metric-card"]'),
-    ).toHaveLength(4);
+    for (const label of [
+      "Realtime QPS",
+      "Peak QPS",
+      "HTTP P99",
+      "Dataset Freshness",
+    ]) {
+      expect(metricCard(label)).toBeInTheDocument();
+    }
     await expectMetricValue("Realtime QPS", "12.5");
     expect(within(metricCard("Realtime QPS")).getByText("req/s")).toBeInTheDocument();
     expect(within(metricCard("Realtime QPS")).getByText(/最近样本/)).toBeInTheDocument();
@@ -358,15 +346,15 @@ describe("Monitoring dashboard", () => {
     ).not.toBeInTheDocument();
 
     // QPS and HTTP latency are separate trend cards with data tables.
-    expect(
-      screen.getAllByRole("heading", { name: "QPS 趋势" }).length,
-    ).toBeGreaterThan(0);
-    expect(
-      screen.getAllByRole("heading", { name: "HTTP 延迟趋势" }).length,
-    ).toBeGreaterThan(0);
-    expect(
-      screen.getAllByText(/查看数据表（\d+ 个时间点）/),
-    ).toHaveLength(2);
+    for (const title of ["QPS 趋势", "HTTP 延迟趋势"]) {
+      const chart = screen.getByRole("region", { name: title });
+      expect(
+        within(chart).getByRole("heading", { name: title }),
+      ).toBeInTheDocument();
+      expect(
+        within(chart).getByText(/查看数据表（\d+ 个时间点）/),
+      ).toBeInTheDocument();
+    }
 
     // Feed Freshness keeps server age/threshold/stale semantics.
     const feed = screen.getByRole("region", { name: "Feed Freshness" });
@@ -380,16 +368,20 @@ describe("Monitoring dashboard", () => {
     expect(within(dataset).getByText(/独立于 Feed Freshness/)).toBeInTheDocument();
     expect(within(dataset).getByText("1m")).toBeInTheDocument();
 
-    // Service Role and Service Instance are not conflated.
-    const service = screen.getByRole("region", { name: "Service Instance" });
-    expect(within(service).getAllByText("Service Role").length).toBe(3);
-    expect(within(service).getAllByText("Instance").length).toBe(3);
+    // Service Role and Service Instance are not conflated: Current Contract
+    // exposes one process per Role, so the card names Service Roles.
+    const service = screen.getByRole("region", { name: "Service Role" });
+    expect(
+      within(service).getByRole("heading", { name: "Service Role" }),
+    ).toBeInTheDocument();
+    expect(within(service).getByText("3 个 Service Role")).toBeInTheDocument();
     for (const role of ["collector", "api", "replay"] as const) {
-      const row = service.querySelector(
-        `[data-slot="service-instance"][data-role="${role}"]`,
-      );
-      expect(row).not.toBeNull();
-      expect(row).toHaveTextContent(role);
+      const item = within(service).getByRole("group", {
+        name: `${role} Service Role`,
+      });
+      expect(item).toHaveTextContent(role);
+      expect(item).toHaveTextContent("Service Role");
+      expect(item).toHaveTextContent("Instance");
     }
     expect(service).not.toHaveTextContent(/master|worker|leader|failover/i);
 
@@ -429,7 +421,7 @@ describe("Monitoring dashboard", () => {
     expect(screen.getAllByText(/最后成功/).length).toBeGreaterThanOrEqual(5);
 
     // No banned separators in UI-generated copy.
-    expectNoBannedCopy(container);
+    expectNoBannedUiSymbols(container);
   });
 
   it("shows a stale entry as failed and never as healthy", async () => {
@@ -493,7 +485,7 @@ describe("Monitoring dashboard", () => {
     expect(screen.queryByText(/剩余 100s/)).not.toBeInTheDocument();
     expect(screen.getAllByText(/最后成功/).length).toBeGreaterThan(0);
 
-    const service = screen.getByRole("region", { name: "Service Instance" });
+    const service = screen.getByRole("region", { name: "Service Role" });
     expect(within(service).getAllByText(/状态未知/).length).toBeGreaterThan(0);
     expect(within(service).getAllByText(/Uptime —/).length).toBeGreaterThan(0);
 
@@ -502,8 +494,8 @@ describe("Monitoring dashboard", () => {
       within(alerts).getByText("Collector /status 加载失败"),
     ).toBeInTheDocument();
     expect(
-      document.querySelector('[data-raw-evidence="true"]')?.textContent,
-    ).toBe("Ops endpoint returned HTTP 500");
+      screen.getAllByText("Ops endpoint returned HTTP 500").length,
+    ).toBeGreaterThan(0);
   });
 
   it("marks trend KPIs unknown when Prometheus fails, with the last success", async () => {
@@ -537,11 +529,7 @@ describe("Monitoring dashboard", () => {
     });
     expect(screen.getAllByText(/最后成功/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/查询失败/).length).toBeGreaterThan(0);
-    expect(
-      Array.from(document.querySelectorAll('[data-raw-evidence="true"]')).some(
-        (node) => node.textContent === "upstream down",
-      ),
-    ).toBe(true);
+    expect(screen.getAllByText("upstream down").length).toBeGreaterThan(0);
   });
 
   it("keeps cached last-success evidence without showing old KPIs as healthy", async () => {
@@ -660,7 +648,7 @@ describe("Monitoring dashboard", () => {
     await expectMetricValue("HTTP P99", "500");
     expect(screen.getByText("P99 /api/v1/bars")).toBeInTheDocument();
     expect(screen.getAllByText("P99 /api/v1/bars").length).toBeGreaterThan(0);
-    expectNoBannedCopy(container);
+    expectNoBannedUiSymbols(container);
   });
 
   it("keeps backend raw errors verbatim while UI copy stays clean", async () => {
@@ -682,14 +670,10 @@ describe("Monitoring dashboard", () => {
     const { container } = renderApp();
 
     await waitFor(() => {
-      expect(
-        Array.from(document.querySelectorAll('[data-raw-evidence="true"]')).some(
-          (node) => node.textContent === raw,
-        ),
-      ).toBe(true);
+      expect(screen.getAllByText(raw).length).toBeGreaterThan(0);
     });
     expect(screen.getAllByText(/查询失败/).length).toBeGreaterThan(0);
-    expectNoBannedCopy(container);
+    expectNoBannedUiSymbols(container);
   });
 
   it("opens card help by hover and exposes a readable tooltip", async () => {

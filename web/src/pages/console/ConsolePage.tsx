@@ -1,10 +1,12 @@
 import { HelpTrigger } from "@/components/help-trigger";
 import { PageHeader } from "@/components/page-header";
-import { StatusBadge, type StatusTone } from "@/components/status-badge";
+import { StatusBadge } from "@/components/status-badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FeedSubscriptionView } from "@/pages/console/FeedSubscriptionView";
+import { FlowControlSection } from "@/pages/console/flow-control-section";
 import { ServiceInstanceView } from "@/pages/console/ServiceInstanceView";
 import { WebSocketDebugView } from "@/pages/console/WebSocketDebugView";
+import { capabilityModePresentation } from "@/runtime/mode-presentation";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
 
 /**
@@ -23,48 +25,9 @@ import { useRuntimeMode } from "@/runtime/runtime-mode-context";
  * acquisition range.
  */
 
-interface ConsoleModeStatus {
-  tone: StatusTone;
-  label: string;
-  detail: string;
-}
-
-function consoleModeStatus(
-  capability: ReturnType<typeof useRuntimeMode>["capability"],
-): ConsoleModeStatus {
-  if (!capability) {
-    return {
-      tone: "unknown",
-      label: "发现能力中",
-      detail: "能力发现完成前不启用管理写。",
-    };
-  }
-  switch (capability.mode) {
-    case "current-contract":
-      return {
-        tone: "unknown",
-        label: "Current Contract",
-        detail: "真实状态与公开 /ws 可用。管理写需要 Admin API。",
-      };
-    case "admin-api":
-      return {
-        tone: "info",
-        label: "Admin API",
-        detail:
-          "Service Instance 使用 service-instance 接缝。WebSocket 仅使用 /api/v1/admin/ws。",
-      };
-    case "capabilities-unknown":
-      return {
-        tone: "warning",
-        label: "能力未知",
-        detail: "不连接任何 WebSocket，管理写保持禁用。",
-      };
-  }
-}
-
 export function ConsolePage() {
   const { capability } = useRuntimeMode();
-  const mode = consoleModeStatus(capability);
+  const mode = capabilityModePresentation(capability);
 
   return (
     <>
@@ -114,6 +77,7 @@ export function ConsolePage() {
 
         <TabsContent value="feed">
           <FeedSubscriptionView />
+          <FlowControlSection />
         </TabsContent>
 
         <TabsContent value="instance">

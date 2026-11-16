@@ -4,6 +4,7 @@ import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it } from "vitest";
 import { renderApp } from "@/test/render-app";
 import { server } from "@/test/server";
+import { expectNoBannedUiSymbols } from "@/test/ui-copy";
 import { resetRetryAfter } from "@/runtime/retry-after";
 
 afterEach(() => {
@@ -70,14 +71,6 @@ function collectorStatus(gaps: unknown[]) {
   };
 }
 
-function uiCopyWithoutRawEvidence(): string {
-  const clone = document.body.cloneNode(true) as HTMLElement;
-  clone
-    .querySelectorAll('[data-raw-evidence="true"], .sr-only')
-    .forEach((node) => node.remove());
-  return clone.textContent ?? "";
-}
-
 describe("Quality & Backfill — Collector current snapshot", () => {
   it("labels gap_unrecoverable as a process-local snapshot lost on restart", async () => {
     server.use(
@@ -130,9 +123,7 @@ describe("Quality & Backfill — Collector current snapshot", () => {
       document.querySelectorAll('[data-slot="status-badge"] svg').length,
     ).toBeGreaterThan(0);
 
-    const copy = uiCopyWithoutRawEvidence();
-    expect(copy).not.toContain("·");
-    expect(copy).not.toContain("：");
+    expectNoBannedUiSymbols();
   });
 
   it("shows a real loading state and never reports an empty snapshot early", async () => {
@@ -636,9 +627,7 @@ describe("Quality & Backfill — Backfill Job state machine (Admin API contract 
     expect(raw).toHaveAttribute("data-raw-evidence", "true");
     expect(within(region).getByText(/已中断/)).toBeInTheDocument();
 
-    const copy = uiCopyWithoutRawEvidence();
-    expect(copy).not.toContain("·");
-    expect(copy).not.toContain("：");
+    expectNoBannedUiSymbols();
   });
 
   it("does not fabricate jobs when the admin list is empty", async () => {
@@ -904,9 +893,7 @@ describe("Quality & Backfill — create Backfill Job (Admin API contract target)
     expect(raw).toHaveAttribute("data-raw-evidence", "true");
     expect(within(region).getByText(/req_raw_create/)).toBeInTheDocument();
 
-    const copy = uiCopyWithoutRawEvidence();
-    expect(copy).not.toContain("·");
-    expect(copy).not.toContain("：");
+    expectNoBannedUiSymbols();
   });
 
   it("honours a 429 Retry-After and blocks further writes", async () => {
@@ -1155,9 +1142,7 @@ describe("Quality & Backfill — cancel and retry (Admin API contract target)", 
       within(region).queryByText(/取消请求已接受/),
     ).not.toBeInTheDocument();
 
-    const copy = uiCopyWithoutRawEvidence();
-    expect(copy).not.toContain("·");
-    expect(copy).not.toContain("：");
+    expectNoBannedUiSymbols();
   });
 
   it("retries as a new linked Job without rewriting the old one", async () => {

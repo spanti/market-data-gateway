@@ -6,6 +6,7 @@ import type {
 import {
   summarizeFeedFreshness,
   toDatasetFreshnessRows,
+  toFeedFreshnessRow,
   toFeedFreshnessView,
 } from "@/lib/freshness";
 
@@ -25,6 +26,39 @@ function health(entries: CollectorHealth["tracked"]): CollectorHealth {
     gap_unrecoverable_count: 0,
   };
 }
+
+describe("feed freshness rows", () => {
+  it("maps one shared row shape for cards, tables and alert derivation", () => {
+    const view = toFeedFreshnessView({
+      ...trackedBase,
+      age_s: 200,
+      threshold_s: 120,
+      stale: true,
+    });
+
+    expect(toFeedFreshnessRow(view)).toEqual({
+      instrumentId: "testvenue:AAA/USD",
+      feed: "testfeed",
+      interval: "1m",
+      ageS: 200,
+      thresholdS: 120,
+      stale: true,
+      lastEventTs: "2026-11-09T12:00:00.000000000Z",
+    });
+  });
+
+  it("keeps an unmeasurable entry explicitly unknown rather than healthy", () => {
+    const view = toFeedFreshnessView({
+      ...trackedBase,
+      age_s: null,
+      threshold_s: 120,
+      stale: false,
+    });
+
+    expect(view.tone).toBe("unknown");
+    expect(toFeedFreshnessRow(view).stale).toBeNull();
+  });
+});
 
 describe("feed freshness countdown", () => {
   it("derives the remaining countdown from server age_s and threshold_s", () => {

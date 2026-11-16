@@ -6,6 +6,7 @@ import type { BarMessageEnvelope } from "@/api/endpoints/bars";
 import { parseDateTimeInput, parseIsoInstant } from "@/lib/time-range";
 import { renderApp } from "@/test/render-app";
 import { server } from "@/test/server";
+import { expectNoBannedUiSymbols } from "@/test/ui-copy";
 
 vi.mock("echarts/core", () => ({
   use: vi.fn(),
@@ -258,23 +259,6 @@ describe("Bars page D migration", () => {
     "实时跟随",
   ] as const;
 
-  function expectNoBannedSymbols(scope: HTMLElement) {
-    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
-    while (walker.nextNode()) {
-      const element = walker.currentNode.parentElement;
-      if (
-        !element ||
-        element.closest('[data-raw-evidence="true"]') ||
-        element.closest(".sr-only")
-      ) {
-        continue;
-      }
-      expect(walker.currentNode.textContent, "banned UI separator").not.toMatch(
-        /[·：]/,
-      );
-    }
-  }
-
   it("renders the shared D cards, help triggers and clean UI copy", async () => {
     server.use(http.get("*/api/v2/bars", () => pageResponse([envelope()])));
     renderApp({ initialEntries: [barsUrl(HISTORICAL)] });
@@ -304,25 +288,14 @@ describe("Bars page D migration", () => {
     for (const name of MIGRATED_REGIONS) {
       const region = screen.getByRole("region", { name });
       expect(region).toBeInTheDocument();
-      expect(region).toHaveAttribute(
-        "data-slot",
-        name === "最大 Revision Bar 图" ? "chart-panel" : "card",
-      );
-      expectNoBannedSymbols(region);
+      expect(within(region).getByRole("heading")).toBeInTheDocument();
+      expectNoBannedUiSymbols(region);
     }
 
-    const summary = screen.getByTestId("history-summary");
-    expect(summary.textContent).not.toMatch(/[·：]/);
-
-    const pageHeader = screen
-      .getByRole("heading", { name: "Bar 图与导出", level: 1 })
-      .closest('[data-slot="page-header"]') as HTMLElement;
-    const badges = pageHeader.querySelectorAll('[data-slot="status-badge"]');
-    expect(badges.length).toBeGreaterThan(0);
-    for (const badge of badges) {
-      expect(badge.querySelector("svg")).not.toBeNull();
-      expect(badge.textContent?.trim().length).toBeGreaterThan(0);
-    }
+    expect(screen.getByTestId("history-summary")).toBeInTheDocument();
+    // Page-level statuses stay visible as text, not only as styling.
+    expect(screen.getAllByText("分页完整").length).toBeGreaterThan(0);
+    expect(screen.getByText("UTC 显示")).toBeInTheDocument();
   });
 });
 

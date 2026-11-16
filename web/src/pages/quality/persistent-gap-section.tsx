@@ -29,7 +29,7 @@ import {
 import { BAR_INTERVALS, type BarInterval } from "@/lib/time-range";
 import { CAPABILITY_KEYS } from "@/runtime/capability-gates";
 import { queryErrorInfo } from "@/lib/errors";
-import { QualityCardHeading } from "./quality-card-heading";
+import { CardHeading } from "@/components/card-heading";
 import {
   formatRange,
   formatUtcTimestamp,
@@ -124,7 +124,7 @@ export function PersistentBackfillGapSection() {
       aria-label="持久 Unrecoverable Backfill Gap"
       className="min-w-0"
     >
-      <QualityCardHeading
+      <CardHeading
         icon={DatabaseBackup}
         title="持久 Unrecoverable Backfill Gap"
         helpLabel="持久 Unrecoverable Backfill Gap 说明"

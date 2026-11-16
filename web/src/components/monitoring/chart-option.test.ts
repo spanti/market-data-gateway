@@ -9,6 +9,7 @@ import type { TrendSeries } from "@/api/monitoring/types";
 
 function series(name: string, points: Array<[number, number | null]>): TrendSeries {
   return {
+    id: name,
     name,
     points: points.map(([ts, value]) => ({ ts, value })),
   };

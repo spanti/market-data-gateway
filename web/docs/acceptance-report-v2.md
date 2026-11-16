@@ -28,14 +28,18 @@ Commands were run from `web/` on 2026-11-16:
 |---|---|---|
 | Typecheck | `npm run typecheck` | PASS — `tsc --noEmit`, 0 errors |
 | Lint | `npm run lint` | PASS — `eslint . --max-warnings 0`, 0 errors/warnings |
-| Unit/component | `npm test` | PASS — **61 test files, 544 tests** (23.36 s) |
-| Production build | `npm run build` | PASS — Vite 6.4.5, 8,561 modules, 7.84 s |
-| Full browser E2E | `MDGW_E2E_WEB_PORT=5179 MDGW_E2E_DATA_ROOT=E:/temp/mdgw-e2e-oc2-09 npx playwright test` | PASS — **56 tests, 1.8 min**, Chrome channel, 0 failures, 0 retries |
+| Unit/component | `npm test` | PASS — **65 test files, 560 tests** (19.50 s) |
+| Production build | `npm run build` | PASS — Vite 6.4.5, 8,566 modules, 7.63 s |
+| Full browser E2E | `MDGW_E2E_WEB_PORT=5179 MDGW_E2E_DATA_ROOT=E:/temp/mdgw-e2e-oc2-fixes npx playwright test` | PASS — **56 tests, 1.8 min**, Chrome channel, 0 failures, 0 retries |
 
 The full-suite run used the requested ports/data root. Web port 5174 was left untouched for the
 read-only prototype Vite server. Default service ports 8096–8099/9099 and ZMQ 5655–5658 were
-used by the real stack. The final full suite was re-run after `git merge
-integration/operator-console-v2` reported “Already up to date”; it passed 56/56 again.
+used by the real stack. The review-fix pass (section 11) reran the full suite in the linked
+`review-fixes` worktree after merging the current integration tip; it passed 56/56 again.
+
+The Vitest increase from 544 to 560 tests comes from the review fixes: canonical copy-scan
+coverage (attribute and sr-only copy), series display-name extraction, capability-mode
+presentation, Service-Role/Service-Instance source wording, and the repeated-touch help test.
 
 ### Full Playwright breakdown
 
@@ -88,8 +92,8 @@ Kept because still used: `Card*`, `MetricCard`, `ChartPanel` (help/legend/state/
 (`title`, optional quiet `description`, `status`, `actions`, `help`), `states`, `Table`, `Dialog`,
 `ConfirmDialog`, `DisabledReason`/`DisabledAction`, `Pagination`, `PermissionGate`.
 
-No five-module external behaviour changed. The complete 544-test Vitest suite and 56-test browser
-suite pass after the shrink.
+No five-module external behaviour changed. The complete Vitest suite (560 tests after the
+review-fix additions) and the 56-test browser suite pass after the shrink.
 
 ---
 
@@ -112,8 +116,12 @@ suite pass after the shrink.
 
 ### Browser DOM sweep
 
-`expectNoBannedUiSymbols` walks visible text nodes, excludes `data-raw-evidence="true"` and
-`sr-only`, and was applied to:
+`expectNoBannedUiSymbols` walks visible text nodes **including `sr-only` assistive text**,
+scans accessible/visible attribute copy (`placeholder`, `aria-label`, `aria-description`,
+`aria-placeholder`, `aria-roledescription`, `aria-valuetext`, `title`, `alt`), and excludes only
+`data-raw-evidence="true"` subtrees. The same boundary is implemented in the Vitest helper
+(`src/test/ui-copy.ts`) and the Playwright helper (`e2e/support.ts`); divergent local copies were
+deleted. The scan was applied to:
 
 - all five default module pages at 1440;
 - all three Console tabs (Feed Subscription, Service Instance, WebSocket Debug) at 1024, 1280
@@ -194,9 +202,12 @@ Local overflow evidence:
 - Audit timeline wraps long actor/reason/action text; no page overflow.
 - Dialogs (Graceful Stop, Export Job split, Backfill create/cancel/retry) are usable at 1024 and 1280/1440; chart readouts work at 1024, 1280 and 1440.
 
-The browser spec also asserts near-white cards (`min(r,g,b) ≥ 245` in light), card radius ≥ 8 px,
-non-`none` soft shadow, card border, rounded status pills with icon + text + non-transparent
-background, no full-page decorative divider-like elements, and no numeric headings.
+Visual card properties (near-white surface, radius, soft shadow, pill treatment) are reviewed
+from the curated screenshots and are no longer asserted through private `data-slot` selectors or
+computed Tailwind styles. Behaviour assertions use roles, accessible names, visible text,
+states, focus, downloads and overflow. The spec still checks visible page properties: no
+full-page decorative divider-like elements and no numeric headings. Status pills are verified as
+user-visible icon + text through roles/text, and the screenshots carry the visual review.
 
 ### Curated screenshots
 
@@ -233,8 +244,15 @@ The real Loading/Empty/Error/Unknown states never keep a stale healthy KPI or he
   contract gap state without inventing a chart”, “shows an empty state without auto-expanding the
   range”.
 - New browser test (CONTRACT-ONLY failure injection): a failed Collector `/status` produces
-  “Collector /status 加载失败”, a visible last-success line, no `data-tone="good"` badge inside the
-  Feed Freshness region, and an inline raw error. No old Ready/healthy pill survives.
+  “Collector /status 加载失败”, a visible last-success line, no “正常” status text inside the Feed
+  Freshness region, and the error text the ops client actually renders. The injected HTTP 500 body
+  uses the REST envelope with `"message": "upstream · failed：timeout"`, but the Collector ops
+  adapter deliberately discards non-envelope JSON, so the visible error is the transport-level
+  `Ops endpoint returned HTTP 500`; the test asserts that exact text and asserts that the JSON
+  body message is **not** rendered. This proves the generic HTTP 500 path and the absence of a
+  stale healthy pill, not passthrough of an arbitrary backend JSON message. Backend message
+  passthrough is proven by the REST envelope fixtures (Export Job, Feed, Quality, audit), not by
+  this ops-error injection.
 
 Cached values retain `lastSuccessAt` evidence and are not relabelled as current health. Sources
 that have not succeeded show `最后成功 —` or the last successful timestamp with the explicit
@@ -278,22 +296,35 @@ simulation, `PrototypeMark`, prototype CSS or fourth Service Role.
 |---|---|
 | Pre-v2 baseline main chunk (historical `acceptance-report.md`) | 541.80 kB / 162.22 kB gzip |
 | Main chunk before this ticket's vendor split | 656.66 kB / 197.60 kB gzip |
-| Final main chunk (`index-*.js`) | **568.23 kB / 168.07 kB gzip** |
-| Final delta vs pre-v2 baseline | **+26.43 kB raw (+4.9%), +5.85 kB gzip (+3.6%)** |
+| Final main chunk after review fixes (`index-*.js`) | **564.28 kB / 168.31 kB gzip** |
+| Final delta vs pre-v2 baseline | **+22.48 kB raw (+4.15%), +6.09 kB gzip (+3.75%)** |
 | Final ECharts chunk | 490.83 kB / 166.13 kB gzip |
-| Final total JS | 1,424,744 bytes across 9 chunks |
-| Final CSS | 60.68 kB / 14.08 kB gzip |
-| Final JS+CSS total | 1,485,421 bytes; 464.99 kB gzip by the Vite-reported gzip sizes |
-| Final `dist/` including fonts and HTML | 1,581,059 bytes |
+| Final total JS | 1,420,792 bytes across 9 chunks |
+| Final CSS | 61.40 kB / 14.18 kB gzip |
+| Final JS+CSS total | 1,482,188 bytes; 465.33 kB gzip by the Vite-reported gzip sizes |
+| Final `dist/` including fonts and HTML | 1,577,823 bytes |
 
 Assessment: the main chunk remains above Vite's 500 kB advisory, exactly as the pre-v2 baseline
 did; this is a continuing advisory, not a new build failure. The v2 growth comes from the shared D
 components, HelpTrigger, the Monitoring cards/freshness/alerts surfaces and the migrated Console,
-Quality and Security views. A safe, dependency-free vendor split (`radix-ui`, React Hook Form,
-Lucide/Hugeicons, TanStack Virtual into their own chunks) reduced the main chunk by 88.43 kB raw /
-29.53 kB gzip from the pre-split v2 build. ECharts remains isolated. No further unassessed
-regression was found; route-level lazy loading was not introduced because it would change loading
-behaviour beyond this ticket's cleanup/acceptance scope.
+Quality and Security views. The vendor split is deliberately **kept** after the review-fix
+decision: ticket 09 required the bundle to be inspected with no unassessed regression, the split is
+the assessed mitigation, and it reduces the main chunk by 92.38 kB raw / 29.29 kB gzip from the
+pre-split v2 build (656.66 → 564.28 kB raw; 197.60 → 168.31 kB gzip). It is a pure
+`manualChunks` partitioning of dependencies: no dynamic `import()` was added, every route remains
+a static import, and the module graph is unchanged, so loading behaviour is the same graph split
+into vendor files. ECharts remains isolated. Route-level lazy loading was not introduced because
+it would change loading behaviour beyond this ticket's cleanup/acceptance scope.
+
+### Dev-server dependency path decision
+
+The review flagged the worktree-specific `server.fs.allow` allowance as scope creep. The allowance
+is no longer unconditional. A normal checkout keeps `node_modules` inside the project root and gets
+Vite's default allow list unchanged. Only when `node_modules` resolves outside the project (the
+linked-worktree junction layout used to run acceptance here) does the config add that resolved
+dependency path; without it Vite rejects webfont files with HTTP 403, `theme-preset.spec.ts` fails
+its console-error assertion, and the screenshots lose the production typography. The helper is
+inert in a normal checkout, and the full real-stack suite was rerun in this worktree with it.
 
 ---
 
@@ -352,13 +383,61 @@ behaviour beyond this ticket's cleanup/acceptance scope.
    suite was executing. The test passed in an isolated rerun (1/1, 3.0 s), in the clean full run
    (56/56, 1.9 min) and in the post-merge full run (56/56, 1.8 min). No product change was needed.
 5. **Test-authoring corrections.** The first screenshot draft used `[data-slot="card"]` only, but
-   `Card` receives component-specific slots such as `metric-card`/`chart-panel`; the selector was
-   corrected. The monitoring failure injection initially expected an ops error body, but the ops
-   client only surfaces `Ops endpoint returned HTTP 500`; the test now asserts the visible failure
-   and absence of a healthy badge, while banned-symbol raw samples are covered by the Admin,
-   Export Job, Feed and WebSocket specs.
-6. **Bundle advisory.** Main chunk is 568.23 kB / 168.07 kB gzip, still above 500 kB like the
+   `Card` receives component-specific slots such as `metric-card`/`chart-panel`; that private
+   selector approach was removed in the review-fix pass in favour of role/name and visible-text
+   assertions. The monitoring failure injection initially expected an ops error body, but the ops
+   client only surfaces `Ops endpoint returned HTTP 500`; the test now asserts that exact visible
+   text, asserts the JSON body message is not rendered, and asserts the absence of a healthy
+   badge. Banned-symbol raw samples are covered by the Admin, Export Job, Feed and WebSocket specs.
+6. **Bundle advisory.** Main chunk is 564.28 kB / 168.31 kB gzip, still above 500 kB like the
    baseline. The vendor split and full assessment are recorded in section 8; no build failure.
+7. **Dev-server dependency path.** The `fs.allow` allowance is now conditional on `node_modules`
+   resolving outside the project root. Normal checkouts use Vite's default allow list; the linked
+   acceptance worktree needs the resolved dependency path or webfonts return HTTP 403 and
+   `theme-preset.spec.ts` fails its console-error check. See section 8.
 
 No ticket Status line or `## Comments` section was modified. `web/docs/acceptance-report.md` was
 not edited.
+
+---
+
+## 11. Review-fix pass (2026-11-16)
+
+Branch: `ticket/operator-console-v2-review-fixes`. Worktree:
+`E:/total-project/mdgw-worktrees/operator-console-v2/review-fixes`. The pass addresses the
+Standards and Spec findings recorded in `notes/review-findings.md`.
+
+- **Test conventions (finding 1).** `BarsPage.test.tsx`, `MonitoringPage.test.tsx`,
+  `e2e/acceptance-v2.spec.ts` and `e2e/layout-keyboard.spec.ts` no longer assert `data-slot`,
+  `data-tone`, Tailwind classes, SVG internals or card/element counts. They use role/name, visible
+  text, statuses, focus, tooltips, downloads and overflow. The Service Instance ledger rows gained
+  accessible `group` names (`<role> Service Role` / `<instance> <role> Service Instance`) so tests
+  can locate them without private structure.
+- **Duplication (findings 2–11).** One shared `trendSeriesName`; one canonical
+  `latestFiniteValue`; one Feed Freshness row type/mapper; `TrendSeries.id` is required and the
+  name fallback is gone; `queryErrorInfo` is used instead of a local re-derivation; API Rate Limit
+  and WebSocket Slow Consumer now share one resource-editor lifecycle/markup in a dedicated
+  `flow-control-section.tsx`; Current Contract rows use one `buildRoleRow` scaffold; capability
+  mode badges use one presentation map (`runtime/mode-presentation.ts`); the duplicated icon tile
+  is `IconTile`, and `QualityCardHeading` became the shared `CardHeading`.
+- **Copy scan (finding 12).** Both canonical helpers now scan attribute copy and `sr-only` text
+  while excluding raw evidence. Local scan copies in BarsPage, MonitoringPage,
+  console-websocket-debug, quality-page, foundation, bar-chart and csv-download tests were
+  deleted. No UI-generated hit was revealed across the five modules, three Console tabs, expanded
+  help, validation, confirmations, loading/empty/error/unknown and operation results.
+- **Honesty (finding 13).** The CONTRACT-ONLY failure test asserts the visible
+  `Ops endpoint returned HTTP 500` and asserts the injected JSON message is not rendered; section 6
+  states exactly what that path proves.
+- **Help trigger (finding 15).** Reimplemented from the behaviour contract with production-native
+  disclosure state; hover, keyboard focus, repeated touch taps, Escape, accessible name, wrapped
+  content, collision padding and non-overlap are covered. The repeated-tap plus Escape test was
+  added.
+- **Service Role vs Service Instance (finding 16).** Current Contract Monitoring rows are labelled
+  Service Roles; Admin rows are labelled Service Instances, in the card heading, count, header
+  summary, alerts and help. A component test renders both source kinds and proves the wording
+  changes.
+- **Vite (finding 14).** Vendor `manualChunks` kept with explicit justification and no loading
+  behavior change (section 8); the dev-server allowance is conditional on a linked dependency
+  layout (section 8/10). The full real-stack suite passes in this worktree.
+
+No ticket Status or `## Comments` section was modified.

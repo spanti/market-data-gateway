@@ -3,58 +3,101 @@ import { expect, type APIRequestContext, type Page } from "@playwright/test";
 /** Separators that UI-generated copy must never contain. */
 export const BANNED_UI_SYMBOLS = ["·", "："] as const;
 
+/** Attribute copy users see or assistive technology announces. */
+const COPY_ATTRIBUTES = [
+  "placeholder",
+  "aria-label",
+  "aria-description",
+  "aria-placeholder",
+  "aria-roledescription",
+  "aria-valuetext",
+  "title",
+  "alt",
+] as const;
+
 export interface BannedSymbolHit {
   symbol: string;
   text: string;
 }
 
 /**
- * Collects visible-DOM text containing banned UI separators. Raw evidence
- * regions (`data-raw-evidence="true"`) and visually hidden text are exempt.
+ * Collects banned UI separators from visible text, sr-only text and
+ * accessibility/visible attribute copy. Raw evidence regions
+ * (`data-raw-evidence="true"`) are exempt and verified separately.
  */
 export async function bannedUiSymbolHits(
   page: Page,
   scopeSelector = "body",
 ): Promise<BannedSymbolHit[]> {
   return page.evaluate(
-    ({ selector, symbols }) => {
+    ({ selector, symbols, attributes }) => {
       const root = document.querySelector(selector);
       if (!root) {
         return [{ symbol: "", text: `missing scan scope ${selector}` }];
       }
       const hits: Array<{ symbol: string; text: string }> = [];
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
       const skipped = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
-      while (walker.nextNode()) {
-        const node = walker.currentNode;
-        const element = node.parentElement;
-        if (!element || skipped.has(element.tagName)) {
-          continue;
-        }
-        if (element.closest('[data-raw-evidence="true"]')) {
-          continue;
-        }
-        if (element.closest(".sr-only")) {
-          continue;
-        }
+      const isHidden = (element: Element): boolean => {
         const style = window.getComputedStyle(element);
-        if (
+        return (
           style.display === "none" ||
           style.visibility === "hidden" ||
           style.opacity === "0"
+        );
+      };
+      const collect = (text: string): void => {
+        const trimmed = text.trim().slice(0, 160);
+        if (!trimmed) {
+          return;
+        }
+        for (const symbol of symbols) {
+          if (trimmed.includes(symbol)) {
+            hits.push({ symbol, text: trimmed });
+          }
+        }
+      };
+
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const element = node.parentElement;
+        if (
+          !element ||
+          skipped.has(element.tagName) ||
+          element.closest('[data-raw-evidence="true"]') ||
+          isHidden(element)
         ) {
           continue;
         }
-        const text = node.textContent ?? "";
-        for (const symbol of symbols) {
-          if (text.includes(symbol)) {
-            hits.push({ symbol, text: text.trim().slice(0, 160) });
+        collect(node.textContent ?? "");
+      }
+
+      const elements = Array.from(root.querySelectorAll("*"));
+      if (root instanceof Element) {
+        elements.unshift(root);
+      }
+      for (const element of elements) {
+        if (
+          skipped.has(element.tagName) ||
+          element.closest('[data-raw-evidence="true"]') ||
+          isHidden(element)
+        ) {
+          continue;
+        }
+        for (const attribute of attributes) {
+          const value = element.getAttribute(attribute);
+          if (value) {
+            collect(`[${attribute}] ${value}`);
           }
         }
       }
       return hits;
     },
-    { selector: scopeSelector, symbols: [...BANNED_UI_SYMBOLS] },
+    {
+      selector: scopeSelector,
+      symbols: [...BANNED_UI_SYMBOLS],
+      attributes: [...COPY_ATTRIBUTES],
+    },
   );
 }
 

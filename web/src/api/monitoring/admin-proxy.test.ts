@@ -247,9 +247,10 @@ describe("monitoring proxy contract target", () => {
         ],
       },
       "QPS",
+      "qps",
     );
 
-    expect(series[0]?.id).toBe("QPS");
+    expect(series[0]?.id).toBe("qps");
     expect(series[0]?.name).toBe("QPS /api/v1/bars");
     expect(series[0]?.name).not.toContain("·");
     expect(series[0]?.points).toEqual([

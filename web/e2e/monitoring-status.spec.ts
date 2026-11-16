@@ -96,17 +96,17 @@ test("D foundation exposes four KPI cards and separated freshness areas", async 
   await expect(dataset).toBeVisible();
   await expect(dataset).toContainText("独立于 Feed Freshness");
 
-  // Service Role and Service Instance are labelled as distinct concepts.
+  // Current Contract exposes one process per Service Role, and the card says
+  // so; Service Instance is not claimed for per-Role rows.
   const service = page.getByRole("region", {
-    name: "Service Instance",
+    name: "Service Role",
     exact: true,
   });
   await expect(service).toBeVisible();
-  await expect(service).toContainText("Service Role");
-  await expect(service).toContainText("Instance");
+  await expect(service).toContainText("3 个 Service Role");
   for (const role of ["collector", "api", "replay"] as const) {
     await expect(
-      page.locator(`[data-slot="service-instance"][data-role="${role}"]`),
+      service.getByRole("group", { name: `${role} Service Role` }),
     ).toBeVisible();
   }
 

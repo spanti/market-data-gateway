@@ -9,23 +9,11 @@ import {
   buildQpsQuery,
   LATENCY_QUANTILES,
 } from "@/api/monitoring/promql";
+import { trendSeriesName } from "@/api/monitoring/series-display";
 import type { TrendSeries, TrendWindow } from "@/api/monitoring/types";
 
 function seconds(ms: number): number {
   return Math.floor(ms / 1000);
-}
-
-function seriesName(
-  labels: Record<string, string>,
-  fallback: string,
-  index: number,
-  count: number,
-): string {
-  if (labels.path) {
-    // Display names are UI-generated copy and must not contain `·` or `：`.
-    return `${fallback} ${labels.path}`;
-  }
-  return count > 1 ? `${fallback} ${index + 1}` : fallback;
 }
 
 /**
@@ -33,18 +21,17 @@ function seriesName(
  * values (including the literal `NaN`) become null so the line has a gap.
  * Nothing is zero-filled.
  *
- * `identity` is the stable metric identity used by KPI selection. It defaults
- * to the display name only for legacy callers; the monitoring adapters always
- * pass an explicit identity.
+ * `identity` is the stable metric identity used by KPI selection. It is
+ * required: display labels may change without changing which metric is read.
  */
 export function prometheusResultToTrendSeries(
   result: PrometheusQueryResult,
   fallbackName: string,
-  identity: string = fallbackName,
+  identity: string,
 ): TrendSeries[] {
   return result.series.map((series, index) => ({
     id: identity,
-    name: seriesName(series.labels, fallbackName, index, result.series.length),
+    name: trendSeriesName(series.labels, fallbackName, index, result.series.length),
     labels: series.labels,
     points: series.points.map((point) => ({
       ts: Math.round(point.ts * 1000),
