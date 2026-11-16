@@ -8,9 +8,15 @@ import {
   type CsvProgress,
 } from "@/api/endpoints/bars";
 import { HttpError } from "@/api/http/types";
+import { HelpTrigger } from "@/components/help-trigger";
 import { ErrorState } from "@/components/states";
 import { Button } from "@/components/ui/button";
-import { Panel, PanelDescription, PanelHeader, PanelTitle } from "@/components/ui/panel";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { triggerBlobDownload } from "@/lib/content-disposition";
 import type { ExportPathDecision } from "@/lib/export-policy";
 import { formatBytes } from "@/lib/format";
@@ -108,9 +114,9 @@ export function CsvDownloadPanel({
   let disabledReason: string | null = null;
   if (decision.kind === "job") {
     disabledReason =
-      "超过 31 个 UTC 天：只创建 Admin Export Job，不自动退回超大 Blob。";
+      "超过 31 个 UTC 天，只创建 Admin Export Job，不自动退回超大 Blob。";
   } else if (decision.kind === "split") {
-    disabledReason = "超过 366 个 UTC 天：需拆分为多个 Export Job。";
+    disabledReason = "超过 366 个 UTC 天，需拆分为多个 Export Job。";
   } else if (decision.kind === "invalid") {
     disabledReason = decision.message;
   } else if (query === null) {
@@ -118,97 +124,117 @@ export function CsvDownloadPanel({
   }
 
   return (
-    <Panel className={cn("mt-6 p-5", className)} aria-label="CSV 直接下载">
-      <PanelHeader>
-        <div>
-          <PanelTitle>小文件 CSV 直接下载</PanelTitle>
-          <PanelDescription>
-            ≤31 个 UTC 天使用现有 `GET /api/v1/bars?format=csv`，以
-            responseType=blob 接收。Blob 是内存缓冲：不支持 Range 续传，也不宣称直接流式写盘；
-            服务端列顺序、所有原始 Revision 与精确十进制文本保持不变，前端不会重新序列化 CSV 字节。
-          </PanelDescription>
+    <Card
+      className={cn("mt-4", className)}
+      role="region"
+      aria-label="CSV 直接下载"
+    >
+      <CardHeader>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <CardTitle>小文件 CSV 直接下载</CardTitle>
+          <HelpTrigger
+            label="小文件 CSV 直接下载说明"
+            content="≤31 个 UTC 天使用 GET /api/v1/bars?format=csv 并以 Blob 接收。Blob 是内存缓冲，不支持 Range 续传，也不直接流式写盘。服务端列顺序、所有原始 Revision 与精确十进制文本保持不变，前端不会重新序列化 CSV 字节。"
+            side="bottom"
+          />
         </div>
         <span className="text-xs text-faint-foreground">
           {decision.message}
         </span>
-      </PanelHeader>
+      </CardHeader>
 
-      <div className="mt-4 flex flex-wrap items-center gap-2">
-        <Button onClick={startDownload} disabled={!isDirect || state.kind === "downloading"}>
-          <Download aria-hidden="true" />
-          直接下载 CSV（≤31 天）
-        </Button>
-        {state.kind === "downloading" ? (
-          <Button variant="outline" onClick={cancel}>
-            <X aria-hidden="true" />
-            取消下载
+      <CardContent>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            onClick={startDownload}
+            disabled={!isDirect || state.kind === "downloading"}
+          >
+            <Download aria-hidden="true" />
+            直接下载 CSV（≤31 天）
           </Button>
-        ) : null}
-        {disabledReason ? (
-          <span className="text-xs text-faint-foreground">{disabledReason}</span>
-        ) : null}
-      </div>
-
-      {state.kind === "downloading" ? (
-        <div className="mt-3 text-xs" role="status">
-          {state.totalBytes !== null && state.percent !== null ? (
-            <>
-              <progress
-                className="h-2 w-full max-w-md"
-                max={state.totalBytes}
-                value={state.loadedBytes}
-              >
-                {state.percent}%
-              </progress>
-              <p className="mt-1 text-muted-foreground">
-                已下载 {formatBytes(state.loadedBytes)} /{" "}
-                {formatBytes(state.totalBytes)}（{state.percent}%）
-              </p>
-            </>
-          ) : (
-            <p className="text-muted-foreground">
-              已下载 {formatBytes(state.loadedBytes)} / 总量未知（无可信
-              Content-Length，仅显示已接收字节）
-            </p>
-          )}
+          {state.kind === "downloading" ? (
+            <Button variant="outline" onClick={cancel}>
+              <X aria-hidden="true" />
+              取消下载
+            </Button>
+          ) : null}
+          {disabledReason ? (
+            <span className="text-xs text-faint-foreground">
+              {disabledReason}
+            </span>
+          ) : null}
         </div>
-      ) : null}
 
-      {state.kind === "done" ? (
-        <p role="status" className="mt-3 text-xs text-status-good">
-          已触发浏览器下载：<span className="font-mono">{state.filename}</span>
-          （{formatBytes(state.bytes)}；
-          {state.totalBytes !== null
-            ? `总量 ${formatBytes(state.totalBytes)}`
-            : "总量未知"}
-          ）
-        </p>
-      ) : null}
+        {state.kind === "downloading" ? (
+          <div className="mt-3 text-xs" role="status">
+            {state.totalBytes !== null && state.percent !== null ? (
+              <>
+                <progress
+                  className="h-2 w-full max-w-md"
+                  max={state.totalBytes}
+                  value={state.loadedBytes}
+                >
+                  {state.percent}%
+                </progress>
+                <p className="mt-1 text-muted-foreground">
+                  已下载 {formatBytes(state.loadedBytes)} /{" "}
+                  {formatBytes(state.totalBytes)}（{state.percent}%）
+                </p>
+              </>
+            ) : (
+              <p className="text-muted-foreground">
+                已下载 {formatBytes(state.loadedBytes)} / 总量未知（无可信
+                Content-Length，仅显示已接收字节）
+              </p>
+            )}
+          </div>
+        ) : null}
 
-      {state.kind === "cancelled" ? (
-        <p role="status" className="mt-3 text-xs text-muted-foreground">
-          下载已取消（AbortController）；未读取完整文件。
-        </p>
-      ) : null}
+        {state.kind === "done" ? (
+          <div
+            role="status"
+            className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-status-good"
+          >
+            <span>已触发浏览器下载</span>
+            <span className="font-mono">{state.filename}</span>
+            <span>{formatBytes(state.bytes)}</span>
+            <span className="text-muted-foreground">
+              {state.totalBytes !== null
+                ? `总量 ${formatBytes(state.totalBytes)}`
+                : "总量未知"}
+            </span>
+          </div>
+        ) : null}
 
-      {state.kind === "error" ? (
-        <ErrorState
-          className="mt-3"
-          title="CSV 下载失败"
-          description={
-            <>
-              <div className="font-mono text-[11px]">{state.error.code}</div>
-              <div>
-                {state.error.code === "range_too_large"
-                  ? RANGE_TOO_LARGE_COPY
-                  : state.error.message}
-              </div>
-            </>
-          }
-          requestId={state.error.requestId}
-          onRetry={isDirect ? () => void startDownload() : undefined}
-        />
-      ) : null}
-    </Panel>
+        {state.kind === "cancelled" ? (
+          <p role="status" className="mt-3 text-xs text-muted-foreground">
+            下载已取消（AbortController）；未读取完整文件。
+          </p>
+        ) : null}
+
+        {state.kind === "error" ? (
+          <ErrorState
+            className="mt-3"
+            title="CSV 下载失败"
+            description={
+              <>
+                <div className="font-mono text-[11px]">{state.error.code}</div>
+                <div>
+                  {state.error.code === "range_too_large" ? (
+                    RANGE_TOO_LARGE_COPY
+                  ) : (
+                    <span data-raw-evidence="true">
+                      {state.error.message}
+                    </span>
+                  )}
+                </div>
+              </>
+            }
+            requestId={state.error.requestId}
+            onRetry={isDirect ? () => void startDownload() : undefined}
+          />
+        ) : null}
+      </CardContent>
+    </Card>
   );
 }

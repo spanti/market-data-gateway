@@ -133,7 +133,7 @@ export function useBarLiveFeed({
     blockedReason = "请先选择 InstrumentId 与 Bar Interval。";
   } else if (enabled && !rangeAllowed) {
     blockedReason =
-      "范围超过 31 个 UTC 天：图表与实时跟随都需要先缩小范围。";
+      "范围超过 31 个 UTC 天，图表与实时跟随都需要先缩小范围。";
   } else if (enabled && !rangeIncludesNow) {
     blockedReason =
       "历史范围不连接实时追加；请将结束时间调整到包含当前时间后再开启。";

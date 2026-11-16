@@ -26,6 +26,37 @@ const NAV_ITEMS = [
   { name: "Security & Audit", heading: "Security & Audit", path: "/security" },
 ] as const;
 
+function barsQueryUrl(): string {
+  const params = new URLSearchParams({
+    instrument_id: "binance:BTC/USDT",
+    interval: "1m",
+    start: "2024-01-01T00:00:00.000Z",
+    end: "2024-01-01T00:02:00.000Z",
+  });
+  return `/bars?${params.toString()}`;
+}
+
+async function expectBarsDRegions(page: Page): Promise<void> {
+  await expect(
+    page.getByRole("heading", { name: "Bar 图与导出" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Bar 查询条件" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "最大 Revision Bar 图" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "原始 Revision 表" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "CSV 直接下载" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "实时跟随" }),
+  ).toBeVisible();
+}
+
 async function tabUntilText(
   page: Page,
   text: string,
@@ -59,6 +90,26 @@ test.describe("narrow desktop layout 1024px", () => {
       page.getByRole("region", { name: "Feed Freshness", exact: true }),
     ).toBeVisible();
     await expect(page.getByRole("region", { name: "Service Instance" })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+
+    // Bars remains operable at 1024px. Wide Revision tables scroll inside
+    // their own card instead of making the whole page overflow.
+    await page.goto(barsQueryUrl());
+    await expectBarsDRegions(page);
+    await expect(page.getByTestId("history-summary")).toContainText(
+      "共 2 条原始 Revision",
+    );
+    await expect(
+      page.getByRole("button", { name: "应用筛选" }),
+    ).toBeVisible();
+    const revisionScroller = page
+      .getByRole("region", { name: "原始 Revision 表" })
+      .locator('[data-slot="table-container"]');
+    const widths = await revisionScroller.evaluate((element) => ({
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+    }));
+    expect(widths.scrollWidth).toBeGreaterThan(widths.clientWidth);
     await expectNoHorizontalOverflow(page);
   });
 
@@ -138,6 +189,15 @@ for (const width of [1280, 1440] as const) {
         page.getByTestId("service-instance-collector"),
       ).toBeVisible();
       await expectNoHorizontalOverflow(page);
+
+      // The migrated Bars query, chart and data regions stay usable and do
+      // not overflow at this desktop width.
+      await page.goto(barsQueryUrl());
+      await expectBarsDRegions(page);
+      await expect(page.getByTestId("history-summary")).toContainText(
+        "共 2 条原始 Revision",
+      );
+      await expectNoHorizontalOverflow(page);
     });
 
     test("quality cards and help are usable", async ({ page }) => {
@@ -213,6 +273,9 @@ for (const width of [1280, 1440] as const) {
         () => document.activeElement?.tagName ?? "",
       );
       expect(activeTag).not.toBe("");
+
+      await expectBarsDRegions(page);
+      await expectNoHorizontalOverflow(page);
     });
   });
 }
