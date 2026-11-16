@@ -38,10 +38,10 @@ export interface BarsPageDecisionInput {
 }
 
 const CURSOR_GAP_MESSAGE =
-  "分页已停止：next_cursor 未前进或重复。为避免无限循环，仅显示已返回的部分结果；请缩小时间范围后重试。";
+  "分页已停止。next_cursor 未前进或重复。为避免无限循环，仅显示已返回的部分结果；请缩小时间范围后重试。";
 
 const PROTOCOL_MESSAGE =
-  "分页已停止：响应缺少有效的 page.next_cursor。下方为部分结果。";
+  "分页已停止。响应缺少有效的 page.next_cursor。下方为部分结果。";
 
 export function decideBarsPageStep(
   input: BarsPageDecisionInput,
@@ -65,7 +65,7 @@ export function decideBarsPageStep(
         stop: {
           reason: "cursor_protocol_error",
           message:
-            "分页已停止：has_more=false 但 next_cursor 非空，违反 revision-safe cursor 契约。下方为部分结果。",
+            "分页已停止。has_more=false 但 next_cursor 非空，违反 revision-safe cursor 契约。下方为部分结果。",
         },
       };
     }
@@ -88,7 +88,7 @@ export function decideBarsPageStep(
       stop: {
         reason: "cursor_protocol_error",
         message:
-          "分页已停止：has_more=true 但本页没有返回任何行，无法继续。下方为部分结果。",
+          "分页已停止。has_more=true 但本页没有返回任何行，无法继续。下方为部分结果。",
       },
     };
   }

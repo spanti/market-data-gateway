@@ -230,7 +230,7 @@ describe("Bars page filter and URL state", () => {
       (await screen.findAllByText(/图表与原始 Revision 仅支持 ≤31 个 UTC 天/))
         .length,
     ).toBeGreaterThan(0);
-    expect(screen.getByText(/当前范围：32 个 UTC 天/)).toBeInTheDocument();
+    expect(screen.getByText(/当前范围 32 个 UTC 天/)).toBeInTheDocument();
     expect(barsRequests).toBe(0);
     expect(
       screen.getByRole("button", { name: "直接下载 CSV（≤31 天）" }),
@@ -245,6 +245,81 @@ describe("Bars page filter and URL state", () => {
       ),
     );
     expect(screen.getAllByText("需要 Admin API").length).toBeGreaterThan(0);
+  });
+});
+
+describe("Bars page D migration", () => {
+  const MIGRATED_REGIONS = [
+    "Bar 查询条件",
+    "最大 Revision Bar 图",
+    "原始 Revision 表",
+    "CSV 直接下载",
+    "实时跟随",
+  ] as const;
+
+  function expectNoBannedSymbols(scope: HTMLElement) {
+    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const element = walker.currentNode.parentElement;
+      if (
+        !element ||
+        element.closest('[data-raw-evidence="true"]') ||
+        element.closest(".sr-only")
+      ) {
+        continue;
+      }
+      expect(walker.currentNode.textContent, "banned UI separator").not.toMatch(
+        /[·：]/,
+      );
+    }
+  }
+
+  it("renders the shared D cards, help triggers and clean UI copy", async () => {
+    server.use(http.get("*/api/v2/bars", () => pageResponse([envelope()])));
+    renderApp({ initialEntries: [barsUrl(HISTORICAL)] });
+
+    await screen.findByTestId("history-summary");
+
+    expect(
+      screen.getByRole("heading", { name: "Bar 图与导出", level: 1 }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Bar 图与导出说明" }),
+    ).toBeInTheDocument();
+
+    const expectedHelp = [
+      "查询条件说明",
+      "最大 Revision Bar 图说明",
+      "原始 Revision 表说明",
+      "小文件 CSV 直接下载说明",
+      "实时跟随说明",
+    ];
+    for (const name of expectedHelp) {
+      expect(screen.getByRole("button", { name })).toBeInTheDocument();
+    }
+
+    for (const name of MIGRATED_REGIONS) {
+      const region = screen.getByRole("region", { name });
+      expect(region).toBeInTheDocument();
+      expect(region).toHaveAttribute(
+        "data-slot",
+        name === "最大 Revision Bar 图" ? "chart-panel" : "card",
+      );
+      expectNoBannedSymbols(region);
+    }
+
+    const summary = screen.getByTestId("history-summary");
+    expect(summary.textContent).not.toMatch(/[·：]/);
+
+    const pageHeader = screen
+      .getByRole("heading", { name: "Bar 图与导出", level: 1 })
+      .closest('[data-slot="page-header"]') as HTMLElement;
+    const badges = pageHeader.querySelectorAll('[data-slot="status-badge"]');
+    expect(badges.length).toBeGreaterThan(0);
+    for (const badge of badges) {
+      expect(badge.querySelector("svg")).not.toBeNull();
+      expect(badge.textContent?.trim().length).toBeGreaterThan(0);
+    }
   });
 });
 
@@ -282,9 +357,11 @@ describe("Bars page data and revision views", () => {
 
     const details = within(revisionTable).getAllByText("原始 JSON")[1]!;
     await userEvent.setup().click(details);
-    expect(
-      within(revisionTable).getByText(/"close": "0.000000000000000001"/),
-    ).toBeInTheDocument();
+    const rawJson = within(revisionTable).getByText(
+      /"close": "0.000000000000000001"/,
+    );
+    expect(rawJson).toBeInTheDocument();
+    expect(rawJson).toHaveAttribute("data-raw-evidence", "true");
   });
 
   it("stops on a non-advancing cursor and reports partial results honestly", async () => {
@@ -302,7 +379,7 @@ describe("Bars page data and revision views", () => {
     renderApp({ initialEntries: [barsUrl(HISTORICAL)] });
 
     expect(
-      await screen.findByText(/分页已停止：next_cursor 未前进或重复/),
+      await screen.findByText(/分页已停止。next_cursor 未前进或重复/),
     ).toBeInTheDocument();
     expect(screen.getByTestId("history-summary")).toHaveTextContent(
       "分页已停止（部分结果）",
@@ -668,7 +745,7 @@ describe("Bars page live follow", () => {
     sockets[1]!.fireOpen();
 
     expect(
-      await screen.findByText(/存在多个接收段：断线后的新连接与上一段不连续/),
+      await screen.findByText(/存在多个接收段。断线后的新连接与上一段不连续/),
     ).toBeInTheDocument();
     expect(screen.getByText("接收段 #1")).toBeInTheDocument();
     expect(screen.getByText("接收段 #2")).toBeInTheDocument();
@@ -710,7 +787,7 @@ describe("Bars page live follow", () => {
     });
     expect(toggle).toBeDisabled();
     expect(
-      screen.getByText(/实时跟随不可用：能力未知，暂不可用/),
+      screen.getByText(/实时跟随不可用，能力未知，暂不可用/),
     ).toBeInTheDocument();
     expect(factory).not.toHaveBeenCalled();
   });
@@ -785,7 +862,7 @@ describe("Bars page live follow", () => {
     });
     await waitFor(() => expect(toggle).toBeDisabled());
     expect(
-      await screen.findByText(/实时跟随不可用：后端未实现/),
+      await screen.findByText(/实时跟随不可用，后端未实现/),
     ).toBeInTheDocument();
     expect(factory).not.toHaveBeenCalled();
   });
