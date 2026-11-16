@@ -1,5 +1,14 @@
 import { expect, test, type Page } from "@playwright/test";
-import { expectNoHorizontalOverflow } from "./support";
+import {
+  closeHelpWithEscape,
+  expectNoBannedUiSymbols,
+  expectNoHorizontalOverflow,
+  expectTooltipUsable,
+  helpTrigger,
+  openHelpByHover,
+  openHelpByKeyboard,
+  toggleHelpByTouch,
+} from "./support";
 
 /**
  * Real-browser layout and keyboard acceptance.
@@ -52,6 +61,43 @@ test.describe("narrow desktop layout 1024px", () => {
     await expect(page.getByRole("region", { name: "Service Instance" })).toBeVisible();
     await expectNoHorizontalOverflow(page);
   });
+
+  test("quality shows the real Collector snapshot and disabled Admin areas without overflow", async ({
+    page,
+  }) => {
+    await page.goto("/quality");
+    await expect(
+      page.getByRole("heading", { name: "Quality & Backfill" }),
+    ).toBeVisible();
+    await expect(page.locator('[data-slot="card"]')).toHaveCount(3);
+
+    // Current Contract: a real Collector snapshot, not accumulated history.
+    const snapshot = page.getByRole("region", {
+      name: "Unrecoverable Backfill Gap 当前快照",
+    });
+    await expect(snapshot).toBeVisible();
+    await expect(snapshot).toContainText("Collector 进程内快照");
+    await expect(
+      snapshot.getByText(/gap_unrecoverable_count/),
+    ).toBeVisible();
+
+    // Persistent gaps and Jobs stay visible but honestly gated.
+    const persistent = page.getByRole("region", {
+      name: "持久 Unrecoverable Backfill Gap",
+    });
+    await expect(persistent).toContainText("需要 Admin API");
+    await expect(persistent.locator("table")).toHaveCount(0);
+
+    const jobs = page.getByRole("region", { name: "Backfill Job" });
+    await expect(jobs).toContainText(
+      "Current Contract 没有持久 Backfill Job API",
+    );
+    await expect(jobs.locator("table")).toHaveCount(0);
+    await expect(jobs.getByRole("progressbar")).toHaveCount(0);
+
+    await expectNoBannedUiSymbols(page);
+    await expectNoHorizontalOverflow(page);
+  });
 });
 
 for (const width of [1280, 1440] as const) {
@@ -91,6 +137,38 @@ for (const width of [1280, 1440] as const) {
       await expect(
         page.getByTestId("service-instance-collector"),
       ).toBeVisible();
+      await expectNoHorizontalOverflow(page);
+    });
+
+    test("quality cards and help are usable", async ({ page }) => {
+      await page.goto("/quality");
+      await expect(
+        page.getByRole("heading", { name: "Quality & Backfill" }),
+      ).toBeVisible();
+      await expect(page.locator('[data-slot="card"]')).toHaveCount(3);
+      await expectNoHorizontalOverflow(page);
+
+      const pageHelp = await openHelpByHover(
+        page,
+        "Quality & Backfill 说明",
+      );
+      await expectTooltipUsable(page);
+      await expect(pageHelp.tooltip).toContainText("进程内 Gap 快照");
+      await closeHelpWithEscape(page);
+
+      const jobHelp = await openHelpByKeyboard(page, "Backfill Job 说明");
+      await expect(jobHelp.tooltip).toContainText("partially_succeeded");
+      await expectTooltipUsable(page);
+      await closeHelpWithEscape(page);
+
+      const gapHelp = await openHelpByHover(
+        page,
+        "持久 Unrecoverable Backfill Gap 说明",
+      );
+      await expect(gapHelp.tooltip).toContainText("物理删除");
+      await closeHelpWithEscape(page);
+
+      await expectNoBannedUiSymbols(page);
       await expectNoHorizontalOverflow(page);
     });
 
@@ -138,3 +216,30 @@ for (const width of [1280, 1440] as const) {
     });
   });
 }
+
+test.describe("quality help with a touch context", () => {
+  test.use({ viewport: { width: 1280, height: 900 }, hasTouch: true });
+
+  test("help toggles by touch, stays readable and closes with Escape", async ({
+    page,
+  }) => {
+    await page.goto("/quality");
+    await expect(
+      page.getByRole("heading", { name: "Quality & Backfill" }),
+    ).toBeVisible();
+
+    // A tap opens and a second tap closes the same help surface.
+    await toggleHelpByTouch(page, "Quality & Backfill 说明");
+
+    await helpTrigger(
+      page,
+      "Unrecoverable Backfill Gap 当前快照说明",
+    ).tap();
+    await expect(page.getByRole("tooltip")).toBeVisible();
+    await expectTooltipUsable(page);
+    await expectNoBannedUiSymbols(page);
+    await closeHelpWithEscape(page);
+
+    await expectNoHorizontalOverflow(page);
+  });
+});

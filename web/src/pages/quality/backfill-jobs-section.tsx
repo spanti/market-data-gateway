@@ -1,4 +1,6 @@
+import type * as React from "react";
 import { useId, useState } from "react";
+import { ListChecks } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { BackfillJob } from "@/api/endpoints/admin";
 import {
@@ -22,7 +24,7 @@ import {
 } from "@/components/states";
 import { StatusBadge, type StatusTone } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
-import { Panel, PanelDescription, PanelHeader, PanelTitle } from "@/components/ui/panel";
+import { Card, CardContent, CardDescription } from "@/components/ui/card";
 import {
   Table,
   TableBody,
@@ -38,6 +40,7 @@ import { CAPABILITY_KEYS } from "@/runtime/capability-gates";
 import { queryErrorInfo } from "@/lib/errors";
 import { useRetryAfter } from "@/runtime/use-retry-after";
 import { BackfillJobCreateForm } from "./backfill-job-create-form";
+import { QualityCardHeading } from "./quality-card-heading";
 import {
   formatRange,
   formatUtcTimestamp,
@@ -51,17 +54,17 @@ function JobProgress({ job }: { job: BackfillJob }) {
   const presentation = jobStatusPresentation(job.status);
   if (isJobCancellable(job.status)) {
     return (
-      <div className="flex flex-col gap-1">
+      <div className="mt-1 flex flex-col gap-1">
         <div
           role="progressbar"
-          aria-label={`Job ${job.job_id} 进度（不确定）`}
+          aria-label={`Job ${job.job_id} 进度不确定`}
           aria-valuetext="进度不确定"
-          className="h-1.5 w-24 overflow-hidden bg-surface-sunken"
+          className="h-1.5 w-24 overflow-hidden rounded-full bg-surface-sunken"
         >
-          <div className="h-full w-1/2 animate-pulse bg-accent-strong" />
+          <div className="h-full w-1/2 animate-pulse rounded-full bg-accent-strong" />
         </div>
         <span className="text-[11px] text-faint-foreground">
-          进度不确定：契约未提供百分比
+          进度不确定，契约未提供百分比
         </span>
       </div>
     );
@@ -83,8 +86,8 @@ function JobLinkage({ job }: { job: BackfillJob }) {
   }
   if (job.status === "succeeded" && job.resolved_gap_ids.length > 0) {
     return (
-      <span className="font-mono text-[11px]">
-        已解决 Gap：{job.resolved_gap_ids.join(", ")}
+      <span className="text-[11px]">
+        已解决 Gap {job.resolved_gap_ids.join(", ")}
       </span>
     );
   }
@@ -105,17 +108,50 @@ function JobError({ job }: { job: BackfillJob }) {
   const interrupted = job.error.code === "interrupted";
   return (
     <div className="mt-1 text-[11px] text-status-critical">
-      {interrupted ? <span className="font-medium">已中断（interrupted）</span> : null}{" "}
-      <span className="font-mono">{job.error.code}</span>: {job.error.message}
+      {interrupted ? <span className="font-medium">已中断 </span> : null}
+      <span className="font-mono">{job.error.code}</span>{" "}
+      <span data-raw-evidence="true">{job.error.message}</span>
     </div>
+  );
+}
+
+function JobCounters({ job }: { job: BackfillJob }) {
+  const counters: Array<[string, number]> = [
+    ["扫描", job.counters.scanned_bars],
+    ["缺失", job.counters.gap_bars],
+    ["补采", job.counters.backfilled_bars],
+    ["写入", job.counters.written_bars],
+    ["拒绝", job.counters.rejected_bars],
+  ];
+  return (
+    <dl
+      data-testid={`job-counters-${job.job_id}`}
+      className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]"
+    >
+      {counters.map(([label, value]) => (
+        <div key={label} className="flex items-baseline justify-between gap-2">
+          <dt className="text-faint-foreground">{label}</dt>
+          <dd className="font-mono tabular-nums">{value}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 
 interface ActionNotice {
   tone: StatusTone;
   title: string;
-  detail: string;
+  detail: React.ReactNode;
   requestId: string | null;
+}
+
+function rawDetail(code: string, message: string): React.ReactNode {
+  return (
+    <span>
+      <span className="font-mono">{code}</span>{" "}
+      <span data-raw-evidence="true">{message}</span>
+    </span>
+  );
 }
 
 function describeActionError(
@@ -128,7 +164,7 @@ function describeActionError(
     if (error.status === null) {
       return {
         tone: "unknown",
-        title: "结果未知：未自动重试",
+        title: "结果未知，未自动重试",
         detail:
           kind === "cancel"
             ? "无法确认取消请求是否被接受；已写入的 Revision 不会撤回。请刷新列表确认。"
@@ -148,22 +184,22 @@ function describeActionError(
       if (reason === "job_not_cancellable") {
         return {
           tone: "warning",
-          title: "冲突：无法取消",
+          title: "冲突，无法取消",
           detail: "该 Job 已结束或状态已改变，服务端拒绝取消。请刷新列表。",
           requestId,
         };
       }
       return {
         tone: "warning",
-        title: "冲突：未执行",
-        detail: `${error.code}: ${error.message}`,
+        title: "冲突，未执行",
+        detail: rawDetail(error.code, error.message),
         requestId,
       };
     }
     return {
       tone: "critical",
       title: fallbackTitle,
-      detail: `${error.code}: ${error.message}`,
+      detail: rawDetail(error.code, error.message),
       requestId,
     };
   }
@@ -206,7 +242,11 @@ function RowAction({
  * counters but no percentage, so running/cancelling progress is explicitly
  * indeterminate. Retry creates a new linked Job; the old row is never rewritten.
  */
-export function BackfillJobsSection() {
+export function BackfillJobsSection({
+  className,
+}: {
+  className?: string;
+}) {
   const { session } = useRuntimeMode();
   const queryClient = useQueryClient();
   const retryAfter = useRetryAfter();
@@ -260,7 +300,7 @@ export function BackfillJobsSection() {
       setActionNotice({
         tone: "good",
         title: "取消请求已接受",
-        detail: `Job ${variables.job.job_id}：协作式取消请求已被接受；最终状态以服务端刷新结果为准，已写入的 Revision 不会撤回。`,
+        detail: `Job ${variables.job.job_id} 的协作式取消请求已被接受；最终状态以服务端刷新结果为准，已写入的 Revision 不会撤回。`,
         requestId: null,
       });
       invalidateQualityData();
@@ -300,245 +340,264 @@ export function BackfillJobsSection() {
   const errorInfo = query.isError ? queryErrorInfo(query.error) : null;
 
   return (
-    <Panel className="mt-6 p-5" aria-label="Backfill Job">
-      <PanelHeader>
-        <div>
-          <PanelTitle>Backfill Job</PanelTitle>
-          <PanelDescription>
-            展示 queued / running / succeeded / partially_succeeded / failed /
-            cancelling / cancelled、计数与当前区间。重试创建关联新 Job，旧 Job
-            不改写；取消不撤回已写入 Revision。高周期补采计划为“补采 1m +
-            内部 Bar Aggregation”。计数中的 written_bars
-            包含内部聚合生成的父 Bar，不等于目标 Interval 总数。
-          </PanelDescription>
-        </div>
-        {gate.enabled ? (
-          <StatusBadge tone="info">Admin API 持久数据</StatusBadge>
-        ) : null}
-      </PanelHeader>
+    <Card
+      role="region"
+      aria-label="Backfill Job"
+      className={className}
+    >
+      <QualityCardHeading
+        icon={ListChecks}
+        title="Backfill Job"
+        helpLabel="Backfill Job 说明"
+        helpContent="展示 queued、running、succeeded、partially_succeeded、failed、cancelling 与 cancelled，以及计数和当前区间。契约不提供百分比，运行中进度为不确定。重试会创建关联的新 Job，旧 Job 不改写；取消不撤回已写入 Revision。高周期补采计划为补采 1m 加内部 Bar Aggregation。written_bars 包含内部聚合生成的父 Bar，不等于目标 Interval 总数。"
+        aside={
+          gate.enabled ? (
+            <StatusBadge tone="info">Admin API 持久数据</StatusBadge>
+          ) : null
+        }
+      />
+      <CardContent>
+        <CardDescription className="mt-0">
+          Job 状态由服务端推进。取消不撤回已写入 Revision；重试创建关联新
+          Job，不改写旧状态。
+        </CardDescription>
 
-      {!gate.enabled ? (
-        <div className="mt-4 flex flex-col gap-2">
-          <DisabledAction label="触发 Backfill Job" reason={gate.reason} />
-          <p className="text-xs text-muted-foreground">
-            Current Contract 没有持久 Backfill Job API。本区域不会显示虚构
-            Job、计数或进度；所有触发与跟踪能力需要 Admin API。
-          </p>
-        </div>
-      ) : (
-        <>
-          <BackfillJobCreateForm disabledReason={createGate.reason} />
+        {!gate.enabled ? (
+          <div className="mt-4 flex flex-col gap-2">
+            <DisabledAction label="触发 Backfill Job" reason={gate.reason} />
+            <p className="text-xs text-muted-foreground">
+              Current Contract 没有持久 Backfill Job API。本区域不会显示虚构
+              Job、计数或进度；所有触发与跟踪能力需要 Admin API。
+            </p>
+          </div>
+        ) : (
+          <>
+            <BackfillJobCreateForm disabledReason={createGate.reason} />
 
-          {actionNotice ? (
-            <div
-              role="alert"
-              className="mt-3 flex flex-col gap-1 border border-border p-2"
-            >
-              <StatusBadge tone={actionNotice.tone}>
-                {actionNotice.title}
-              </StatusBadge>
-              <p className="text-xs text-muted-foreground">
-                {actionNotice.detail}
-              </p>
-              {actionNotice.requestId ? (
-                <p className="font-mono text-[11px] text-faint-foreground">
-                  Request ID: {actionNotice.requestId}
+            {actionNotice ? (
+              <div
+                role="alert"
+                className="mt-3 flex flex-col gap-1 rounded-lg bg-surface-sunken p-3"
+              >
+                <StatusBadge tone={actionNotice.tone}>
+                  {actionNotice.title}
+                </StatusBadge>
+                <p className="text-xs text-muted-foreground">
+                  {actionNotice.detail}
                 </p>
-              ) : null}
-            </div>
-          ) : null}
+                {actionNotice.requestId ? (
+                  <p className="font-mono text-[11px] text-faint-foreground">
+                    Request ID: {actionNotice.requestId}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
 
-          {query.isPending ? (
-            <LoadingState label="正在读取 Backfill Job…" />
-          ) : query.isError ? (
-            errorInfo &&
-            query.error instanceof HttpError &&
-            query.error.status === 403 ? (
-              <ForbiddenState
-                message="缺少查看 Backfill Job 的权限。"
-                requestId={errorInfo.requestId}
+            {query.isPending ? (
+              <LoadingState className="mt-3" label="正在读取 Backfill Job…" />
+            ) : query.isError ? (
+              errorInfo &&
+              query.error instanceof HttpError &&
+              query.error.status === 403 ? (
+                <ForbiddenState
+                  message="缺少查看 Backfill Job 的权限。"
+                  requestId={errorInfo.requestId}
+                />
+              ) : (
+                <ErrorState
+                  className="mt-3"
+                  title="加载 Backfill Job 失败"
+                  description={
+                    <span data-raw-evidence="true">{errorInfo?.message}</span>
+                  }
+                  requestId={errorInfo?.requestId}
+                  onRetry={() => void query.refetch()}
+                />
+              )
+            ) : (query.data?.items.length ?? 0) === 0 ? (
+              <EmptyState
+                className="mt-3"
+                title="没有 Backfill Job"
+                description="服务端没有返回 Job；这里不会补造任务、计数或进度。"
               />
             ) : (
-              <ErrorState
-                title="加载 Backfill Job 失败"
-                description={errorInfo?.message}
-                requestId={errorInfo?.requestId}
-                onRetry={() => void query.refetch()}
-              />
-            )
-          ) : (query.data?.items.length ?? 0) === 0 ? (
-            <EmptyState
-              title="没有 Backfill Job"
-              description="服务端没有返回 Job；这里不会补造任务、计数或进度。"
-            />
-          ) : (
-            <>
-              <Table className="mt-3">
-                <TableCaption>Backfill Job 列表（Admin API 数据）</TableCaption>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>状态</TableHead>
-                    <TableHead>Job</TableHead>
-                    <TableHead>InstrumentId / Bar Interval</TableHead>
-                    <TableHead>范围</TableHead>
-                    <TableHead>当前区间 / 进度</TableHead>
-                    <TableHead>计数</TableHead>
-                    <TableHead>Gap / 重试关联</TableHead>
-                    <TableHead>操作</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {query.data?.items.map((job) => {
-                    const presentation = jobStatusPresentation(job.status);
-                    return (
-                      <TableRow key={job.job_id}>
-                        <TableCell>
-                          <StatusBadge tone={presentation.tone}>
-                            {presentation.label}
-                          </StatusBadge>
-                          {presentation.note ? (
-                            <div className="mt-1 text-[11px] text-faint-foreground">
-                              {presentation.note}
+              <>
+                <Table className="mt-3 min-w-[1100px]">
+                  <TableCaption>Backfill Job 列表（Admin API 数据）</TableCaption>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>状态</TableHead>
+                      <TableHead>Job</TableHead>
+                      <TableHead>InstrumentId / Bar Interval</TableHead>
+                      <TableHead>范围</TableHead>
+                      <TableHead>当前区间 / 进度</TableHead>
+                      <TableHead>计数</TableHead>
+                      <TableHead>Gap / 重试关联</TableHead>
+                      <TableHead>操作</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {query.data?.items.map((job) => {
+                      const presentation = jobStatusPresentation(job.status);
+                      return (
+                        <TableRow key={job.job_id}>
+                          <TableCell className="align-top">
+                            <StatusBadge tone={presentation.tone}>
+                              {presentation.label}
+                            </StatusBadge>
+                            {presentation.note ? (
+                              <div className="mt-1 text-[11px] text-faint-foreground">
+                                {presentation.note}
+                              </div>
+                            ) : null}
+                          </TableCell>
+                          <TableCell className="align-top">
+                            <div className="font-mono">{job.job_id}</div>
+                            <div className="text-[11px] text-faint-foreground">
+                              {formatUtcTimestamp(job.created_at)}
                             </div>
-                          ) : null}
-                        </TableCell>
-                        <TableCell>
-                          <div className="font-mono">{job.job_id}</div>
-                          <div className="text-[11px] text-faint-foreground">
-                            {formatUtcTimestamp(job.created_at)}
-                          </div>
-                          <div className="text-[11px] text-muted-foreground">
-                            {job.requested_by.display_name} ·{" "}
-                            {job.requested_by.access_role}
-                          </div>
-                          <JobError job={job} />
-                        </TableCell>
-                        <TableCell>
-                          <div className="font-mono">{job.instrument_id}</div>
-                          <div className="font-mono text-[11px] text-faint-foreground">
-                            {job.interval} · {job.plan.mode}
-                          </div>
-                        </TableCell>
-                        <TableCell className="tabular-nums">
-                          {formatRange(job.start, job.end)}
-                          <div className="text-[11px] text-muted-foreground">
-                            {job.reason}
-                          </div>
-                        </TableCell>
-                        <TableCell className="tabular-nums">
-                          {job.current_range
-                            ? formatRange(
-                                job.current_range.start,
-                                job.current_range.end,
-                              )
-                            : "—"}
-                          <JobProgress job={job} />
-                        </TableCell>
-                        <TableCell className="tabular-nums text-[11px]">
-                          扫描 {job.counters.scanned_bars} · 缺失{" "}
-                          {job.counters.gap_bars} · 补采{" "}
-                          {job.counters.backfilled_bars} · 写入{" "}
-                          {job.counters.written_bars} · 拒绝{" "}
-                          {job.counters.rejected_bars}
-                        </TableCell>
-                        <TableCell>
-                          <JobLinkage job={job} />
-                        </TableCell>
-                        <TableCell>
-                          {isJobCancellable(job.status) ? (
-                            <RowAction
-                              label={`取消 Job ${job.job_id}`}
-                              reason={actionBlockReason}
-                              onClick={() =>
-                                setPendingAction({ kind: "cancel", job })
-                              }
-                            />
-                          ) : isJobRetryable(job.status) ? (
-                            <RowAction
-                              label={`重试 Job ${job.job_id}`}
-                              reason={actionBlockReason}
-                              onClick={() =>
-                                setPendingAction({ kind: "retry", job })
-                              }
-                            />
-                          ) : (
-                            <span className="text-faint-foreground">—</span>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
+                            <div className="text-[11px] text-muted-foreground">
+                              {job.requested_by.display_name}{" "}
+                              {job.requested_by.access_role}
+                            </div>
+                            <JobError job={job} />
+                          </TableCell>
+                          <TableCell className="align-top">
+                            <div className="font-mono">{job.instrument_id}</div>
+                            <div className="font-mono text-[11px] text-faint-foreground">
+                              {job.interval}
+                            </div>
+                            <div className="font-mono text-[11px] text-faint-foreground">
+                              {job.plan.mode}
+                            </div>
+                          </TableCell>
+                          <TableCell className="align-top tabular-nums">
+                            {formatRange(job.start, job.end)}
+                            <div className="text-[11px] text-muted-foreground">
+                              原因 {job.reason}
+                            </div>
+                          </TableCell>
+                          <TableCell className="align-top tabular-nums">
+                            {job.current_range
+                              ? formatRange(
+                                  job.current_range.start,
+                                  job.current_range.end,
+                                )
+                              : "—"}
+                            <JobProgress job={job} />
+                          </TableCell>
+                          <TableCell className="align-top">
+                            <JobCounters job={job} />
+                          </TableCell>
+                          <TableCell className="align-top">
+                            <JobLinkage job={job} />
+                          </TableCell>
+                          <TableCell className="align-top">
+                            {isJobCancellable(job.status) ? (
+                              <RowAction
+                                label={`取消 Job ${job.job_id}`}
+                                reason={actionBlockReason}
+                                onClick={() =>
+                                  setPendingAction({ kind: "cancel", job })
+                                }
+                              />
+                            ) : isJobRetryable(job.status) ? (
+                              <RowAction
+                                label={`重试 Job ${job.job_id}`}
+                                reason={actionBlockReason}
+                                onClick={() =>
+                                  setPendingAction({ kind: "retry", job })
+                                }
+                              />
+                            ) : (
+                              <span className="text-faint-foreground">—</span>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
 
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                <Pagination
-                  hasMore={query.data?.page.has_more ?? false}
-                  onNext={
-                    query.data?.page.next_cursor
-                      ? () => setCursor(query.data?.page.next_cursor ?? null)
-                      : undefined
-                  }
-                  label="游标分页"
-                />
-                <span className="text-xs text-faint-foreground">
-                  Job 状态由服务端推进；前端不自动重放写操作。
-                </span>
-              </div>
-            </>
-          )}
+                <p className="mt-2 text-[11px] text-faint-foreground">
+                  written_bars 包含内部聚合生成的父 Bar，不等于目标 Interval
+                  总数。高周期补采计划为补采 1m 加内部 Bar Aggregation。
+                </p>
 
-          <ConfirmDialog
-            open={pendingAction !== null}
-            onOpenChange={(open) => {
-              if (!open) {
-                setPendingAction(null);
-              }
-            }}
-            title={
-              pendingAction?.kind === "cancel"
-                ? "确认取消 Backfill Job"
-                : "确认重试 Backfill Job"
-            }
-            description={
-              pendingAction ? (
-                pendingAction.kind === "cancel" ? (
-                  <span>
-                    Job <span className="font-mono">{pendingAction.job.job_id}</span>{" "}
-                    使用协作式取消：已写入的 Revision 不会撤回；取消请求被接受
-                    不等于已取消，最终状态以服务端为准。
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                  <Pagination
+                    hasMore={query.data?.page.has_more ?? false}
+                    onNext={
+                      query.data?.page.next_cursor
+                        ? () => setCursor(query.data?.page.next_cursor ?? null)
+                        : undefined
+                    }
+                    label="游标分页"
+                  />
+                  <span className="text-xs text-faint-foreground">
+                    Job 状态由服务端推进；前端不自动重放写操作。
                   </span>
-                ) : (
-                  <span>
-                    重试会创建关联的新 Job（retry_of_job_id=
-                    <span className="font-mono">{pendingAction.job.job_id}</span>
-                    ），旧 Job 状态与计数不变；新 Job 重新扫描原始范围。
-                  </span>
-                )
-              ) : undefined
-            }
-            confirmLabel={
-              pendingAction?.kind === "cancel"
-                ? "确认取消 Job"
-                : "确认重试 Job"
-            }
-            submitting={
-              cancelMutation.isPending || retryMutation.isPending
-            }
-            onConfirm={(input) => {
-              const action = pendingAction;
-              if (!action || retryAfter.blocked) {
-                return;
+                </div>
+              </>
+            )}
+
+            <ConfirmDialog
+              open={pendingAction !== null}
+              onOpenChange={(open) => {
+                if (!open) {
+                  setPendingAction(null);
+                }
+              }}
+              title={
+                pendingAction?.kind === "cancel"
+                  ? "确认取消 Backfill Job"
+                  : "确认重试 Backfill Job"
               }
-              if (action.kind === "cancel") {
-                cancelMutation.mutate({ job: action.job, reason: input.reason });
-              } else {
-                retryMutation.mutate({ job: action.job, reason: input.reason });
+              description={
+                pendingAction ? (
+                  pendingAction.kind === "cancel" ? (
+                    <span>
+                      Job{" "}
+                      <span className="font-mono">
+                        {pendingAction.job.job_id}
+                      </span>{" "}
+                      使用协作式取消。已写入的 Revision 不会撤回；取消请求被接受
+                      不等于已取消，最终状态以服务端为准。
+                    </span>
+                  ) : (
+                    <span>
+                      重试会创建关联的新 Job（retry_of_job_id=
+                      <span className="font-mono">
+                        {pendingAction.job.job_id}
+                      </span>
+                      ），旧 Job 状态与计数不变；新 Job 重新扫描原始范围。
+                    </span>
+                  )
+                ) : undefined
               }
-            }}
-          />
-        </>
-      )}
-    </Panel>
+              confirmLabel={
+                pendingAction?.kind === "cancel"
+                  ? "确认取消 Job"
+                  : "确认重试 Job"
+              }
+              submitting={
+                cancelMutation.isPending || retryMutation.isPending
+              }
+              onConfirm={(input) => {
+                const action = pendingAction;
+                if (!action || retryAfter.blocked) {
+                  return;
+                }
+                if (action.kind === "cancel") {
+                  cancelMutation.mutate({ job: action.job, reason: input.reason });
+                } else {
+                  retryMutation.mutate({ job: action.job, reason: input.reason });
+                }
+              }}
+            />
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }
