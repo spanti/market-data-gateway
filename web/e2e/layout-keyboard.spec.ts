@@ -61,6 +61,9 @@ async function expectBarsDRegions(page: Page): Promise<void> {
     page.getByRole("region", { name: "CSV 直接下载" }),
   ).toBeVisible();
   await expect(
+    page.getByRole("region", { name: "Export Job" }),
+  ).toBeVisible();
+  await expect(
     page.getByRole("region", { name: "实时跟随" }),
   ).toBeVisible();
 }
