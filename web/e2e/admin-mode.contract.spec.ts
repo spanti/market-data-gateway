@@ -132,10 +132,22 @@ async function json(route: Route, status: number, body: unknown, headers = {}) {
 
 async function installAdmin(
   page: Page,
-  options: { role?: "SuperAdmin" | "Operator" | "Auditor" } = {},
+  options: {
+    role?: "SuperAdmin" | "Operator" | "Auditor";
+    capabilities?: Record<string, unknown>;
+  } = {},
 ): Promise<void> {
+  const document = options.capabilities
+    ? {
+        ...capabilityDocument,
+        capabilities: {
+          ...capabilityDocument.capabilities,
+          ...options.capabilities,
+        },
+      }
+    : capabilityDocument;
   await page.route("**/api/v1/admin/capabilities", (route) =>
-    json(route, 200, capabilityDocument),
+    json(route, 200, document),
   );
   await page.route("**/api/v1/admin/auth/session", (route) =>
     json(route, 200, sessionBody(options.role ?? "SuperAdmin")),
@@ -284,6 +296,50 @@ function trackUntrustedOps(page: Page): string[] {
   return requested;
 }
 
+const OPERATOR_AUDIT_CAPABILITY = {
+  state: "enabled",
+  export: false,
+  edit: false,
+  delete: false,
+};
+
+function auditEvent(overrides: Record<string, unknown> = {}) {
+  return {
+    event_id: "evt_raw",
+    sequence: 1042,
+    occurred_at: futureIso(-1_000),
+    actor: {
+      subject: "oidc-subject-123",
+      display_name: "Ada Admin",
+      access_role: "Auditor",
+    },
+    action: "feed_subscription.update",
+    target: {
+      type: "feed_subscription",
+      id: "fsub_1",
+      display_name: "binance:BTC/USDT 1m",
+    },
+    result: "succeeded",
+    failure_reason: "upstream · failed：timeout",
+    reason: "left · right：value",
+    request_id: "req_raw_1",
+    operation_id: "op_raw_1",
+    job_id: null,
+    instance_id: null,
+    diff: {
+      before: { note: "a·b：c" },
+      after: { note: "d·e：f" },
+      redacted_paths: ["/secret·path：x"],
+    },
+    hash_chain: {
+      algorithm: "sha256",
+      previous_event_hash: null,
+      event_hash: "event-hash",
+    },
+    ...overrides,
+  };
+}
+
 test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
   test("uses the service-instance seam, confirms high-risk actions and sends CSRF + idempotency headers", async ({
     page,
@@ -358,7 +414,9 @@ test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
     await expect(confirm).toBeEnabled();
     await confirm.click();
 
-    await expect(row.getByText("成功")).toBeVisible();
+    // The operation summary also contains the sentence "已接受 ≠ 成功", so the
+    // assertion must target the exact lifecycle status, not that substring.
+    await expect(row.getByText("成功", { exact: true })).toBeVisible();
     expect(postCount).toBe(1);
     expect(captured.body).toMatchObject({
       reason: "drain before certificate rotation",
@@ -528,6 +586,154 @@ test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
       ADMIN_GAP,
     );
     await expect(page.getByTestId("service-instance-api-1")).toHaveCount(0);
+  });
+
+  // CONTRACT-ONLY: identity and Operator Audit Event flows use intercepted
+  // Admin API responses. The backend Admin API and real OIDC session do not
+  // exist in this stack, so this proves the frontend contract only.
+  test("CONTRACT-ONLY Security identity, audit query, raw diff and timeline stay accurate at 1024px", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1024, height: 900 });
+    await installAdmin(page, {
+      role: "Auditor",
+      capabilities: { operator_audit: OPERATOR_AUDIT_CAPABILITY },
+    });
+
+    const terminal = auditEvent();
+    const requested = auditEvent({
+      event_id: "evt_requested",
+      sequence: 1041,
+      result: "requested",
+      reason: "created · planned：now",
+      failure_reason: null,
+      occurred_at: futureIso(-2_000),
+    });
+
+    await page.route(
+      /\/api\/v1\/admin\/audit-events(\?.*)?$/,
+      (route) => {
+        const url = new URL(route.request().url());
+        const items = url.searchParams.has("operation_id")
+          ? [requested, terminal]
+          : [terminal];
+        return json(route, 200, {
+          items,
+          page: { next_cursor: null, has_more: false },
+        });
+      },
+    );
+    await page.route(
+      /\/api\/v1\/admin\/audit-events\/[^/?]+$/,
+      (route) => {
+        const id = new URL(route.request().url()).pathname.split("/").pop();
+        return json(route, 200, id === "evt_requested" ? requested : terminal);
+      },
+    );
+
+    await page.goto("/security");
+
+    const identity = page.getByRole("region", { name: "当前身份" });
+    await expect(identity).toBeVisible();
+    await expect(identity.getByText("Ada Admin")).toBeVisible();
+    await expect(
+      identity.getByText("Access Role", { exact: true }),
+    ).toBeVisible();
+    await expect(identity.getByText("Auditor").first()).toBeVisible();
+    await expect(identity.getByText(/Service Role/)).toHaveCount(0);
+
+    const query = page.getByRole("region", {
+      name: "Operator Audit Event 查询",
+    });
+    await expect(query).toBeVisible();
+    await expect(query.getByTestId("audit-event-table")).toBeVisible();
+    await expect(query.getByLabel("Access Role（筛选）")).toBeVisible();
+    await expect(query.getByText("req_raw_1")).toBeVisible();
+    await expectNoBannedUiSymbols(page);
+    await expectNoHorizontalOverflow(page);
+
+    await page
+      .getByRole("button", { name: "查看详情 evt_raw" })
+      .click();
+
+    const detail = page.getByRole("region", { name: "事件详情" });
+    await expect(detail).toBeVisible();
+
+    const rawReason = detail.getByText("left · right：value").first();
+    await expect(rawReason).toHaveAttribute("data-raw-evidence", "true");
+    expect(await rawReason.evaluate((node) => node.textContent)).toBe(
+      "left · right：value",
+    );
+    const rawFailure = detail.getByText("upstream · failed：timeout");
+    await expect(rawFailure).toHaveAttribute("data-raw-evidence", "true");
+    expect(await rawFailure.evaluate((node) => node.textContent)).toBe(
+      "upstream · failed：timeout",
+    );
+
+    const diff = detail.getByRole("region", { name: "变更 Diff" });
+    const before = diff.getByTestId("audit-diff-before");
+    await expect(before).toHaveAttribute("data-raw-evidence", "true");
+    expect(await before.evaluate((node) => node.textContent)).toBe(
+      JSON.stringify({ note: "a·b：c" }, null, 2),
+    );
+    const redactedPath = diff.getByText("/secret·path：x");
+    await expect(redactedPath).toHaveAttribute("data-raw-evidence", "true");
+
+    // Append-only timeline: requested and succeeded stay separate entries.
+    const timeline = page.getByTestId("audit-operation-timeline");
+    await expect(timeline).toBeVisible();
+    const timelineItems = timeline.getByTestId("audit-timeline-item");
+    await expect(timelineItems).toHaveCount(2);
+    await expect(timelineItems.nth(0)).toContainText("requested");
+    await expect(timelineItems.nth(1)).toContainText("succeeded");
+    await expect(timelineItems.nth(0)).toContainText("1041");
+    await expect(timelineItems.nth(1)).toContainText("1042");
+    const timelineReason = timelineItems
+      .nth(0)
+      .getByText("created · planned：now");
+    await expect(timelineReason).toHaveAttribute("data-raw-evidence", "true");
+
+    await expectNoBannedUiSymbols(page);
+    await expectNoHorizontalOverflow(page);
+  });
+
+  test("CONTRACT-ONLY audit backend error stays verbatim with an inline Request ID", async ({
+    page,
+  }) => {
+    await installAdmin(page, {
+      role: "Auditor",
+      capabilities: { operator_audit: OPERATOR_AUDIT_CAPABILITY },
+    });
+    await page.route(
+      /\/api\/v1\/admin\/audit-events(\?.*)?$/,
+      (route) =>
+        json(
+          route,
+          500,
+          {
+            error: {
+              code: "internal_error",
+              message: "upstream · failed：timeout",
+              details: {},
+              request_id: "req_raw_500",
+            },
+          },
+          { "X-Request-ID": "req_raw_500" },
+        ),
+    );
+
+    await page.goto("/security");
+
+    const query = page.getByRole("region", {
+      name: "Operator Audit Event 查询",
+    });
+    const raw = query.getByText("upstream · failed：timeout");
+    await expect(raw).toHaveAttribute("data-raw-evidence", "true");
+    expect(await raw.evaluate((node) => node.textContent)).toBe(
+      "upstream · failed：timeout",
+    );
+    await expect(query.getByText("Request ID: req_raw_500")).toBeVisible();
+    await expectNoBannedUiSymbols(page);
   });
 });
 
