@@ -112,7 +112,7 @@ describe("message filtering", () => {
       segment: 2,
       kind: "pong" as const,
       receivedAt: "2026-11-09T12:00:02.000Z",
-      summary: "pong · 已同步",
+      summary: "pong 已同步",
       detailText: '{"op":"pong"}',
     },
   ];
@@ -135,5 +135,19 @@ describe("message filtering", () => {
 
   it("returns an empty list when nothing matches", () => {
     expect(filterMessages(messages, "no-such-value")).toEqual([]);
+  });
+
+  it("keeps raw detail evidence verbatim, including banned UI separators", () => {
+    const raw = '{"note":"a·b：c"}';
+    let buffer = createMessageBuffer(5);
+    buffer = appendMessage(buffer, {
+      ...input(1),
+      summary: "event 1",
+      detailText: raw,
+    });
+
+    expect(buffer.messages[0]?.detailText).toBe(raw);
+    // Raw detail stays searchable without being rewritten.
+    expect(filterMessages(buffer.messages, "a·b")).toHaveLength(1);
   });
 });

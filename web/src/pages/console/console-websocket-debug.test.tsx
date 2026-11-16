@@ -9,6 +9,7 @@ import {
   type RuntimeModeContextValue,
 } from "@/runtime/runtime-mode-context";
 import type { AdminSession } from "@/runtime/session";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { WebSocketDebugView } from "@/pages/console/WebSocketDebugView";
 import { WsDebugSession } from "@/pages/console/ws-debug-session";
 
@@ -111,7 +112,7 @@ function adminSession(role: "SuperAdmin" | "Operator" | "Auditor"): AdminSession
 
 function renderView(options: {
   subject: PermissionSubject;
-  capability: CapabilityState;
+  capability: CapabilityState | null;
   session?: AdminSession | null;
   limit?: number;
 }) {
@@ -151,9 +152,11 @@ function renderView(options: {
   };
 
   const view = render(
-    <RuntimeModeContext.Provider value={value}>
-      <WebSocketDebugView sessionFactory={sessionFactory} />
-    </RuntimeModeContext.Provider>,
+    <TooltipProvider>
+      <RuntimeModeContext.Provider value={value}>
+        <WebSocketDebugView sessionFactory={sessionFactory} />
+      </RuntimeModeContext.Provider>
+    </TooltipProvider>,
   );
   return { ...view, sockets };
 }
@@ -166,6 +169,33 @@ async function connect(
   act(() => {
     sockets[0]?.fireOpen();
   });
+}
+
+/**
+ * UI-generated copy must not contain the banned separators. Raw evidence
+ * regions render exact text and are explicitly exempt.
+ */
+function bannedUiCopy(container: HTMLElement): string[] {
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const hits: string[] = [];
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const element = node.parentElement;
+    if (!element) {
+      continue;
+    }
+    if (element.closest('[data-raw-evidence="true"]')) {
+      continue;
+    }
+    if (element.closest(".sr-only")) {
+      continue;
+    }
+    const text = node.textContent ?? "";
+    if (text.includes("·") || text.includes("：")) {
+      hits.push(text.trim());
+    }
+  }
+  return hits;
 }
 
 beforeEach(() => {
@@ -254,6 +284,93 @@ describe("WebSocket Debug role matrix", () => {
   });
 });
 
+describe("WebSocket Debug session subscription scope and states", () => {
+  it("distinguishes the session subscription from Feed Subscription and exposes help", () => {
+    renderView({
+      subject: { kind: "anonymous" },
+      capability: currentContract,
+    });
+
+    expect(
+      screen.getByRole("button", { name: "WebSocket Debug 说明" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "WebSocket Session Subscription 说明",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/只筛选当前调试会话/).length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText(/不改变 Feed Subscription 的采集范围/).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByText("尚未连接")).toBeInTheDocument();
+  });
+
+  it("shows loading while capability discovery is still in flight", () => {
+    renderView({
+      subject: { kind: "anonymous" },
+      capability: null,
+    });
+
+    expect(screen.getByText("正在发现运行时能力…")).toBeInTheDocument();
+  });
+
+  it("shows an explicit unknown target when capability discovery failed", () => {
+    renderView({
+      subject: { kind: "unknown" },
+      capability: {
+        mode: "capabilities-unknown",
+        lastSuccessAt: null,
+        errorCode: "timeout",
+        message: "timed out",
+      },
+    });
+
+    expect(
+      screen.getByText("运行时能力发现失败，无法确认 WebSocket 目标。"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("ws-segment-state")).toHaveTextContent(
+      "接收段 0",
+    );
+  });
+
+  it("shows a real connection error without inventing a receive segment", async () => {
+    const user = userEvent.setup();
+    const { sockets } = renderView({
+      subject: { kind: "anonymous" },
+      capability: currentContract,
+    });
+
+    await user.click(screen.getByRole("button", { name: "连接" }));
+    act(() => {
+      sockets[0]?.fireServerClose();
+    });
+
+    const alert = await screen.findByTestId("ws-connection-error");
+    expect(alert).toHaveTextContent("连接失败");
+    expect(alert.querySelector('[data-raw-evidence="true"]')).toHaveTextContent(
+      "code 1006 gone",
+    );
+    expect(screen.getByTestId("ws-segment-state")).toHaveTextContent(
+      "接收段 0",
+    );
+  });
+
+  it("labels a connected session with no retained messages as empty, not failed", async () => {
+    const user = userEvent.setup();
+    const { sockets } = renderView({
+      subject: { kind: "anonymous" },
+      capability: currentContract,
+    });
+
+    await connect(user, sockets);
+    await user.click(screen.getByRole("button", { name: "清空" }));
+    expect(await screen.findByText("暂无报文")).toBeInTheDocument();
+  });
+});
+
 describe("WebSocket Debug controlled Topic form", () => {
   it("shows prefix hints and validates the InstrumentId before sending", async () => {
     const user = userEvent.setup();
@@ -318,7 +435,12 @@ describe("WebSocket Debug ping/pong barrier", () => {
     });
 
     await connect(user, sockets);
-    expect(screen.getByText("已连接 · 接收段 1")).toBeInTheDocument();
+    expect(screen.getByTestId("ws-connection-state")).toHaveTextContent(
+      "已连接",
+    );
+    expect(screen.getByTestId("ws-segment-state")).toHaveTextContent(
+      "接收段 1",
+    );
 
     await user.click(screen.getByRole("button", { name: "Ping" }));
     expect(screen.getByText("等待 pong…")).toBeInTheDocument();
@@ -398,9 +520,13 @@ describe("WebSocket Debug bounded list and counters", () => {
     expect(screen.getByText(/界面丢弃数 0/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "暂停自动滚动" }));
-    expect(screen.getByText("自动滚动：已暂停")).toBeInTheDocument();
+    expect(screen.getByTestId("ws-autoscroll-state")).toHaveTextContent(
+      "自动滚动已暂停",
+    );
     await user.click(screen.getByRole("button", { name: "恢复自动滚动" }));
-    expect(screen.getByText("自动滚动：开启")).toBeInTheDocument();
+    expect(screen.getByTestId("ws-autoscroll-state")).toHaveTextContent(
+      "自动滚动开启",
+    );
   });
 });
 
@@ -421,7 +547,11 @@ describe("WebSocket Debug receive segments", () => {
     expect(
       (await screen.findAllByText(/接收段 1 中断/)).length,
     ).toBeGreaterThan(0);
-    expect(screen.getByText(/无恢复位点/)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "接收段 1 已中断。没有恢复位点，重连不会补齐缺失报文。",
+      ),
+    ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "连接" }));
     act(() => {
@@ -429,8 +559,11 @@ describe("WebSocket Debug receive segments", () => {
     });
 
     expect(
-      await screen.findByText("已连接 · 接收段 2"),
-    ).toBeInTheDocument();
+      await screen.findByTestId("ws-connection-state"),
+    ).toHaveTextContent("已连接");
+    expect(screen.getByTestId("ws-segment-state")).toHaveTextContent(
+      "接收段 2",
+    );
     expect(screen.getByText(/接收段 2 已连接/)).toBeInTheDocument();
   });
 });
@@ -468,11 +601,45 @@ describe("WebSocket Debug raw detail", () => {
 
     await user.click(within(eventRow).getByText("原始 JSON"));
     const detail = within(eventRow).getByTestId("ws-message-detail");
+    expect(detail).toHaveAttribute("data-raw-evidence", "true");
     expect(detail.textContent).toContain("65000.100000000000000001");
     expect(detail.textContent).toContain(
       "<img src=x onerror=alert(1)>",
     );
     expect(eventRow.querySelector("img")).toBeNull();
+  });
+
+  it("renders raw JSON with banned separators verbatim while UI copy stays clean", async () => {
+    const user = userEvent.setup();
+    const { sockets, container } = renderView({
+      subject: { kind: "anonymous" },
+      capability: currentContract,
+    });
+
+    await connect(user, sockets);
+    act(() => {
+      sockets[0]?.fireMessage({
+        op: "event",
+        topic: "market.bar.1m.binance:BTC/USDT",
+        data: { ...envelope, note: "a·b：c" },
+      });
+    });
+
+    const matches = await screen.findAllByText(/a·b：c/);
+    const eventRow = matches[0]?.closest(
+      '[data-testid="ws-message"]',
+    ) as HTMLElement | null;
+    expect(eventRow).not.toBeNull();
+    if (!eventRow) {
+      throw new Error("event row not found");
+    }
+
+    await user.click(within(eventRow).getByText("原始 JSON"));
+    const detail = within(eventRow).getByTestId("ws-message-detail");
+    expect(detail).toHaveAttribute("data-raw-evidence", "true");
+    expect(detail.textContent).toContain('"note": "a·b：c"');
+
+    expect(bannedUiCopy(container)).toEqual([]);
   });
 
   it("never persists messages in web storage", async () => {
