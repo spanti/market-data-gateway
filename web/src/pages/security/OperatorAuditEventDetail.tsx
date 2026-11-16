@@ -61,7 +61,7 @@ function DetailError({
         title="没有权限"
         description={
           <>
-            <div>缺少权限：{required}。</div>
+            <div>缺少权限，需要 {required}。</div>
             <div className="mt-1">
               会话仍然有效。前端禁用只是界面约束，服务端授权才是安全边界。
             </div>

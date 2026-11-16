@@ -130,7 +130,7 @@ function AuditQueryError({
   const directive = classifyHttpError(error);
   if (directive.action === "permission-denied") {
     const missing = directive.requiredRole
-      ? `缺少权限：需要 ${directive.requiredRole} 角色`
+      ? `缺少权限，需要 ${directive.requiredRole} 角色`
       : "缺少执行该操作的权限";
     return (
       <ErrorState

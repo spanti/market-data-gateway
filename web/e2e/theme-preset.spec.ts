@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { barsQuery, expectNoHorizontalOverflow } from "./support";
 
 const MODULES = [
-  { path: "/monitoring", heading: "监控分析工作台", slug: "monitoring" },
+  { path: "/monitoring", heading: "监控总览", slug: "monitoring" },
   { path: "/bars", heading: "Bar 图与导出", slug: "bars" },
   { path: "/console", heading: "Gateway Console", slug: "console" },
   { path: "/quality", heading: "Quality & Backfill", slug: "quality" },
@@ -94,10 +94,10 @@ test("chart legends follow the active CSS palette after theme switches", async (
 }) => {
   await page.goto("/monitoring");
   const trendPanel = page.locator('[data-slot="chart-panel"]', {
-    has: page.getByRole("heading", { name: "HTTP QPS" }),
+    has: page.getByRole("heading", { name: "QPS 趋势" }),
   });
   await expect(trendPanel).toHaveAttribute("data-state", "ready");
-  const trendSwatch = legendSwatch(page, "HTTP QPS");
+  const trendSwatch = legendSwatch(page, "QPS 趋势");
   await expect(trendSwatch).toBeVisible();
   await expect(trendSwatch).toHaveCSS(
     "background-color",

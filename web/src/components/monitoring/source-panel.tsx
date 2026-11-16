@@ -2,31 +2,37 @@ import {
   SourceStatus,
   type SourceStatusProps,
 } from "@/components/monitoring/source-status";
-import { PanelDescription, PanelTitle } from "@/components/ui/panel";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { cn } from "@/lib/utils";
 
 export interface SourcePanelProps {
   rows: SourceStatusProps[];
   note: string;
+  className?: string;
 }
 
-/** Side-rail ledger of every source, window and last successful update. */
-export function SourcePanel({ rows, note }: SourcePanelProps) {
+/** Card ledger of every source, its window and its last successful update. */
+export function SourcePanel({ rows, note, className }: SourcePanelProps) {
   return (
-    <section
+    <Card
+      data-slot="source-panel"
+      role="region"
       aria-label="数据源与刷新"
-      className="border-t border-border pt-4"
+      className={cn("min-w-0 p-5", className)}
     >
-      <div className="flex items-start justify-between gap-3 px-1">
-        <div>
-          <PanelTitle>数据源与刷新</PanelTitle>
-          <PanelDescription>{note}</PanelDescription>
+      <CardHeader className="p-0">
+        <CardTitle>数据源与刷新</CardTitle>
+      </CardHeader>
+      <CardContent className="p-0 pt-2">
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          {note}
+        </p>
+        <div className="mt-3 space-y-2">
+          {rows.map((row) => (
+            <SourceStatus key={row.source} {...row} />
+          ))}
         </div>
-      </div>
-      <div className="mt-2">
-        {rows.map((row) => (
-          <SourceStatus key={row.source} {...row} />
-        ))}
-      </div>
-    </section>
+      </CardContent>
+    </Card>
   );
 }

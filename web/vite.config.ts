@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig, loadEnv } from "vite";
@@ -6,6 +7,23 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Worktrees use a `node_modules` junction to the main checkout. Vite resolves
+ * the real path, which lies outside this worktree root, and its default dev
+ * allow list then rejects dependency assets such as webfonts. Allow the
+ * resolved dependency directory explicitly (dev server only; the production
+ * build is unaffected).
+ */
+function realPathOrSelf(target: string): string {
+  try {
+    return fs.realpathSync(target);
+  } catch {
+    return target;
+  }
+}
+
+const dependencyRoot = realPathOrSelf(path.resolve(dirname, "node_modules"));
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, dirname, "");
@@ -27,6 +45,9 @@ export default defineConfig(({ mode }) => {
     server: {
       host: "127.0.0.1",
       port: 5173,
+      fs: {
+        allow: [realPathOrSelf(dirname), dependencyRoot],
+      },
       proxy: {
         // Current Contract REST + WebSocket + ops endpoints (same origin).
         "/api": { target: apiTarget, changeOrigin: true },

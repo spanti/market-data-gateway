@@ -42,18 +42,20 @@ export function SourceStatus({
       data-slot="source-status"
       data-state={state}
       className={cn(
-        "flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-1 py-2 text-xs last:border-b-0",
+        "flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg bg-surface-sunken px-3 py-2 text-xs",
         className,
       )}
     >
       {badge}
-      <span className="font-medium text-foreground">数据源：{source}</span>
-      <span className="text-muted-foreground">窗口：{window}</span>
+      <span className="min-w-0 break-all font-medium text-foreground">
+        {source}
+      </span>
+      <span className="text-muted-foreground">窗口 {window}</span>
       <span className="text-faint-foreground">
-        最后成功：{formatUtcDateTime(lastSuccessAt)}
+        最后成功 {formatUtcDateTime(lastSuccessAt)}
       </span>
       {reason ? (
-        <span className="text-status-critical" role="note">
+        <span className="min-w-0 break-words text-status-critical-fg" role="note">
           {reason}
         </span>
       ) : null}

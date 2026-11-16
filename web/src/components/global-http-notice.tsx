@@ -13,7 +13,7 @@ function directiveMessage(error: NormalizedHttpError): string {
       return "会话已失效或未登录，写操作已停止。请回到登录入口。";
     case "permission-denied":
       return directive.requiredRole
-        ? `缺少权限：需要 ${directive.requiredRole} 角色。`
+        ? `缺少权限，需要 ${directive.requiredRole} 角色。`
         : "缺少执行该操作的权限。";
     case "conflict":
       return "数据已被他人修改（409 冲突），请刷新后手动合并，不会自动覆盖。";

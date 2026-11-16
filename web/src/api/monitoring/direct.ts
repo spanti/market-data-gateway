@@ -22,7 +22,8 @@ function seriesName(
   count: number,
 ): string {
   if (labels.path) {
-    return `${fallback} · ${labels.path}`;
+    // Display names are UI-generated copy and must not contain `·` or `：`.
+    return `${fallback} ${labels.path}`;
   }
   return count > 1 ? `${fallback} ${index + 1}` : fallback;
 }
@@ -31,12 +32,18 @@ function seriesName(
  * Prometheus samples are seconds; the chart uses milliseconds. Non-finite
  * values (including the literal `NaN`) become null so the line has a gap.
  * Nothing is zero-filled.
+ *
+ * `identity` is the stable metric identity used by KPI selection. It defaults
+ * to the display name only for legacy callers; the monitoring adapters always
+ * pass an explicit identity.
  */
 export function prometheusResultToTrendSeries(
   result: PrometheusQueryResult,
   fallbackName: string,
+  identity: string = fallbackName,
 ): TrendSeries[] {
   return result.series.map((series, index) => ({
+    id: identity,
     name: seriesName(series.labels, fallbackName, index, result.series.length),
     labels: series.labels,
     points: series.points.map((point) => ({
@@ -75,7 +82,7 @@ export async function fetchQpsTrend(
     },
     signal,
   );
-  return prometheusResultToTrendSeries(result, "QPS");
+  return prometheusResultToTrendSeries(result, "QPS", "qps");
 }
 
 export async function fetchPeakQps(
@@ -120,10 +127,12 @@ export async function fetchLatencyTrends(
       ),
     ),
   );
-  return results.flatMap((result, index) =>
-    prometheusResultToTrendSeries(
+  return results.flatMap((result, index) => {
+    const quantile = LATENCY_QUANTILES[index];
+    return prometheusResultToTrendSeries(
       result,
-      LATENCY_QUANTILES[index]?.label ?? `P${index + 1}`,
+      quantile?.label ?? `P${index + 1}`,
+      quantile?.id ?? `p${index + 1}`,
     ).map((series) => ({
       ...series,
       // Histogram observations are seconds; the dashboard displays ms.
@@ -134,6 +143,6 @@ export async function fetchLatencyTrends(
             ? null
             : point.value * 1000,
       })),
-    })),
-  );
+    }));
+  });
 }

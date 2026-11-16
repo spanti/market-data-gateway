@@ -249,7 +249,9 @@ describe("monitoring proxy contract target", () => {
       "QPS",
     );
 
-    expect(series[0]?.name).toBe("QPS · /api/v1/bars");
+    expect(series[0]?.id).toBe("QPS");
+    expect(series[0]?.name).toBe("QPS /api/v1/bars");
+    expect(series[0]?.name).not.toContain("·");
     expect(series[0]?.points).toEqual([
       { ts: Date.parse("2026-11-09T11:00:00.000000000Z"), value: 3 },
       { ts: Date.parse("2026-11-09T11:00:30.000000000Z"), value: null },

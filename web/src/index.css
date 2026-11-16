@@ -7,8 +7,11 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  /* Variant B: light analytical workbench. Warm neutral surfaces. */
+  /* Variant D: light neutral canvas with white, softly raised surfaces. */
   --background: oklch(1 0 0);
+  --canvas: #f5f7fa;
+  --card-border: #e7eaf0;
+  --card-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
@@ -38,6 +41,18 @@
   --status-serious: #ec835a;
   --status-critical: #d03b3b;
   --status-unknown: #898781;
+  --status-good-bg: #e9f7ef;
+  --status-good-fg: #0b6b3a;
+  --status-warning-bg: #fff4e5;
+  --status-warning-fg: #945400;
+  --status-serious-bg: #fdf0e8;
+  --status-serious-fg: #a34a1f;
+  --status-critical-bg: #fdecec;
+  --status-critical-fg: #b42318;
+  --status-unknown-bg: #f1f3f5;
+  --status-unknown-fg: #4f5866;
+  --status-info-bg: #eaf2fd;
+  --status-info-fg: #1c5fa8;
 
   --chart-series-1: #2a78d6;
   --chart-series-2: #eb6834;
@@ -61,6 +76,9 @@
 
 .dark {
   --background: oklch(0.145 0 0);
+  --canvas: #0f0f0e;
+  --card-border: oklch(1 0 0 / 10%);
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);
   --card-foreground: oklch(0.985 0 0);
@@ -89,6 +107,18 @@
   --status-serious: #ec835a;
   --status-critical: #d03b3b;
   --status-unknown: #898781;
+  --status-good-bg: #12301f;
+  --status-good-fg: #7ee2a8;
+  --status-warning-bg: #33260f;
+  --status-warning-fg: #f6c66a;
+  --status-serious-bg: #3a2418;
+  --status-serious-fg: #f0a57c;
+  --status-critical-bg: #3a1717;
+  --status-critical-fg: #f19999;
+  --status-unknown-bg: #262626;
+  --status-unknown-fg: #c3c2b7;
+  --status-info-bg: #152a42;
+  --status-info-fg: #9cc3f5;
 
   --chart-series-1: #3987e5;
   --chart-series-2: #d95926;
@@ -112,6 +142,8 @@
 
 @theme inline {
   --color-background: var(--background);
+  --color-canvas: var(--canvas);
+  --color-card-border: var(--card-border);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
   --color-card-foreground: var(--card-foreground);
@@ -140,6 +172,19 @@
   --color-status-serious: var(--status-serious);
   --color-status-critical: var(--status-critical);
   --color-status-unknown: var(--status-unknown);
+  --color-status-good-bg: var(--status-good-bg);
+  --color-status-good-fg: var(--status-good-fg);
+  --color-status-warning-bg: var(--status-warning-bg);
+  --color-status-warning-fg: var(--status-warning-fg);
+  --color-status-serious-bg: var(--status-serious-bg);
+  --color-status-serious-fg: var(--status-serious-fg);
+  --color-status-critical-bg: var(--status-critical-bg);
+  --color-status-critical-fg: var(--status-critical-fg);
+  --color-status-unknown-bg: var(--status-unknown-bg);
+  --color-status-unknown-fg: var(--status-unknown-fg);
+  --color-status-info-bg: var(--status-info-bg);
+  --color-status-info-fg: var(--status-info-fg);
+  --shadow-card: var(--card-shadow);
 
   --color-chart-series-1: var(--chart-series-1);
   --color-chart-series-2: var(--chart-series-2);
@@ -184,7 +229,7 @@
   }
 
   body {
-    @apply antialiased bg-background text-foreground;
+    @apply antialiased bg-canvas text-foreground;
   }
 
   button,

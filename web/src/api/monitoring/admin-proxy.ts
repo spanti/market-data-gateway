@@ -193,7 +193,8 @@ function seriesName(
   count: number,
 ): string {
   if (labels.path) {
-    return `${fallback} · ${labels.path}`;
+    // Display names are UI-generated copy and must not contain `·` or `：`.
+    return `${fallback} ${labels.path}`;
   }
   return count > 1 ? `${fallback} ${index + 1}` : fallback;
 }
@@ -201,8 +202,10 @@ function seriesName(
 export function adminResponseToTrendSeries(
   response: Pick<AdminMonitoringQueryResponse, "series">,
   fallbackName: string,
+  identity: string = fallbackName,
 ): TrendSeries[] {
   return response.series.map((series, index) => ({
+    id: identity,
     name: seriesName(
       series.labels,
       fallbackName,

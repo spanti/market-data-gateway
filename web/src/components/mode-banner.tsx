@@ -12,15 +12,15 @@ import type { SessionIssueReason } from "@/runtime/session-expiry";
 function sessionIssueDetail(reason: SessionIssueReason): string {
   switch (reason) {
     case "idle_timeout":
-      return "原因：30 分钟无操作，空闲会话已过期";
+      return "原因 30 分钟无操作，空闲会话已过期";
     case "absolute_timeout":
-      return "原因：已达 8 小时最长会话时限";
+      return "原因 已达 8 小时最长会话时限";
     case "idp_error":
-      return "原因：OIDC 登录失败";
+      return "原因 OIDC 登录失败";
     case "missing":
-      return "原因：没有有效的服务端会话";
+      return "原因 没有有效的服务端会话";
     default:
-      return "原因：会话无效或已被服务端拒绝";
+      return "原因 会话无效或已被服务端拒绝";
   }
 }
 
@@ -49,9 +49,9 @@ export function ModeBanner() {
       <div
         role="status"
         aria-live="polite"
-        className="border-b border-border bg-card"
+        className="bg-canvas"
       >
-        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-3 px-5 py-2 text-xs text-muted-foreground lg:px-8">
+        <div className="mx-auto flex max-w-[1280px] flex-wrap items-center gap-3 px-5 py-2 text-xs text-muted-foreground lg:px-8">
           正在发现能力…
         </div>
       </div>
@@ -64,9 +64,9 @@ export function ModeBanner() {
         data-testid="runtime-mode-banner"
         data-mode="current-contract"
         role="status"
-        className="border-b border-border bg-card"
+        className="bg-canvas"
       >
-        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-3 px-5 py-2 text-xs lg:px-8">
+        <div className="mx-auto flex max-w-[1280px] flex-wrap items-center gap-3 px-5 py-2 text-xs lg:px-8">
           <Badge variant="outline">Current Contract</Badge>
           <span className="font-medium">匿名只读</span>
           <span className="text-muted-foreground">
@@ -86,9 +86,9 @@ export function ModeBanner() {
         data-testid="runtime-mode-banner"
         data-mode="admin-api"
         role="status"
-        className="border-b border-border bg-card"
+        className="bg-canvas"
       >
-        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-3 px-5 py-2 text-xs lg:px-8">
+        <div className="mx-auto flex max-w-[1280px] flex-wrap items-center gap-3 px-5 py-2 text-xs lg:px-8">
           <Badge variant="soft">Admin API</Badge>
           {sessionLoading ? (
             <span className="font-medium">正在确认会话…</span>
@@ -146,14 +146,14 @@ export function ModeBanner() {
       data-testid="runtime-mode-banner"
       data-mode="capabilities-unknown"
       role="status"
-      className="border-b border-border bg-card"
+      className="bg-canvas"
     >
-      <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-3 px-5 py-2 text-xs lg:px-8">
+      <div className="mx-auto flex max-w-[1280px] flex-wrap items-center gap-3 px-5 py-2 text-xs lg:px-8">
         <StatusBadge tone="warning">能力未知</StatusBadge>
         <span>能力发现失败，所有写操作保持禁用，不降级为只读页面。</span>
         {capability.lastSuccessAt ? (
           <span className="text-muted-foreground">
-            最后成功更新时间：{formatUtcTimestamp(capability.lastSuccessAt)}
+            最后成功更新时间 {formatUtcTimestamp(capability.lastSuccessAt)}
           </span>
         ) : (
           <span className="text-muted-foreground">没有可用的缓存数据。</span>
