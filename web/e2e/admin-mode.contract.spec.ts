@@ -5,6 +5,10 @@ import {
   type Request,
   type Route,
 } from "@playwright/test";
+import {
+  expectNoBannedUiSymbols,
+  expectNoHorizontalOverflow,
+} from "./support";
 
 /**
  * CONTRACT-ONLY: the Admin API does not exist in the current backend.
@@ -415,5 +419,135 @@ test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
       ADMIN_GAP,
     );
     await expect(page.getByTestId("service-instance-api-1")).toHaveCount(0);
+  });
+
+  test("CONTRACT-ONLY Feed Subscription keeps four groups, raw evidence and 1024 layout", async ({
+    page,
+  }) => {
+    const feedSubscription = {
+      subscription_id: "fsub_1",
+      feed: "binance_spot",
+      venue: "binance",
+      instrument_id: "binance:BTC/USDT",
+      data_type: "bar",
+      interval: "1m",
+      desired: {
+        enabled: true,
+        deleted: false,
+        version: 3,
+        updated_at: futureIso(-60_000),
+        updated_by: "oidc-subject-123",
+      },
+      observed: {
+        enabled: true,
+        deleted: false,
+        version: 2,
+        state: "applied",
+        observed_at: futureIso(-50_000),
+        collector_instance_id: "collector-1",
+      },
+      drift: {
+        in_sync: false,
+        desired_version: 3,
+        observed_version: 2,
+        since: futureIso(-60_000),
+        reason: "not_applied",
+      },
+      last_error: {
+        code: "collector_unavailable",
+        message: "collector · unavailable：timeout",
+        at: futureIso(-40_000),
+        request_id: "req-feed-9",
+      },
+      created_at: futureIso(-3_600_000),
+      created_by: "oidc-subject-123",
+      updated_at: futureIso(-60_000),
+    };
+
+    const flowControl = {
+      api_rate_limit: {
+        enabled: true,
+        requests_per_second: 100,
+        burst: 200,
+        max_ws_sessions_per_ip: 16,
+        version: 2,
+        apply_mode: "hot",
+        observed: {
+          version: 2,
+          state: "applied",
+          observed_at: futureIso(-1_000),
+        },
+        drift: {
+          in_sync: true,
+          desired_version: 2,
+          observed_version: 2,
+          reason: null,
+        },
+        last_error: null,
+      },
+      ws_slow_consumer: {
+        enabled: true,
+        queue_size: 1000,
+        lag_notice_interval_ms: 1000,
+        version: 5,
+        apply_mode: "restart_required",
+        observed: {
+          version: 4,
+          state: "applied",
+          observed_at: futureIso(-90_000),
+        },
+        drift: {
+          in_sync: false,
+          desired_version: 5,
+          observed_version: 4,
+          reason: "not_applied",
+        },
+        last_error: null,
+      },
+    };
+
+    await installAdmin(page, { role: "Operator" });
+    await page.route("**/api/v1/admin/capabilities", (route) =>
+      json(route, 200, {
+        ...capabilityDocument,
+        capabilities: {
+          ...capabilityDocument.capabilities,
+          feed_subscription: { state: "enabled" },
+          feed_flow_control: {
+            state: "enabled",
+            api_rate_limit: { hot_apply: true },
+            ws_slow_consumer: { hot_apply: false },
+          },
+        },
+      }),
+    );
+    await page.route("**/api/v1/admin/feed-subscriptions", (route) =>
+      json(route, 200, {
+        items: [feedSubscription],
+        page: { next_cursor: null, has_more: false },
+      }),
+    );
+    await page.route("**/api/v1/admin/flow-control", (route) =>
+      json(route, 200, flowControl),
+    );
+
+    await page.setViewportSize({ width: 1024, height: 900 });
+    await page.goto("/console");
+
+    const row = page.getByTestId("feed-subscription-fsub_1");
+    await expect(row).toBeVisible();
+    for (const group of ["Desired", "Observed", "Drift", "Last Error"]) {
+      await expect(row.getByRole("group", { name: group })).toBeVisible();
+    }
+    await expect(
+      row.locator('[data-raw-evidence="true"]'),
+    ).toHaveText("collector · unavailable：timeout");
+    await expect(page.getByTestId("flow-api-rate-limit")).toBeVisible();
+    await expect(page.getByTestId("flow-ws-slow-consumer")).toBeVisible();
+
+    // Raw error text is exempt, but all surrounding UI-generated copy must
+    // avoid both banned separators.
+    await expectNoBannedUiSymbols(page, "#main-content");
+    await expectNoHorizontalOverflow(page);
   });
 });
