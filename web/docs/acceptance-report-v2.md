@@ -404,9 +404,12 @@ not edited.
 
 ## 11. Review-fix pass (2026-11-16)
 
-Branch: `ticket/operator-console-v2-review-fixes`. Worktree:
-`E:/total-project/mdgw-worktrees/operator-console-v2/review-fixes`. The pass addresses the
-Standards and Spec findings recorded in `notes/review-findings.md`.
+Branch: `ticket/operator-console-v2-review-fixes`, merged into the integration branch as
+`5f37ce5`. The pass addresses 16 Standards and Spec findings: private-DOM test assertions,
+divergent copy-scan implementations, duplicated series/row/editor logic, repeated mode
+presentation, speculative series-identity fallback, duplicated icon tiles, incomplete
+attribute/sr-only copy scanning, acceptance-report overclaiming, Vite scope, the
+prototype-derived Help trigger, and Service Role versus Service Instance wording.
 
 - **Test conventions (finding 1).** `BarsPage.test.tsx`, `MonitoringPage.test.tsx`,
   `e2e/acceptance-v2.spec.ts` and `e2e/layout-keyboard.spec.ts` no longer assert `data-slot`,
