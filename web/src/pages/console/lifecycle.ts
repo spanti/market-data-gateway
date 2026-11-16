@@ -15,6 +15,52 @@ export type { ServiceLifecycleAction } from "@/api/endpoints/admin";
 
 export const LIFECYCLE_REASON_MAX_LENGTH = OPERATION_REASON_MAX_LENGTH;
 
+/** The three lifecycle operations, in the order the console offers them. */
+export const LIFECYCLE_ACTIONS: readonly ServiceLifecycleAction[] = [
+  "start",
+  "stop",
+  "reload",
+];
+
+export const LIFECYCLE_ACTION_LABELS: Record<ServiceLifecycleAction, string> = {
+  start: "Start",
+  stop: "Graceful Stop",
+  reload: "Reload",
+};
+
+/**
+ * Inline consequence copy for the confirmation dialog. Start waits for real
+ * readiness (a PID is not evidence), Stop drains first, and Reload is a
+ * config-validated graceful restart. Reload never claims a hot reload or zero
+ * downtime.
+ */
+export function lifecycleActionConsequence(
+  action: ServiceLifecycleAction,
+): string {
+  switch (action) {
+    case "start":
+      return "Start 只有在目标 Service Instance 真实 Ready 后才算成功。PID 存在不等于 Ready。";
+    case "stop":
+      return "Graceful Stop 先停止接流量并排空，随后停止进程。停止期间该 Service Role 的请求会失败或中断。";
+    case "reload":
+      return "Reload 是配置校验后的优雅重启，不是热加载，也不承诺零停机。重启期间连接可能中断。";
+  }
+}
+
+/**
+ * Confirmation requirement shown inline next to the target. Only Stop and
+ * Reload require typing the target Service Instance name.
+ */
+export function lifecycleConfirmationRequirement(
+  action: ServiceLifecycleAction,
+  instanceId: string,
+): string {
+  if (action === "start") {
+    return "需要填写操作原因并确认。";
+  }
+  return `需要填写操作原因，并输入目标 Service Instance 名 ${instanceId} 确认。`;
+}
+
 export interface LifecycleConfirmationInput {
   action: ServiceLifecycleAction;
   instanceId: string;
@@ -91,6 +137,8 @@ export interface LifecycleOperationState {
   requestId: string | null;
   errorCode: string | null;
   errorMessage: string | null;
+  /** Request ID of a definitive submit rejection, shown inline for support. */
+  errorRequestId: string | null;
   lastUpdatedAt: string | null;
 }
 
@@ -108,12 +156,14 @@ export type LifecycleEvent =
       status: "accepted" | "running" | "succeeded" | "failed" | "unknown";
       errorCode?: string | null;
       errorMessage?: string | null;
+      requestId?: string | null;
       at?: string;
     }
   | {
       type: "submit-failed";
       errorCode: string;
       errorMessage: string;
+      requestId?: string | null;
       at?: string;
     }
   | { type: "disconnect"; at?: string }
@@ -131,6 +181,7 @@ export function createLifecycleOperation(
     requestId: null,
     errorCode: null,
     errorMessage: null,
+    errorRequestId: null,
     lastUpdatedAt: null,
   };
 }
@@ -172,6 +223,7 @@ export function reduceLifecycleOperation(
           phase: "submitting",
           errorCode: null,
           errorMessage: null,
+          errorRequestId: null,
         };
       }
       return state;
@@ -197,6 +249,7 @@ export function reduceLifecycleOperation(
       return {
         ...state,
         phase: event.status,
+        requestId: event.requestId ?? state.requestId,
         errorCode: event.errorCode ?? null,
         errorMessage: event.errorMessage ?? null,
         lastUpdatedAt: event.at ?? state.lastUpdatedAt,
@@ -212,6 +265,7 @@ export function reduceLifecycleOperation(
         phase: "failed",
         errorCode: event.errorCode,
         errorMessage: event.errorMessage,
+        errorRequestId: event.requestId ?? null,
         lastUpdatedAt: event.at ?? state.lastUpdatedAt,
       };
     }

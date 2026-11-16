@@ -1,9 +1,11 @@
 import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { renderApp } from "@/test/render-app";
 import { server } from "@/test/server";
+import { expectNoBannedUiSymbols } from "@/test/ui-copy";
+import { resetRetryAfter } from "@/runtime/retry-after";
 
 const apiStatus = {
   dataset: "bars",
@@ -131,7 +133,7 @@ const capabilityDocument = ({
 const adminServiceInstances = {
   items: [
     {
-      instance_id: "collector",
+      instance_id: "collector-1",
       service_role: "collector",
       display_name: "Collector primary",
       desired_state: "running",
@@ -146,7 +148,7 @@ const adminServiceInstances = {
       available_actions: ["start", "stop", "reload"],
     },
     {
-      instance_id: "api",
+      instance_id: "api-1",
       service_role: "api",
       display_name: "API primary",
       desired_state: "running",
@@ -161,7 +163,7 @@ const adminServiceInstances = {
       available_actions: ["start", "stop", "reload"],
     },
     {
-      instance_id: "replay",
+      instance_id: "replay-1",
       service_role: "replay",
       display_name: "Replay primary",
       desired_state: "running",
@@ -234,18 +236,50 @@ async function openServiceInstanceTab() {
   return user;
 }
 
+function serviceRegion() {
+  return screen.getByRole("region", { name: "Service Instance" });
+}
+
+async function fillConfirmation(
+  user: ReturnType<typeof userEvent.setup>,
+  dialog: HTMLElement,
+  instanceId: string,
+  reason: string,
+) {
+  await user.type(within(dialog).getByLabelText("操作原因"), reason);
+  await user.type(
+    within(dialog).getByLabelText(/输入目标实例名/),
+    instanceId,
+  );
+}
+
 describe("Service Instance — Current Contract", () => {
-  it("shows the three real Service Roles with identity, readiness, uptime and last observed time", async () => {
+  it("separates Service Role from Service Instance and shows real readiness", async () => {
     server.use(...statusHandlers());
     await openServiceInstanceTab();
 
+    const region = await screen.findByRole("region", {
+      name: "Service Instance",
+    });
     expect(
-      screen.getByRole("columnheader", { name: "Last Observed" }),
+      within(region).getByRole("columnheader", { name: "Service Instance" }),
+    ).toBeInTheDocument();
+    expect(
+      within(region).getByRole("columnheader", { name: "Service Role" }),
+    ).toBeInTheDocument();
+    expect(
+      within(region).getByRole("columnheader", { name: "Last Observed" }),
+    ).toBeInTheDocument();
+    expect(
+      within(region).getByRole("button", { name: "Service Instance 说明" }),
     ).toBeInTheDocument();
 
     for (const role of ["collector", "api", "replay"] as const) {
       const row = await screen.findByTestId(`service-instance-${role}`);
       expect(within(row).getByText(role)).toBeInTheDocument();
+      expect(within(row).getByText("Service Role")).toBeInTheDocument();
+      // Current Contract exposes Service Roles, not concrete instance IDs.
+      expect(within(row).getByText("未暴露")).toBeInTheDocument();
       expect(within(row).getByText("Ready")).toBeInTheDocument();
       expect(
         within(row).getByTestId(`last-observed-${role}`).textContent,
@@ -261,11 +295,22 @@ describe("Service Instance — Current Contract", () => {
 
     const replayRow = screen.getByTestId("service-instance-replay");
     expect(within(replayRow).getByText("loaded")).toBeInTheDocument();
+
+    // No cluster, leader or sharding semantics anywhere in the view.
+    expect(
+      within(region).queryByText(/Master|Worker|Leader|分片/),
+    ).not.toBeInTheDocument();
+    expectNoBannedUiSymbols(region);
   });
 
-  it("disables every lifecycle control with a visible Admin API reason", async () => {
+  it("disables every lifecycle control with a visible Admin API reason and read-only capability", async () => {
     server.use(...statusHandlers());
     await openServiceInstanceTab();
+
+    const region = await screen.findByRole("region", {
+      name: "Service Instance",
+    });
+    expect(within(region).getByText("当前只读")).toBeInTheDocument();
 
     const apiRow = await screen.findByTestId("service-instance-api");
     for (const label of ["Start", "Graceful Stop", "Reload"]) {
@@ -280,6 +325,10 @@ describe("Service Instance — Current Contract", () => {
 });
 
 describe("Service Instance — Admin API lifecycle (contract target)", () => {
+  beforeEach(() => {
+    resetRetryAfter();
+  });
+
   it("uses the Admin service-instance seam and never reads unauthenticated ops endpoints", async () => {
     let opsRequested = false;
     server.use(
@@ -295,11 +344,39 @@ describe("Service Instance — Admin API lifecycle (contract target)", () => {
     );
     await openServiceInstanceTab();
 
-    const apiRow = await screen.findByTestId("service-instance-api");
+    const apiRow = await screen.findByTestId("service-instance-api-1");
+    expect(within(apiRow).getByText("api-1")).toBeInTheDocument();
     expect(within(apiRow).getByText("API primary")).toBeInTheDocument();
+    expect(within(apiRow).getByText("api", { exact: true })).toBeInTheDocument();
     expect(within(apiRow).getByText("1002")).toBeInTheDocument();
     expect(within(apiRow).getByText("PID")).toBeInTheDocument();
+    expect(within(apiRow).getByText("Ready")).toBeInTheDocument();
     expect(opsRequested).toBe(false);
+  });
+
+  it("does not treat a running PID as Ready", async () => {
+    server.use(
+      http.get("*/api/v1/admin/service-instances", () =>
+        HttpResponse.json({
+          items: [
+            {
+              ...adminServiceInstances.items[1],
+              ready: false,
+              ready_reason: "process alive, dependencies unavailable",
+              pid: 4242,
+            },
+          ],
+          page: { next_cursor: null, has_more: false },
+        }),
+      ),
+      ...adminHandlers("SuperAdmin"),
+    );
+    await openServiceInstanceTab();
+
+    const apiRow = await screen.findByTestId("service-instance-api-1");
+    expect(within(apiRow).getByText("4242")).toBeInTheDocument();
+    expect(within(apiRow).getByText("未就绪")).toBeInTheDocument();
+    expect(within(apiRow).queryByText("Ready")).not.toBeInTheDocument();
   });
 
   it("shows an explicit capability gap when the Admin service-instance API is unsupported", async () => {
@@ -328,10 +405,28 @@ describe("Service Instance — Admin API lifecycle (contract target)", () => {
     expect(serviceInstanceRequested).toBe(false);
   });
 
+  it("shows the real empty state instead of fabricating instances", async () => {
+    server.use(
+      http.get("*/api/v1/admin/service-instances", () =>
+        HttpResponse.json({
+          items: [],
+          page: { next_cursor: null, has_more: false },
+        }),
+      ),
+      ...adminHandlers("SuperAdmin"),
+    );
+    await openServiceInstanceTab();
+
+    expect(
+      await screen.findByText("没有 Service Instance"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("service-instance-api-1")).not.toBeInTheDocument();
+  });
+
   it("401 from a lifecycle write stops writes and returns to the login entry", async () => {
     server.use(
       ...adminHandlers("SuperAdmin"),
-      http.post("*/api/v1/admin/service-instances/api/stop", () =>
+      http.post("*/api/v1/admin/service-instances/api-1/stop", () =>
         HttpResponse.json(
           {
             error: {
@@ -347,13 +442,17 @@ describe("Service Instance — Admin API lifecycle (contract target)", () => {
     );
     const user = await openServiceInstanceTab();
 
-    const apiRow = await screen.findByTestId("service-instance-api");
+    const apiRow = await screen.findByTestId("service-instance-api-1");
     await user.click(
       within(apiRow).getByRole("button", { name: "Graceful Stop" }),
     );
     const dialog = await screen.findByRole("dialog");
-    await user.type(within(dialog).getByLabelText("操作原因"), "rotate");
-    await user.type(within(dialog).getByLabelText(/输入目标实例名/), "api");
+    await fillConfirmation(
+      user,
+      dialog,
+      "api-1",
+      "drain before certificate rotation",
+    );
     await user.click(within(dialog).getByRole("button", { name: "确认执行" }));
 
     expect(
@@ -371,12 +470,17 @@ describe("Service Instance — Admin API lifecycle (contract target)", () => {
     server.use(...adminHandlers("SuperAdmin"), ...statusHandlers());
     const user = await openServiceInstanceTab();
 
-    const apiRow = await screen.findByTestId("service-instance-api");
+    const apiRow = await screen.findByTestId("service-instance-api-1");
     await user.click(
       within(apiRow).getByRole("button", { name: "Graceful Stop" }),
     );
 
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await screen.findByRole("dialog", {
+      name: "确认 Graceful Stop api-1",
+    });
+    expect(dialog).toHaveTextContent("目标 Service Instance api-1");
+    expect(dialog).toHaveTextContent("排空");
+    expect(dialog).toHaveTextContent("输入目标 Service Instance 名 api-1");
     const confirm = within(dialog).getByRole("button", { name: "确认执行" });
     expect(confirm).toBeDisabled();
 
@@ -388,7 +492,7 @@ describe("Service Instance — Admin API lifecycle (contract target)", () => {
 
     await user.type(
       within(dialog).getByLabelText(/输入目标实例名/),
-      "api-1",
+      "api-2",
     );
     expect(confirm).toBeDisabled();
     expect(
@@ -396,8 +500,38 @@ describe("Service Instance — Admin API lifecycle (contract target)", () => {
     ).toBeInTheDocument();
 
     await user.clear(within(dialog).getByLabelText(/输入目标实例名/));
-    await user.type(within(dialog).getByLabelText(/输入目标实例名/), "api");
+    await user.type(within(dialog).getByLabelText(/输入目标实例名/), "api-1");
     expect(confirm).toBeEnabled();
+    expectNoBannedUiSymbols(dialog);
+  });
+
+  it("keeps Start and Reload consequences inline and never claims hot reload or zero downtime", async () => {
+    server.use(...adminHandlers("SuperAdmin"));
+    const user = await openServiceInstanceTab();
+    const apiRow = await screen.findByTestId("service-instance-api-1");
+
+    await user.click(within(apiRow).getByRole("button", { name: "Start" }));
+    const startDialog = await screen.findByRole("dialog", {
+      name: "确认 Start api-1",
+    });
+    expect(startDialog).toHaveTextContent("真实 Ready");
+    expect(startDialog).toHaveTextContent("PID 存在不等于 Ready");
+    expect(
+      within(startDialog).queryByLabelText(/输入目标实例名/),
+    ).not.toBeInTheDocument();
+    await user.click(within(startDialog).getByRole("button", { name: "取消" }));
+
+    await user.click(within(apiRow).getByRole("button", { name: "Reload" }));
+    const reloadDialog = await screen.findByRole("dialog", {
+      name: "确认 Reload api-1",
+    });
+    expect(reloadDialog).toHaveTextContent("优雅重启");
+    expect(reloadDialog).toHaveTextContent("不是热加载");
+    expect(reloadDialog).toHaveTextContent("不承诺零停机");
+    expect(
+      within(reloadDialog).getByLabelText(/输入目标实例名/),
+    ).toBeInTheDocument();
+    expectNoBannedUiSymbols(reloadDialog);
   });
 
   it("treats acceptance as unfinished, turns a disconnect into unknown, and resolves it by querying the Operation without retrying the POST", async () => {
@@ -407,31 +541,34 @@ describe("Service Instance — Admin API lifecycle (contract target)", () => {
     server.use(
       ...adminHandlers("SuperAdmin"),
       ...statusHandlers(),
-      http.post("*/api/v1/admin/service-instances/api/stop", async ({ request }) => {
-        postCount += 1;
-        expect(request.headers.get("Idempotency-Key")).toBeTruthy();
-        expect(request.headers.get("X-CSRF-Token")).toBe("csrf-token");
-        const body = (await request.json()) as Record<string, unknown>;
-        expect(body).toMatchObject({
-          reason: "drain before certificate rotation",
-          confirm: true,
-          confirm_instance_name: "api",
-        });
-        return HttpResponse.json(
-          {
-            operation_id: "op_1",
-            kind: "service_instance.stop",
-            status: "accepted",
-            request_id: "req_1",
-          },
-          { status: 202 },
-        );
-      }),
+      http.post(
+        "*/api/v1/admin/service-instances/api-1/stop",
+        async ({ request }) => {
+          postCount += 1;
+          expect(request.headers.get("Idempotency-Key")).toBeTruthy();
+          expect(request.headers.get("X-CSRF-Token")).toBe("csrf-token");
+          const body = (await request.json()) as Record<string, unknown>;
+          expect(body).toMatchObject({
+            reason: "drain before certificate rotation",
+            confirm: true,
+            confirm_instance_name: "api-1",
+          });
+          return HttpResponse.json(
+            {
+              operation_id: "op_1",
+              kind: "service_instance.stop",
+              status: "accepted",
+              request_id: "req_1",
+            },
+            { status: 202 },
+          );
+        },
+      ),
       http.get("*/api/v1/admin/operations/op_1", () =>
         HttpResponse.json({
           operation_id: "op_1",
           kind: "service_instance.stop",
-          target: { instance_id: "api", service_role: "api" },
+          target: { instance_id: "api-1", service_role: "api" },
           requested_by: {
             subject: "oidc-subject-123",
             display_name: "Ada Admin",
@@ -450,19 +587,35 @@ describe("Service Instance — Admin API lifecycle (contract target)", () => {
     );
 
     const user = await openServiceInstanceTab();
-    const apiRow = await screen.findByTestId("service-instance-api");
+    const apiRow = await screen.findByTestId("service-instance-api-1");
     await user.click(
       within(apiRow).getByRole("button", { name: "Graceful Stop" }),
     );
 
     const dialog = await screen.findByRole("dialog");
-    await user.type(within(dialog).getByLabelText("操作原因"), "drain before certificate rotation");
-    await user.type(within(dialog).getByLabelText(/输入目标实例名/), "api");
+    await fillConfirmation(
+      user,
+      dialog,
+      "api-1",
+      "drain before certificate rotation",
+    );
     await user.click(within(dialog).getByRole("button", { name: "确认执行" }));
 
-    expect(await within(apiRow).findByText("已接受（未完成）")).toBeInTheDocument();
+    expect(
+      await within(apiRow).findByText("已接受（未完成）"),
+    ).toBeInTheDocument();
     expect(within(apiRow).queryByText("成功")).not.toBeInTheDocument();
+    expect(within(apiRow).getByText("目标 api-1")).toBeInTheDocument();
+    expect(within(apiRow).getByText("Request ID req_1")).toBeInTheDocument();
     expect(postCount).toBe(1);
+    for (const label of ["Start", "Graceful Stop", "Reload"]) {
+      expect(
+        within(apiRow).getByRole("button", { name: label }),
+      ).toBeDisabled();
+    }
+    expect(
+      within(apiRow).getAllByText("已有进行中的 Operation").length,
+    ).toBeGreaterThan(0);
 
     // The operation is accepted but the console loses its connection.
     act(() => {
@@ -484,25 +637,209 @@ describe("Service Instance — Admin API lifecycle (contract target)", () => {
     expect(postCount).toBe(1);
   });
 
-  it("shows the explicit Admin service-instance gap and no fallback rows when service_lifecycle is unsupported", async () => {
+  it("sends the exact lifecycle bodies for Start and Reload", async () => {
+    const bodies: Array<{ action: string; body: unknown }> = [];
     server.use(
-      http.get("*/api/v1/admin/capabilities", () =>
-        HttpResponse.json({
-          ...capabilityDocument,
-          capabilities: {
-            ...capabilityDocument.capabilities,
-            service_lifecycle: { state: "unsupported" },
-          },
-        }),
-      ),
       ...adminHandlers("SuperAdmin"),
+      http.post(
+        "*/api/v1/admin/service-instances/collector-1/start",
+        async ({ request }) => {
+          bodies.push({ action: "start", body: await request.json() });
+          return HttpResponse.json(
+            { operation_id: null, status: "accepted" },
+            { status: 202 },
+          );
+        },
+      ),
+      http.post(
+        "*/api/v1/admin/service-instances/api-1/reload",
+        async ({ request }) => {
+          bodies.push({ action: "reload", body: await request.json() });
+          return HttpResponse.json(
+            { operation_id: null, status: "accepted" },
+            { status: 202 },
+          );
+        },
+      ),
     );
-    await openServiceInstanceTab();
+    const user = await openServiceInstanceTab();
 
-    expect(await screen.findByTestId("service-instance-gap")).toHaveTextContent(
-      "需要 Admin API 服务实例接口（未实现）",
+    const collectorRow = await screen.findByTestId("service-instance-collector-1");
+    await user.click(
+      within(collectorRow).getByRole("button", { name: "Start" }),
     );
-    expect(screen.queryByTestId("service-instance-api")).not.toBeInTheDocument();
+    let dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("操作原因"), "bring back");
+    await user.click(within(dialog).getByRole("button", { name: "确认执行" }));
+    expect(
+      await within(collectorRow).findByText("已接受（未完成）"),
+    ).toBeInTheDocument();
+
+    const apiRow = await screen.findByTestId("service-instance-api-1");
+    await user.click(within(apiRow).getByRole("button", { name: "Reload" }));
+    dialog = await screen.findByRole("dialog");
+    await fillConfirmation(user, dialog, "api-1", "reload config");
+    await user.click(within(dialog).getByRole("button", { name: "确认执行" }));
+    expect(await within(apiRow).findByText("已接受（未完成）")).toBeInTheDocument();
+
+    expect(bodies).toEqual([
+      { action: "start", body: { reason: "bring back", confirm: true } },
+      {
+        action: "reload",
+        body: {
+          reason: "reload config",
+          confirm: true,
+          confirm_instance_name: "api-1",
+        },
+      },
+    ]);
+  });
+
+  it("shows a 403 raw backend error and Request ID inline without banned separators", async () => {
+    let attempts = 0;
+    server.use(
+      ...adminHandlers("SuperAdmin"),
+      http.post("*/api/v1/admin/service-instances/api-1/stop", () => {
+        attempts += 1;
+        return HttpResponse.json(
+          {
+            error: {
+              code: "forbidden",
+              message: "role · denied：policy",
+              details: { reason: "role", required_role: "SuperAdmin" },
+              request_id: "req-403",
+            },
+          },
+          { status: 403, headers: { "X-Request-ID": "req-403" } },
+        );
+      }),
+    );
+    const user = await openServiceInstanceTab();
+    const apiRow = await screen.findByTestId("service-instance-api-1");
+    await user.click(
+      within(apiRow).getByRole("button", { name: "Graceful Stop" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await fillConfirmation(user, dialog, "api-1", "drain");
+    await user.click(within(dialog).getByRole("button", { name: "确认执行" }));
+
+    expect(await within(apiRow).findByText("失败")).toBeInTheDocument();
+    const raw = within(apiRow).getByText("role · denied：policy");
+    expect(raw).toHaveAttribute("data-raw-evidence", "true");
+    expect(within(apiRow).getByText("Request ID req-403")).toBeInTheDocument();
+    expect(within(apiRow).getByText(/forbidden:/)).toBeInTheDocument();
+    expectNoBannedUiSymbols(apiRow);
+    expect(attempts).toBe(1);
+    expect(
+      await screen.findByTestId("global-http-notice"),
+    ).toHaveTextContent("缺少权限，需要 SuperAdmin 角色。");
+  });
+
+  it("keeps a 409 conflict raw error inline and never shows success", async () => {
+    let attempts = 0;
+    server.use(
+      ...adminHandlers("SuperAdmin"),
+      http.post("*/api/v1/admin/service-instances/api-1/stop", () => {
+        attempts += 1;
+        return HttpResponse.json(
+          {
+            error: {
+              code: "conflict",
+              message: "version · conflict：edit",
+              details: {
+                reason: "operation_in_progress",
+                current_version: 3,
+              },
+              request_id: "req-409",
+            },
+          },
+          { status: 409, headers: { "X-Request-ID": "req-409" } },
+        );
+      }),
+    );
+    const user = await openServiceInstanceTab();
+    const apiRow = await screen.findByTestId("service-instance-api-1");
+    await user.click(
+      within(apiRow).getByRole("button", { name: "Graceful Stop" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await fillConfirmation(user, dialog, "api-1", "drain");
+    await user.click(within(dialog).getByRole("button", { name: "确认执行" }));
+
+    expect(await within(apiRow).findByText("失败")).toBeInTheDocument();
+    const raw = within(apiRow).getByText("version · conflict：edit");
+    expect(raw).toHaveAttribute("data-raw-evidence", "true");
+    expect(within(apiRow).getByText("Request ID req-409")).toBeInTheDocument();
+    expect(within(apiRow).queryByText("成功")).not.toBeInTheDocument();
+    expect(
+      within(apiRow).getByRole("button", { name: "Graceful Stop" }),
+    ).toBeEnabled();
+    expectNoBannedUiSymbols(apiRow);
+    expect(attempts).toBe(1);
+    expect(
+      await screen.findByTestId("global-http-notice"),
+    ).toHaveTextContent("数据已被他人修改（409 冲突）");
+  });
+
+  it("honours a 429 Retry-After, keeps the raw error inline and blocks further writes", async () => {
+    let attempts = 0;
+    server.use(
+      ...adminHandlers("SuperAdmin"),
+      http.post("*/api/v1/admin/service-instances/api-1/stop", () => {
+        attempts += 1;
+        return HttpResponse.json(
+          {
+            error: {
+              code: "rate_limited",
+              message: "too many requests",
+              details: { retry_after_s: 7 },
+              request_id: "req-429",
+            },
+          },
+          { status: 429, headers: { "Retry-After": "7", "X-Request-ID": "req-429" } },
+        );
+      }),
+    );
+    const user = await openServiceInstanceTab();
+    const apiRow = await screen.findByTestId("service-instance-api-1");
+    await user.click(
+      within(apiRow).getByRole("button", { name: "Graceful Stop" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await fillConfirmation(user, dialog, "api-1", "drain");
+    await user.click(within(dialog).getByRole("button", { name: "确认执行" }));
+
+    expect(await within(apiRow).findByText("失败")).toBeInTheDocument();
+    expect(within(apiRow).getByText("Request ID req-429")).toBeInTheDocument();
+    expect(
+      within(apiRow).getByRole("button", { name: "Start" }),
+    ).toBeDisabled();
+    expect(
+      within(apiRow).getAllByText(/限流中，请在 \d+ 秒后重试/).length,
+    ).toBeGreaterThan(0);
+    expect(attempts).toBe(1);
+  });
+
+  it("turns a network failure during submit into unknown, not failure, and never replays it", async () => {
+    let attempts = 0;
+    server.use(
+      ...adminHandlers("SuperAdmin"),
+      http.post("*/api/v1/admin/service-instances/api-1/reload", () => {
+        attempts += 1;
+        return HttpResponse.error();
+      }),
+    );
+    const user = await openServiceInstanceTab();
+    const apiRow = await screen.findByTestId("service-instance-api-1");
+    await user.click(within(apiRow).getByRole("button", { name: "Reload" }));
+    const dialog = await screen.findByRole("dialog");
+    await fillConfirmation(user, dialog, "api-1", "reload config");
+    await user.click(within(dialog).getByRole("button", { name: "确认执行" }));
+
+    expect(await within(apiRow).findByText("状态未知")).toBeInTheDocument();
+    expect(within(apiRow).queryByText("失败")).not.toBeInTheDocument();
+    expect(within(apiRow).queryByText("成功")).not.toBeInTheDocument();
+    expect(attempts).toBe(1);
   });
 
   it.each([
@@ -515,17 +852,20 @@ describe("Service Instance — Admin API lifecycle (contract target)", () => {
       server.use(...adminHandlers(role), ...statusHandlers());
       await openServiceInstanceTab();
 
-      const apiRow = await screen.findByTestId("service-instance-api");
+      const region = serviceRegion();
+      const apiRow = await screen.findByTestId("service-instance-api-1");
       const stop = within(apiRow).getByRole("button", {
         name: "Graceful Stop",
       });
       if (expectedEnabled) {
         expect(stop).toBeEnabled();
+        expect(within(region).getByText("生命周期可执行")).toBeInTheDocument();
       } else {
         expect(stop).toBeDisabled();
         expect(
           within(apiRow).getAllByText("需要 SuperAdmin 角色").length,
         ).toBeGreaterThan(0);
+        expect(within(region).getByText("当前只读")).toBeInTheDocument();
       }
     },
   );
