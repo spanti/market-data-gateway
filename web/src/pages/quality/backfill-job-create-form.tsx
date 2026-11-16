@@ -1,3 +1,4 @@
+import type * as React from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
@@ -14,6 +15,7 @@ import {
   DisabledAction,
   DisabledReason as DisabledReasonNotice,
 } from "@/components/disabled-reason";
+import { HelpTrigger } from "@/components/help-trigger";
 import { StatusBadge, type StatusTone } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -87,8 +89,17 @@ const backfillCreateSchema = z
 interface CreateErrorDescription {
   tone: StatusTone;
   title: string;
-  detail: string;
+  detail: React.ReactNode;
   requestId: string | null;
+}
+
+function rawDetail(code: string, message: string): React.ReactNode {
+  return (
+    <span>
+      <span className="font-mono">{code}</span>{" "}
+      <span data-raw-evidence="true">{message}</span>
+    </span>
+  );
 }
 
 function describeCreateError(error: unknown): CreateErrorDescription {
@@ -97,7 +108,7 @@ function describeCreateError(error: unknown): CreateErrorDescription {
     if (error.status === null) {
       return {
         tone: "unknown",
-        title: "结果未知：未自动重试",
+        title: "结果未知，未自动重试",
         detail:
           "请求未完成，无法确认服务端是否已创建 Job。请刷新 Job 列表确认，不要重复提交。",
         requestId,
@@ -126,25 +137,25 @@ function describeCreateError(error: unknown): CreateErrorDescription {
           : null;
       return {
         tone: "warning",
-        title: "冲突：本次未创建 Job",
+        title: "冲突，本次未创建 Job",
         detail: activeJobId
-          ? `同一 InstrumentId + Bar Interval 已有运行中的 Job：${activeJobId}。请等待或先取消该 Job。`
-          : `${error.code}: ${error.message}`,
+          ? `同一 InstrumentId 与 Bar Interval 已有运行中的 Job ${activeJobId}。请等待或先取消该 Job。`
+          : rawDetail(error.code, error.message),
         requestId,
       };
     }
     if (error.status === 400) {
       return {
         tone: "critical",
-        title: "请求无效：本次未创建 Job",
-        detail: `${error.code}: ${error.message}`,
+        title: "请求无效，本次未创建 Job",
+        detail: rawDetail(error.code, error.message),
         requestId,
       };
     }
     return {
       tone: "critical",
       title: "创建失败",
-      detail: `${error.code}: ${error.message}`,
+      detail: rawDetail(error.code, error.message),
       requestId,
     };
   }
@@ -171,6 +182,19 @@ function FieldError({
     <p id={id} role="alert" className="text-[11px] text-status-critical">
       {message}
     </p>
+  );
+}
+
+function CreateFormHeading() {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <h3 className="text-xs font-semibold text-foreground">创建 Backfill Job</h3>
+      <HelpTrigger
+        label="Backfill Job 创建说明"
+        content="创建需要 InstrumentId、目标 Bar Interval、UTC 起止时间和操作原因，并需在确认框中再次确认。范围 start 为闭区间、end 为开区间。高周期补采为补采 1m 加内部 Bar Aggregation，不是调用原生高周期接口。"
+        side="bottom"
+      />
+    </div>
   );
 }
 
@@ -281,14 +305,18 @@ export function BackfillJobCreateForm({
 
   if (disabledReason) {
     return (
-      <div className="mt-4 border border-border p-3" aria-label="触发 Backfill Job">
+      <div
+        className="mt-4 flex flex-col gap-2 rounded-lg bg-surface-sunken p-3"
+        aria-label="触发 Backfill Job"
+      >
+        <CreateFormHeading />
         <DisabledAction
           label="创建 Backfill Job"
           reason={disabledReason}
         />
-        <p className="mt-2 text-xs text-muted-foreground">
+        <p className="text-xs text-muted-foreground">
           Auditor 只能查看质量数据；触发、取消与重试需要 SuperAdmin 或
-          Operator。控制禁用不代表隐藏：服务端仍会拒绝越权请求。
+          Operator。控制禁用不代表隐藏。服务端仍会拒绝越权请求。
         </p>
       </div>
     );
@@ -302,8 +330,9 @@ export function BackfillJobCreateForm({
       aria-label="创建 Backfill Job 表单"
       onSubmit={submitForm}
       noValidate
-      className="mt-4 border border-border p-3"
+      className="mt-4 flex flex-col gap-3 rounded-lg bg-surface-sunken p-3"
     >
+      <CreateFormHeading />
       <div className="flex flex-wrap items-start gap-3">
         <div className="flex w-52 flex-col gap-1">
           <Label htmlFor="backfill-create-instrument">InstrumentId</Label>
@@ -367,7 +396,9 @@ export function BackfillJobCreateForm({
             id="backfill-create-end"
             type="datetime-local"
             aria-invalid={Boolean(errors.end)}
-            aria-describedby={errors.end ? "backfill-end-error" : undefined}
+            aria-describedby={
+              errors.end ? "backfill-end-error" : undefined
+            }
             {...register("end")}
           />
           <FieldError id="backfill-end-error" message={errors.end?.message} />
@@ -408,16 +439,19 @@ export function BackfillJobCreateForm({
       {interval ? (
         <p
           data-testid="backfill-plan"
-          className="mt-2 text-xs text-muted-foreground"
+          className="text-xs text-muted-foreground"
         >
-          真实计划：{planTextForInterval(interval)}
-          {interval === "1m" ? "" : "（不是调用原生高周期接口）"}。范围按 UTC
-          提交，start 为闭区间、end 为开区间。
+          真实计划{" "}
+          <span className="font-medium">
+            {planTextForInterval(interval)}
+          </span>
+          。范围按 UTC 提交，start 为闭区间、end 为开区间。
+          {interval === "1m" ? "" : " 不是调用原生高周期接口。"}
         </p>
       ) : null}
 
       {outcome?.kind === "success" ? (
-        <div className="mt-3" role="status">
+        <div role="status">
           <StatusBadge tone="good">
             已创建 Backfill Job {outcome.jobId}
           </StatusBadge>
@@ -425,10 +459,7 @@ export function BackfillJobCreateForm({
       ) : null}
 
       {errorDescription ? (
-        <div
-          className="mt-3 flex flex-col gap-1 border border-border p-2"
-          role="alert"
-        >
+        <div className="flex flex-col gap-1 rounded-lg bg-card p-3" role="alert">
           <StatusBadge tone={errorDescription.tone}>
             {errorDescription.title}
           </StatusBadge>
@@ -450,13 +481,13 @@ export function BackfillJobCreateForm({
         description={
           pendingBody ? (
             <span>
-              InstrumentId <span className="font-mono">{pendingBody.instrument_id}</span>{" "}
-              · Bar Interval <span className="font-mono">{pendingBody.interval}</span>。
+              InstrumentId{" "}
+              <span className="font-mono">{pendingBody.instrument_id}</span> Bar
+              Interval <span className="font-mono">{pendingBody.interval}</span>。
               范围 {formatRange(pendingBody.start, pendingBody.end)}（start 闭、end
-              开）。原因：{pendingBody.reason}。真实计划：
-              {planTextForInterval(pendingBody.interval)}
-              ，不是调用原生高周期接口。已写入的 Revision 不会因取消回退；
-              提交后不自动重放。
+              开）。原因 {pendingBody.reason}。真实计划{" "}
+              {planTextForInterval(pendingBody.interval)}，不是调用原生高周期接口。
+              已写入的 Revision 不会因取消回退；提交后不自动重放。
             </span>
           ) : undefined
         }

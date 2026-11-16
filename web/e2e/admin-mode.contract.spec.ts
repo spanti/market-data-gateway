@@ -57,6 +57,11 @@ const capabilityDocument = {
     },
     monitoring_proxy: { state: "enabled", arbitrary_promql: false },
     ws_admin_session: { state: "enabled", path: "/api/v1/admin/ws" },
+    backfill_job: {
+      state: "enabled",
+      plan_modes: ["native_interval", "one_minute_plus_aggregation"],
+    },
+    persistent_backfill_gaps: { state: "enabled" },
   },
 };
 
@@ -169,6 +174,110 @@ async function submitStop(
   await dialog.getByLabel("操作原因").fill(reason);
   await dialog.getByLabel(/输入目标实例名/).fill(instanceId);
   await dialog.getByRole("button", { name: "确认执行" }).click();
+}
+
+const QUALITY_GAPS_PATTERN = /\/api\/v1\/admin\/backfill-gaps(\?.*)?$/;
+const QUALITY_JOBS_PATTERN = /\/api\/v1\/admin\/backfill-jobs(\?.*)?$/;
+
+function qualityGap(overrides: Record<string, unknown> = {}) {
+  return {
+    gap_id: "gap_open_1",
+    status: "open",
+    feed: "binance_spot",
+    instrument_id: "binance:BTC/USDT",
+    interval: "1m",
+    start: "2026-09-01T00:00:00.000000000Z",
+    end: "2026-09-01T01:00:00.000000000Z",
+    reason: "history_unsupported",
+    first_discovered_at: "2026-09-01T01:05:00.000000000Z",
+    last_discovered_at: "2026-11-09T12:00:00.000000000Z",
+    occurrence_count: 3,
+    resolved_at: null,
+    resolved_by_job_id: null,
+    related_job_ids: ["bf_failed_1"],
+    created_at: "2026-09-01T01:05:00.000000000Z",
+    updated_at: "2026-11-09T12:00:00.000000000Z",
+    ...overrides,
+  };
+}
+
+function qualityJob(overrides: Record<string, unknown> = {}) {
+  const interval =
+    typeof overrides.interval === "string" ? overrides.interval : "1h";
+  return {
+    job_id: "bf_job_1",
+    status: "running",
+    instrument_id: "binance:BTC/USDT",
+    interval,
+    start: "2026-09-01T00:00:00.000000000Z",
+    end: "2026-09-02T00:00:00.000000000Z",
+    plan: {
+      mode:
+        interval === "1m"
+          ? "native_interval"
+          : "one_minute_plus_aggregation",
+      source_intervals: ["1m"],
+      target_interval: interval,
+      description:
+        interval === "1m" ? "原生 1m 补采" : "补采 1m + 内部 Bar Aggregation",
+    },
+    current_range: {
+      start: "2026-09-01T06:00:00.000000000Z",
+      end: "2026-09-01T12:00:00.000000000Z",
+    },
+    counters: {
+      scanned_bars: 10,
+      gap_bars: 2,
+      backfilled_bars: 2,
+      written_bars: 3,
+      rejected_bars: 0,
+    },
+    requested_by: {
+      subject: "oidc-subject-123",
+      display_name: "Ada Admin",
+      access_role: "SuperAdmin",
+    },
+    reason: "recover exchange outage",
+    retry_of_job_id: null,
+    created_at: "2026-09-01T00:00:00.000000000Z",
+    started_at: null,
+    finished_at: null,
+    error: null,
+    resolved_gap_ids: [],
+    ...overrides,
+  };
+}
+
+async function installQualityAdmin(
+  page: Page,
+  options: { gaps?: unknown[]; jobs?: unknown[] } = {},
+): Promise<void> {
+  await installAdmin(page);
+  await page.route(QUALITY_GAPS_PATTERN, (route) =>
+    json(route, 200, {
+      items: options.gaps ?? [],
+      page: { next_cursor: null, has_more: false },
+    }),
+  );
+  await page.route(QUALITY_JOBS_PATTERN, (route) =>
+    json(route, 200, {
+      items: options.jobs ?? [],
+      page: { next_cursor: null, has_more: false },
+    }),
+  );
+}
+
+async function fillBackfillJobForm(page: Page): Promise<void> {
+  const jobs = page.getByRole("region", { name: "Backfill Job" });
+  await jobs.getByLabel("InstrumentId").fill("binance:BTC/USDT");
+  await jobs.getByLabel("目标 Bar Interval").selectOption("1h");
+  await jobs
+    .getByLabel("开始时间（UTC，闭区间）")
+    .fill("2026-09-01T00:00");
+  await jobs
+    .getByLabel("结束时间（UTC，开区间）")
+    .fill("2026-09-02T00:00");
+  await jobs.getByLabel("操作原因").fill("recover exchange outage");
 }
 
 function trackUntrustedOps(page: Page): string[] {
@@ -305,8 +414,8 @@ test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
     await expect(confirm).toBeEnabled();
     await confirm.click();
 
-    // Exact match avoids the static "已接受 ≠ 成功" explanation and waits
-    // for the actual succeeded lifecycle badge.
+    // The operation summary also contains the sentence "已接受 ≠ 成功", so the
+    // assertion must target the exact lifecycle status, not that substring.
     await expect(row.getByText("成功", { exact: true })).toBeVisible();
     expect(postCount).toBe(1);
     expect(captured.body).toMatchObject({
@@ -754,6 +863,267 @@ test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
       "upstream · failed：timeout",
     );
     await expect(query.getByText("Request ID: req_raw_500")).toBeVisible();
+    await expectNoBannedUiSymbols(page);
+  });
+});
+
+/**
+ * CONTRACT-ONLY: the Admin API does not exist in the current backend. These
+ * Quality flows use Playwright request interception. They verify the frontend
+ * contract only and are NOT real OIDC or Admin API integration.
+ */
+test.describe("CONTRACT-ONLY Admin API Quality flows (backend absent)", () => {
+  test("renders persistent gaps, lifecycle states, truthful counters and raw errors", async ({
+    page,
+  }) => {
+    await installQualityAdmin(page, {
+      gaps: [qualityGap()],
+      jobs: [
+        qualityJob({ job_id: "bf_running", status: "running" }),
+        qualityJob({
+          job_id: "bf_failed",
+          status: "failed",
+          current_range: null,
+          error: {
+            code: "interrupted",
+            message: "upstream · failed：timeout",
+            details: {},
+          },
+        }),
+      ],
+    });
+
+    // Narrow desktop: the wide gap and job tables scroll locally instead of
+    // making the whole page horizontally scrollable.
+    await page.setViewportSize({ width: 1024, height: 900 });
+    await page.goto("/quality");
+
+    const gaps = page.getByRole("region", {
+      name: "持久 Unrecoverable Backfill Gap",
+    });
+    await expect(gaps.getByText("gap_open_1")).toBeVisible();
+    await expect(gaps.getByText(/首次 2026-09-01 01:05:00 UTC/)).toBeVisible();
+    await expect(
+      gaps.getByText(/最近 2026-11-09 12:00:00 UTC/),
+    ).toBeVisible();
+    await expect(gaps.getByText(/关联 Job bf_failed_1/)).toBeVisible();
+    await expect(
+      gaps.getByText("history_unsupported", { exact: true }),
+    ).toBeVisible();
+
+    const jobs = page.getByRole("region", { name: "Backfill Job" });
+    await expect(
+      jobs.getByText("bf_running", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      jobs.getByText("2026-09-01 06:00:00 UTC – 2026-09-01 12:00:00 UTC"),
+    ).toBeVisible();
+    await expect(
+      jobs.getByText("进度不确定，契约未提供百分比").first(),
+    ).toBeVisible();
+    await expect(jobs.getByRole("progressbar")).toHaveAttribute(
+      "aria-valuetext",
+      "进度不确定",
+    );
+    await expect(jobs.getByText("扫描").first()).toBeVisible();
+    await expect(jobs.getByText("3").first()).toBeVisible();
+
+    const raw = jobs.locator('[data-raw-evidence="true"]', {
+      hasText: "upstream · failed：timeout",
+    });
+    await expect(raw).toHaveText("upstream · failed：timeout");
+    await expect(jobs.getByText(/已中断/)).toBeVisible();
+
+    for (const region of [gaps, jobs]) {
+      const scroller = region
+        .locator('[data-slot="table-container"]')
+        .first();
+      const widths = await scroller.evaluate((element) => ({
+        scrollWidth: element.scrollWidth,
+        clientWidth: element.clientWidth,
+      }));
+      expect(widths.scrollWidth).toBeGreaterThan(widths.clientWidth);
+    }
+    await expectNoHorizontalOverflow(page);
+    await expectNoBannedUiSymbols(page);
+  });
+
+  test("creating a Job requires reason and confirmation and posts the exact body", async ({
+    page,
+  }) => {
+    await installQualityAdmin(page, { gaps: [], jobs: [] });
+
+    let posted: Record<string, unknown> | null = null;
+    let headers: Record<string, string> = {};
+    await page.route("**/api/v1/admin/backfill-jobs", async (route) => {
+      posted = (await route.request().postDataJSON()) as Record<
+        string,
+        unknown
+      >;
+      headers = route.request().headers();
+      await json(
+        route,
+        202,
+        qualityJob({
+          job_id: "bf_created",
+          status: "queued",
+          interval: "1h",
+          reason: "recover exchange outage",
+        }),
+      );
+    });
+
+    await page.setViewportSize({ width: 1024, height: 900 });
+    await page.goto("/quality");
+    const jobs = page.getByRole("region", { name: "Backfill Job" });
+    await expect(jobs.getByText("没有 Backfill Job")).toBeVisible();
+    await fillBackfillJobForm(page);
+
+    // Validation is inline; the confirmation dialog is a separate deliberate step.
+    await jobs.getByRole("button", { name: "创建 Backfill Job" }).click();
+    const dialog = page.getByRole("dialog", {
+      name: "确认触发 Backfill Job",
+    });
+    await expect(dialog).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await expect(dialog).toContainText("补采 1m + 内部 Bar Aggregation");
+    await expect(dialog).toContainText("不是调用原生高周期接口");
+    await expect(
+      dialog.getByRole("button", { name: "确认创建 Job" }),
+    ).toBeEnabled();
+    await dialog.getByRole("button", { name: "确认创建 Job" }).click();
+
+    await expect(
+      jobs.getByText(/已创建 Backfill Job bf_created/),
+    ).toBeVisible();
+    expect(posted).toMatchObject({
+      instrument_id: "binance:BTC/USDT",
+      interval: "1h",
+      start: "2026-09-01T00:00:00.000Z",
+      end: "2026-09-02T00:00:00.000Z",
+      reason: "recover exchange outage",
+      confirm: true,
+    });
+    expect(headers["x-csrf-token"]).toBe("csrf-token");
+    expect(headers["idempotency-key"]).toBeTruthy();
+    await expectNoBannedUiSymbols(page);
+  });
+
+  test("cancel keeps written Revisions and retry creates a linked Job without rewriting the old row", async ({
+    page,
+  }) => {
+    await installQualityAdmin(page, {
+      gaps: [],
+      jobs: [
+        qualityJob({ job_id: "bf_run", status: "running" }),
+        qualityJob({
+          job_id: "bf_failed",
+          status: "failed",
+          current_range: null,
+          error: { code: "interrupted", message: "restart", details: {} },
+        }),
+      ],
+    });
+
+    let cancelBody: unknown = null;
+    let retried = false;
+    await page.route(
+      "**/api/v1/admin/backfill-jobs/bf_run/cancel",
+      async (route) => {
+        cancelBody = await route.request().postDataJSON();
+        await json(
+          route,
+          202,
+          qualityJob({ job_id: "bf_run", status: "cancelling" }),
+        );
+      },
+    );
+    await page.route(
+      "**/api/v1/admin/backfill-jobs/bf_failed/retry",
+      async (route) => {
+        retried = true;
+        await json(
+          route,
+          202,
+          qualityJob({
+            job_id: "bf_retry_new",
+            status: "queued",
+            retry_of_job_id: "bf_failed",
+          }),
+        );
+      },
+    );
+
+    await page.goto("/quality");
+    const jobs = page.getByRole("region", { name: "Backfill Job" });
+    await expect(jobs.getByText("bf_run", { exact: true })).toBeVisible();
+
+    await jobs.getByRole("button", { name: "取消 Job bf_run" }).click();
+    const cancelDialog = page.getByRole("dialog", {
+      name: "确认取消 Backfill Job",
+    });
+    await cancelDialog.getByLabel("操作原因").fill("stop backfill");
+    await cancelDialog.getByRole("button", { name: "确认取消 Job" }).click();
+    await expect(jobs.getByText("取消请求已接受")).toBeVisible();
+    await expect(
+      jobs.getByText(/已写入的 Revision 不会撤回/),
+    ).toBeVisible();
+    expect(cancelBody).toEqual({ reason: "stop backfill" });
+
+    await jobs.getByRole("button", { name: "重试 Job bf_failed" }).click();
+    const retryDialog = page.getByRole("dialog", {
+      name: "确认重试 Backfill Job",
+    });
+    await retryDialog.getByLabel("操作原因").fill("retry it");
+    await retryDialog.getByRole("button", { name: "确认重试 Job" }).click();
+    await expect(
+      jobs.getByText(/已创建关联的新 Job bf_retry_new/),
+    ).toBeVisible();
+    await expect(jobs.getByText(/旧 Job 状态与计数不变/)).toBeVisible();
+    expect(retried).toBe(true);
+    // The old row still reports its original state.
+    await expect(jobs.getByText("failed", { exact: true })).toBeVisible();
+  });
+
+  test("a 409 active-job conflict stays inline and never shows success", async ({
+    page,
+  }) => {
+    await installQualityAdmin(page, { gaps: [], jobs: [] });
+    let createAttempts = 0;
+    await page.route("**/api/v1/admin/backfill-jobs", async (route) => {
+      createAttempts += 1;
+      await json(
+        route,
+        409,
+        {
+          error: {
+            code: "conflict",
+            message: "an active backfill job already exists",
+            details: { reason: "active_job", active_job_id: "bf_active_1" },
+            request_id: "req_conflict_ui",
+          },
+        },
+        { "X-Request-ID": "req_conflict_ui" },
+      );
+    });
+
+    await page.goto("/quality");
+    const jobs = page.getByRole("region", { name: "Backfill Job" });
+    await expect(jobs.getByText("没有 Backfill Job")).toBeVisible();
+    await fillBackfillJobForm(page);
+    await jobs.getByRole("button", { name: "创建 Backfill Job" }).click();
+    const dialog = page.getByRole("dialog", {
+      name: "确认触发 Backfill Job",
+    });
+    await dialog.getByRole("button", { name: "确认创建 Job" }).click();
+
+    await expect(jobs.getByText("冲突，本次未创建 Job")).toBeVisible();
+    await expect(
+      jobs.getByText(/已有运行中的 Job bf_active_1/),
+    ).toBeVisible();
+    await expect(jobs.getByText(/req_conflict_ui/)).toBeVisible();
+    await expect(jobs.getByText(/已创建 Backfill Job/)).toHaveCount(0);
+    expect(createAttempts).toBe(1);
     await expectNoBannedUiSymbols(page);
   });
 });
