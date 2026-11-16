@@ -22,6 +22,7 @@ import { createQueryClient } from "@/api/query-client";
 import { classifyExportRange } from "@/lib/export-policy";
 import { server } from "@/test/server";
 import { installResizeObserverStub } from "@/test/tooltip-env";
+import { expectNoBannedUiSymbols } from "@/test/ui-copy";
 import type { PermissionSubject } from "@/runtime/permissions";
 
 installResizeObserverStub();
@@ -153,24 +154,6 @@ function renderPanel(
       </QueryClientProvider>,
     ),
   };
-}
-
-/** UI-generated text must not contain `·` or `：`; raw evidence is exempt. */
-function expectNoBannedSymbols(scope: HTMLElement) {
-  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
-  while (walker.nextNode()) {
-    const element = walker.currentNode.parentElement;
-    if (
-      !element ||
-      element.closest('[data-raw-evidence="true"]') ||
-      element.closest(".sr-only")
-    ) {
-      continue;
-    }
-    expect(walker.currentNode.textContent, "banned UI separator").not.toMatch(
-      /[·：]/,
-    );
-  }
 }
 
 function exportPanel(): HTMLElement {
@@ -377,7 +360,7 @@ describe("CONTRACT TARGET (Admin API, MSW only — not integrated)", () => {
     expect(rawError).toHaveAttribute("data-raw-evidence", "true");
     expect(screen.getByText("internal_error")).toBeInTheDocument();
     expect(screen.getByText("任务失败")).toBeInTheDocument();
-    expectNoBannedSymbols(exportPanel());
+    expectNoBannedUiSymbols(exportPanel());
   });
 
   it("renders the D card surface and Export Job help triggers", async () => {
@@ -395,7 +378,7 @@ describe("CONTRACT TARGET (Admin API, MSW only — not integrated)", () => {
     expect(
       within(panel).getByText(/不会自动退回超大 Blob/),
     ).toBeInTheDocument();
-    expectNoBannedSymbols(panel);
+    expectNoBannedUiSymbols(panel);
   });
 
   it("creates a job with exact UTC strings and never sends an owner", async () => {
@@ -542,7 +525,7 @@ describe("CONTRACT TARGET (Admin API, MSW only — not integrated)", () => {
     expect(screen.getByText("internal_error")).toBeInTheDocument();
     expect(screen.getByText(/raw-create-request-id/)).toBeInTheDocument();
     expect(screen.getByText("Export Job 创建失败")).toBeInTheDocument();
-    expectNoBannedSymbols(exportPanel());
+    expectNoBannedUiSymbols(exportPanel());
   });
 
   it("reports a network failure as an unknown outcome and never re-sends the write", async () => {
