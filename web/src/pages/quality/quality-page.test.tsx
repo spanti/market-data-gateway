@@ -1,9 +1,14 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { renderApp } from "@/test/render-app";
 import { server } from "@/test/server";
+import { resetRetryAfter } from "@/runtime/retry-after";
+
+afterEach(() => {
+  resetRetryAfter();
+});
 
 /**
  * UI seam: the Quality & Backfill page rendered through the real app shell
@@ -65,6 +70,14 @@ function collectorStatus(gaps: unknown[]) {
   };
 }
 
+function uiCopyWithoutRawEvidence(): string {
+  const clone = document.body.cloneNode(true) as HTMLElement;
+  clone
+    .querySelectorAll('[data-raw-evidence="true"], .sr-only')
+    .forEach((node) => node.remove());
+  return clone.textContent ?? "";
+}
+
 describe("Quality & Backfill — Collector current snapshot", () => {
   it("labels gap_unrecoverable as a process-local snapshot lost on restart", async () => {
     server.use(
@@ -82,6 +95,69 @@ describe("Quality & Backfill — Collector current snapshot", () => {
     expect(screen.getByText("history_unsupported")).toBeInTheDocument();
     // The server-reported count is shown as a snapshot count, not history.
     expect(screen.getByText(/gap_unrecoverable_count/)).toBeInTheDocument();
+    // The source and the non-accumulating semantics stay visible inline.
+    expect(screen.getByText("Collector 进程内快照")).toBeInTheDocument();
+    expect(
+      screen.getByText(/只展示最新一次读取，不累积历史/),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the D card language with status pills and clean UI copy", async () => {
+    server.use(
+      http.get("*/ops/collector/status", () =>
+        HttpResponse.json(collectorStatus([gapEvent()])),
+      ),
+    );
+
+    renderApp({ initialEntries: ["/quality"] });
+
+    expect(
+      await screen.findByRole("heading", { name: "Quality & Backfill" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Quality & Backfill 说明" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Unrecoverable Backfill Gap 当前快照说明",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      document.querySelectorAll('[data-slot="card"]').length,
+    ).toBeGreaterThanOrEqual(2);
+    // Status is icon plus text, never color alone.
+    expect(
+      document.querySelectorAll('[data-slot="status-badge"] svg').length,
+    ).toBeGreaterThan(0);
+
+    const copy = uiCopyWithoutRawEvidence();
+    expect(copy).not.toContain("·");
+    expect(copy).not.toContain("：");
+  });
+
+  it("shows a real loading state and never reports an empty snapshot early", async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.get("*/ops/collector/status", async () => {
+        await pending;
+        return HttpResponse.json(collectorStatus([]));
+      }),
+    );
+
+    renderApp({ initialEntries: ["/quality"] });
+
+    expect(
+      await screen.findByText("正在读取 Collector 进程内快照…"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/本次快照没有/)).not.toBeInTheDocument();
+
+    release();
+    expect(
+      await screen.findByText(/本次快照没有/),
+    ).toBeInTheDocument();
   });
 
   it("shows 未知 when the Collector is unreachable instead of an empty healthy state", async () => {
@@ -269,6 +345,15 @@ describe("Quality & Backfill — persistent gaps (Admin API contract target)", (
       name: "持久 Unrecoverable Backfill Gap",
     });
     expect(await within(region).findByText("gap_open_1")).toBeInTheDocument();
+    expect(region).toHaveAttribute("data-slot", "card");
+    expect(
+      within(region).getByRole("button", {
+        name: "持久 Unrecoverable Backfill Gap 说明",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(region).getByText("Admin API 持久数据"),
+    ).toBeInTheDocument();
     expect(within(region).getByText("gap_resolved_1")).toBeInTheDocument();
     expect(within(region).getAllByText("binance_spot")).toHaveLength(2);
     expect(within(region).getAllByText("history_unsupported")).toHaveLength(2);
@@ -280,10 +365,13 @@ describe("Quality & Backfill — persistent gaps (Admin API contract target)", (
     ).toBeGreaterThan(0);
     expect(within(region).getAllByText("open").length).toBeGreaterThan(0);
     expect(within(region).getAllByText("resolved").length).toBeGreaterThan(0);
-    expect(within(region).getByText(/关联：bf_failed_1/)).toBeInTheDocument();
+    expect(
+      within(region).getByText(/关联 Job bf_failed_1/),
+    ).toBeInTheDocument();
     expect(within(region).getByText(/已由 bf_succeeded_1 解决/)).toBeInTheDocument();
     expect(within(region).getAllByText(/3 次/).length).toBeGreaterThan(0);
     expect(within(region).queryByRole("button", { name: /删除/ })).not.toBeInTheDocument();
+    expect(within(region).queryByRole("button", { name: /解决/ })).not.toBeInTheDocument();
   });
 
   it("sends gap filters to the server instead of filtering a fetched page locally", async () => {
@@ -439,6 +527,10 @@ describe("Quality & Backfill — Backfill Job state machine (Admin API contract 
 
     const region = await screen.findByRole("region", { name: "Backfill Job" });
     await within(region).findByText("bf_queued");
+    expect(region).toHaveAttribute("data-slot", "card");
+    expect(
+      within(region).getByRole("button", { name: "Backfill Job 说明" }),
+    ).toBeInTheDocument();
 
     for (const status of [
       "queued",
@@ -454,9 +546,15 @@ describe("Quality & Backfill — Backfill Job state machine (Admin API contract 
       ).toBeGreaterThan(0);
     }
 
-    expect(within(region).getAllByText(/扫描 10 · 缺失 2 · 补采 2 · 写入 3 · 拒绝 0/).length).toBeGreaterThan(0);
+    const counterGrids = within(region).getAllByTestId(/^job-counters-/);
+    expect(counterGrids).toHaveLength(7);
+    expect(counterGrids[0]).toHaveTextContent(/扫描\s*10/);
+    expect(counterGrids[0]).toHaveTextContent(/缺失\s*2/);
+    expect(counterGrids[0]).toHaveTextContent(/补采\s*2/);
+    expect(counterGrids[0]).toHaveTextContent(/写入\s*3/);
+    expect(counterGrids[0]).toHaveTextContent(/拒绝\s*0/);
     expect(within(region).getAllByText(/2026-09-01 06:00:00 UTC – 2026-09-01 12:00:00 UTC/).length).toBeGreaterThan(0);
-    expect(within(region).getAllByText(/进度不确定/).length).toBeGreaterThan(0);
+    expect(within(region).getAllByText(/进度不确定，契约未提供百分比/).length).toBeGreaterThan(0);
     expect(within(region).getAllByRole("progressbar").length).toBeGreaterThan(0);
     expect(
       within(region).getAllByText(/部分成功，不代表全部缺口已解决/).length,
@@ -500,11 +598,47 @@ describe("Quality & Backfill — Backfill Job state machine (Admin API contract 
     const region = await screen.findByRole("region", { name: "Backfill Job" });
     expect(await within(region).findByText(/重试自 bf_original/)).toBeInTheDocument();
     expect(
-      within(region).getByText(/已解决 Gap：gap_resolved_1, gap_resolved_2/),
+      within(region).getByText(/已解决 Gap gap_resolved_1, gap_resolved_2/),
     ).toBeInTheDocument();
     expect(
       within(region).getAllByText(/未关闭全部 Gap/).length,
     ).toBeGreaterThan(0);
+  });
+
+  it("keeps a backend job error verbatim and marks it as raw evidence", async () => {
+    useAdminMode("Operator");
+    server.use(
+      http.get("*/api/v1/admin/backfill-gaps", () =>
+        HttpResponse.json({ items: [], page: { next_cursor: null, has_more: false } }),
+      ),
+      http.get("*/api/v1/admin/backfill-jobs", () =>
+        HttpResponse.json({
+          items: [
+            backfillJob({
+              job_id: "bf_raw_error",
+              status: "failed",
+              error: {
+                code: "interrupted",
+                message: "upstream · failed：timeout",
+                details: {},
+              },
+            }),
+          ],
+          page: { next_cursor: null, has_more: false },
+        }),
+      ),
+    );
+
+    renderApp({ initialEntries: ["/quality"] });
+
+    const region = await screen.findByRole("region", { name: "Backfill Job" });
+    const raw = await within(region).findByText("upstream · failed：timeout");
+    expect(raw).toHaveAttribute("data-raw-evidence", "true");
+    expect(within(region).getByText(/已中断/)).toBeInTheDocument();
+
+    const copy = uiCopyWithoutRawEvidence();
+    expect(copy).not.toContain("·");
+    expect(copy).not.toContain("：");
   });
 
   it("does not fabricate jobs when the admin list is empty", async () => {
@@ -567,6 +701,10 @@ describe("Quality & Backfill — create Backfill Job (Admin API contract target)
     renderApp({ initialEntries: ["/quality"] });
     const region = await screen.findByRole("region", { name: "Backfill Job" });
     await within(region).findByText("没有 Backfill Job");
+
+    expect(
+      within(region).getByRole("button", { name: "Backfill Job 创建说明" }),
+    ).toBeInTheDocument();
 
     await user.click(
       within(region).getByRole("button", { name: "创建 Backfill Job" }),
@@ -712,15 +850,117 @@ describe("Quality & Backfill — create Backfill Job (Admin API contract target)
     );
 
     expect(
-      await within(region).findByText(/冲突：本次未创建 Job/),
+      await within(region).findByText(/冲突，本次未创建 Job/),
     ).toBeInTheDocument();
     expect(
-      within(region).getByText(/已有运行中的 Job：bf_active_1/),
+      within(region).getByText(/已有运行中的 Job bf_active_1/),
     ).toBeInTheDocument();
     expect(within(region).getByText(/req_conflict_ui/)).toBeInTheDocument();
     expect(
       within(region).queryByText(/已创建 Backfill Job/),
     ).not.toBeInTheDocument();
+  });
+
+  it("renders a backend create error verbatim and keeps generated copy clean", async () => {
+    const user = userEvent.setup();
+    useAdminMode("Operator");
+    server.use(
+      http.get("*/api/v1/admin/backfill-gaps", () =>
+        HttpResponse.json({ items: [], page: { next_cursor: null, has_more: false } }),
+      ),
+      http.get("*/api/v1/admin/backfill-jobs", () =>
+        HttpResponse.json({ items: [], page: { next_cursor: null, has_more: false } }),
+      ),
+      http.post("*/api/v1/admin/backfill-jobs", () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: "internal_error",
+              message: "upstream · failed：timeout",
+              details: {},
+              request_id: "req_raw_create",
+            },
+          },
+          { status: 500 },
+        ),
+      ),
+    );
+
+    renderApp({ initialEntries: ["/quality"] });
+    const region = await screen.findByRole("region", { name: "Backfill Job" });
+    await within(region).findByText("没有 Backfill Job");
+    await fillBackfillForm(user, region);
+    await user.click(
+      within(region).getByRole("button", { name: "创建 Backfill Job" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "确认触发 Backfill Job",
+    });
+    await user.click(
+      within(dialog).getByRole("button", { name: "确认创建 Job" }),
+    );
+
+    const raw = await within(region).findByText("upstream · failed：timeout");
+    expect(raw).toHaveAttribute("data-raw-evidence", "true");
+    expect(within(region).getByText(/req_raw_create/)).toBeInTheDocument();
+
+    const copy = uiCopyWithoutRawEvidence();
+    expect(copy).not.toContain("·");
+    expect(copy).not.toContain("：");
+  });
+
+  it("honours a 429 Retry-After and blocks further writes", async () => {
+    const user = userEvent.setup();
+    useAdminMode("Operator");
+    let attempts = 0;
+    server.use(
+      http.get("*/api/v1/admin/backfill-gaps", () =>
+        HttpResponse.json({ items: [], page: { next_cursor: null, has_more: false } }),
+      ),
+      http.get("*/api/v1/admin/backfill-jobs", () =>
+        HttpResponse.json({ items: [], page: { next_cursor: null, has_more: false } }),
+      ),
+      http.post("*/api/v1/admin/backfill-jobs", () => {
+        attempts += 1;
+        return HttpResponse.json(
+          {
+            error: {
+              code: "rate_limited",
+              message: "too many requests",
+              details: { retry_after_s: 7 },
+              request_id: "req_429_create",
+            },
+          },
+          { status: 429, headers: { "Retry-After": "7" } },
+        );
+      }),
+    );
+
+    renderApp({ initialEntries: ["/quality"] });
+    const region = await screen.findByRole("region", { name: "Backfill Job" });
+    await within(region).findByText("没有 Backfill Job");
+    await fillBackfillForm(user, region);
+    await user.click(
+      within(region).getByRole("button", { name: "创建 Backfill Job" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "确认触发 Backfill Job",
+    });
+    await user.click(
+      within(dialog).getByRole("button", { name: "确认创建 Job" }),
+    );
+
+    expect(
+      await within(region).findByText("too many requests"),
+    ).toHaveAttribute("data-raw-evidence", "true");
+    expect(within(region).getByText(/req_429_create/)).toBeInTheDocument();
+    expect(
+      within(region).getByRole("button", { name: "创建 Backfill Job" }),
+    ).toBeDisabled();
+    expect(
+      within(region).getAllByText(/限流中，请在 \d+ 秒后重试/).length,
+    ).toBeGreaterThan(0);
+    expect(attempts).toBe(1);
   });
 
   it("treats a network failure as an unknown outcome and never auto-retries", async () => {
@@ -858,12 +1098,66 @@ describe("Quality & Backfill — cancel and retry (Admin API contract target)", 
     );
 
     expect(
-      await within(region).findByText(/冲突：无法取消/),
+      await within(region).findByText(/冲突，无法取消/),
     ).toBeInTheDocument();
     expect(within(region).getByText(/req_not_cancellable/)).toBeInTheDocument();
     expect(
       within(region).queryByText(/取消请求已接受/),
     ).not.toBeInTheDocument();
+  });
+
+  it("renders a raw cancel failure verbatim and keeps generated copy clean", async () => {
+    const user = userEvent.setup();
+    useAdminMode("Operator");
+    server.use(
+      http.get("*/api/v1/admin/backfill-gaps", () =>
+        HttpResponse.json({ items: [], page: { next_cursor: null, has_more: false } }),
+      ),
+      http.get("*/api/v1/admin/backfill-jobs", () =>
+        HttpResponse.json({
+          items: [backfillJob({ job_id: "bf_run", status: "running" })],
+          page: { next_cursor: null, has_more: false },
+        }),
+      ),
+      http.post("*/api/v1/admin/backfill-jobs/:jobId/cancel", () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: "internal_error",
+              message: "cancel upstream · failed：timeout",
+              details: {},
+              request_id: "req_raw_cancel",
+            },
+          },
+          { status: 500 },
+        ),
+      ),
+    );
+
+    renderApp({ initialEntries: ["/quality"] });
+    const region = await screen.findByRole("region", { name: "Backfill Job" });
+    await within(region).findByText("bf_run");
+    await user.click(
+      within(region).getByRole("button", { name: "取消 Job bf_run" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "确认取消 Backfill Job",
+    });
+    await user.type(within(dialog).getByLabelText("操作原因"), "stop backfill");
+    await user.click(
+      within(dialog).getByRole("button", { name: "确认取消 Job" }),
+    );
+
+    const raw = await within(region).findByText("cancel upstream · failed：timeout");
+    expect(raw).toHaveAttribute("data-raw-evidence", "true");
+    expect(within(region).getByText(/req_raw_cancel/)).toBeInTheDocument();
+    expect(
+      within(region).queryByText(/取消请求已接受/),
+    ).not.toBeInTheDocument();
+
+    const copy = uiCopyWithoutRawEvidence();
+    expect(copy).not.toContain("·");
+    expect(copy).not.toContain("：");
   });
 
   it("retries as a new linked Job without rewriting the old one", async () => {
@@ -1030,7 +1324,9 @@ describe("Quality & Backfill — source isolation by runtime mode", () => {
       await within(region).findByText(/仅在 Current Contract 模式可用/),
     ).toBeInTheDocument();
     expect(
-      within(region).getByText(/持久 Unrecoverable Backfill Gap/),
+      screen.getByRole("region", {
+        name: "持久 Unrecoverable Backfill Gap",
+      }),
     ).toBeInTheDocument();
     expect(
       within(region).queryByRole("button", { name: "刷新快照" }),

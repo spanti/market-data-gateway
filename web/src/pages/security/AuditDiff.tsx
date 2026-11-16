@@ -44,8 +44,9 @@ function DiffSide({
       <h4 className="text-xs font-medium text-muted-foreground">{label}</h4>
       <pre
         data-testid={testId}
+        data-raw-evidence="true"
         tabIndex={0}
-        className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words border border-border bg-surface-sunken p-2 font-mono text-[11px] leading-relaxed text-foreground"
+        className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-card-border bg-surface-sunken p-2 font-mono text-[11px] leading-relaxed text-foreground"
       >
         {isNullSide(value) ? emptyCopy : formatValue(value)}
       </pre>
@@ -66,11 +67,12 @@ export function AuditDiff({ before, after, redactedPaths }: AuditDiffProps) {
         {redactedPaths.length > 0 ? (
           <span className="inline-flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
             <ShieldCheck className="size-3.5" aria-hidden="true" />
-            脱敏字段（值固定为 [REDACTED]，前端不重建）：
+            脱敏字段，值固定为 [REDACTED]，前端不重建
             {redactedPaths.map((path) => (
               <code
                 key={path}
-                className="rounded-sm border border-border bg-card px-1 font-mono"
+                data-raw-evidence="true"
+                className="rounded-sm border border-card-border bg-card px-1 font-mono"
               >
                 {path}
               </code>

@@ -1,5 +1,14 @@
 import { expect, test, type Page } from "@playwright/test";
-import { expectNoHorizontalOverflow } from "./support";
+import {
+  closeHelpWithEscape,
+  expectNoBannedUiSymbols,
+  expectNoHorizontalOverflow,
+  expectTooltipUsable,
+  helpTrigger,
+  openHelpByHover,
+  openHelpByKeyboard,
+  toggleHelpByTouch,
+} from "./support";
 
 /**
  * Real-browser layout and keyboard acceptance.
@@ -16,6 +25,14 @@ const NAV_ITEMS = [
   { name: "Quality & Backfill", heading: "Quality & Backfill", path: "/quality" },
   { name: "Security & Audit", heading: "Security & Audit", path: "/security" },
 ] as const;
+
+async function openSecurity(page: Page): Promise<void> {
+  await page.goto("/security");
+  await expect(
+    page.getByRole("heading", { name: "Security & Audit" }),
+  ).toBeVisible();
+  await expect(page.getByRole("region", { name: "当前身份" })).toBeVisible();
+}
 
 function barsQueryUrl(): string {
   const params = new URLSearchParams({
@@ -106,6 +123,99 @@ test.describe("narrow desktop layout 1024px", () => {
     expect(widths.scrollWidth).toBeGreaterThan(widths.clientWidth);
     await expectNoHorizontalOverflow(page);
   });
+
+  test("console tabs stay usable without page-level horizontal overflow", async ({
+    page,
+  }) => {
+    await page.goto("/console");
+    await expect(
+      page.getByRole("heading", { name: "Gateway Console" }),
+    ).toBeVisible();
+
+    await page.getByRole("tab", { name: "Feed Subscription" }).click();
+    await expect(
+      page.getByRole("region", { name: "Feed Subscription" }),
+    ).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+
+    await page.getByRole("tab", { name: "Service Instance" }).click();
+    await expect(page.getByTestId("service-instance-collector")).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+
+    await page.getByRole("tab", { name: "WebSocket Debug" }).click();
+    await expect(
+      page.getByRole("heading", { name: "WebSocket Debug" }),
+    ).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+
+    // Back on Feed, every UI-generated string must avoid the banned
+    // separators. Raw backend error text stays exempt via data-raw-evidence.
+    await page.getByRole("tab", { name: "Feed Subscription" }).click();
+    await expectNoBannedUiSymbols(page, "#main-content");
+  });
+
+  test("quality shows the real Collector snapshot and disabled Admin areas without overflow", async ({
+    page,
+  }) => {
+    await page.goto("/quality");
+    await expect(
+      page.getByRole("heading", { name: "Quality & Backfill" }),
+    ).toBeVisible();
+    await expect(page.locator('[data-slot="card"]')).toHaveCount(3);
+
+    // Current Contract: a real Collector snapshot, not accumulated history.
+    const snapshot = page.getByRole("region", {
+      name: "Unrecoverable Backfill Gap 当前快照",
+    });
+    await expect(snapshot).toBeVisible();
+    await expect(snapshot).toContainText("Collector 进程内快照");
+    await expect(
+      snapshot.getByText(/gap_unrecoverable_count/),
+    ).toBeVisible();
+
+    // Persistent gaps and Jobs stay visible but honestly gated.
+    const persistent = page.getByRole("region", {
+      name: "持久 Unrecoverable Backfill Gap",
+    });
+    await expect(persistent).toContainText("需要 Admin API");
+    await expect(persistent.locator("table")).toHaveCount(0);
+
+    const jobs = page.getByRole("region", { name: "Backfill Job" });
+    await expect(jobs).toContainText(
+      "Current Contract 没有持久 Backfill Job API",
+    );
+    await expect(jobs.locator("table")).toHaveCount(0);
+    await expect(jobs.getByRole("progressbar")).toHaveCount(0);
+
+    await expectNoBannedUiSymbols(page);
+    await expectNoHorizontalOverflow(page);
+  });
+
+  test("security stays usable and honest without page-level horizontal overflow", async ({
+    page,
+  }) => {
+    await openSecurity(page);
+
+    // The identity card exposes Access Role, not a Service Role.
+    await expect(
+      page.getByRole("region", { name: "当前身份" }).getByText("Access Role", {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "当前身份" }).getByText(/Service Role/),
+    ).toHaveCount(0);
+
+    // Current Contract has no Admin API. The audit area stays honestly
+    // forbidden and never fabricates rows.
+    await expect(page.getByText("需要 Admin API", { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Operator Audit Event 查询" }),
+    ).toHaveCount(0);
+
+    await expectNoBannedUiSymbols(page);
+    await expectNoHorizontalOverflow(page);
+  });
 });
 
 for (const width of [1280, 1440] as const) {
@@ -135,6 +245,12 @@ for (const width of [1280, 1440] as const) {
         await expect(
           page.getByRole("heading", { name: item.heading }),
         ).toBeVisible();
+        if (item.path === "/security") {
+          await expect(
+            page.getByRole("region", { name: "当前身份" }),
+          ).toBeVisible();
+          await expectNoBannedUiSymbols(page);
+        }
         await expectNoHorizontalOverflow(page);
       }
 
@@ -147,6 +263,13 @@ for (const width of [1280, 1440] as const) {
       ).toBeVisible();
       await expectNoHorizontalOverflow(page);
 
+      await page.getByRole("tab", { name: "Feed Subscription" }).click();
+      await expect(
+        page.getByRole("region", { name: "Feed Subscription" }),
+      ).toBeVisible();
+      await expectNoBannedUiSymbols(page, "#main-content");
+      await expectNoHorizontalOverflow(page);
+
       // The migrated Bars query, chart and data regions stay usable and do
       // not overflow at this desktop width.
       await page.goto(barsQueryUrl());
@@ -154,6 +277,38 @@ for (const width of [1280, 1440] as const) {
       await expect(page.getByTestId("history-summary")).toContainText(
         "共 2 条原始 Revision",
       );
+      await expectNoHorizontalOverflow(page);
+    });
+
+    test("quality cards and help are usable", async ({ page }) => {
+      await page.goto("/quality");
+      await expect(
+        page.getByRole("heading", { name: "Quality & Backfill" }),
+      ).toBeVisible();
+      await expect(page.locator('[data-slot="card"]')).toHaveCount(3);
+      await expectNoHorizontalOverflow(page);
+
+      const pageHelp = await openHelpByHover(
+        page,
+        "Quality & Backfill 说明",
+      );
+      await expectTooltipUsable(page);
+      await expect(pageHelp.tooltip).toContainText("进程内 Gap 快照");
+      await closeHelpWithEscape(page);
+
+      const jobHelp = await openHelpByKeyboard(page, "Backfill Job 说明");
+      await expect(jobHelp.tooltip).toContainText("partially_succeeded");
+      await expectTooltipUsable(page);
+      await closeHelpWithEscape(page);
+
+      const gapHelp = await openHelpByHover(
+        page,
+        "持久 Unrecoverable Backfill Gap 说明",
+      );
+      await expect(gapHelp.tooltip).toContainText("物理删除");
+      await closeHelpWithEscape(page);
+
+      await expectNoBannedUiSymbols(page);
       await expectNoHorizontalOverflow(page);
     });
 
@@ -204,3 +359,111 @@ for (const width of [1280, 1440] as const) {
     });
   });
 }
+
+test.describe("console feed help", () => {
+  test.use({ viewport: { width: 1280, height: 900 } });
+
+  test("Feed Subscription help opens by hover and keyboard focus and closes with Escape", async ({
+    page,
+  }) => {
+    await page.goto("/console");
+    await expect(
+      page.getByRole("region", { name: "Feed Subscription" }),
+    ).toBeVisible();
+
+    const hovered = await openHelpByHover(page, "Feed Subscription 说明");
+    await expect(hovered.tooltip).toContainText("Desired");
+    await expectTooltipUsable(page);
+    await closeHelpWithEscape(page);
+
+    const focused = await openHelpByKeyboard(page, "Feed Subscription 说明");
+    await expect(focused.tooltip).toContainText("409");
+    await expectTooltipUsable(page);
+    await closeHelpWithEscape(page);
+  });
+});
+
+test.describe("quality help with a touch context", () => {
+  test.use({ viewport: { width: 1280, height: 900 }, hasTouch: true });
+
+  test("help toggles by touch, stays readable and closes with Escape", async ({
+    page,
+  }) => {
+    await page.goto("/quality");
+    await expect(
+      page.getByRole("heading", { name: "Quality & Backfill" }),
+    ).toBeVisible();
+
+    // A tap opens and a second tap closes the same help surface.
+    await toggleHelpByTouch(page, "Quality & Backfill 说明");
+
+    await helpTrigger(
+      page,
+      "Unrecoverable Backfill Gap 当前快照说明",
+    ).tap();
+    await expect(page.getByRole("tooltip")).toBeVisible();
+    await expectTooltipUsable(page);
+    await expectNoBannedUiSymbols(page);
+    await closeHelpWithEscape(page);
+
+    await expectNoHorizontalOverflow(page);
+  });
+});
+
+test.describe("security help interactions", () => {
+  test.use({ viewport: { width: 1280, height: 900 } });
+
+  test("hover, keyboard focus and Escape work on Security help", async ({
+    page,
+  }) => {
+    await openSecurity(page);
+
+    const { tooltip } = await openHelpByHover(page, "Security & Audit 说明");
+    await expect(tooltip).toContainText("首版不做 IAM 管理");
+    await expectTooltipUsable(page);
+    await expectNoBannedUiSymbols(page);
+    await closeHelpWithEscape(page);
+
+    await openSecurity(page);
+    const identityHelp = await openHelpByKeyboard(
+      page,
+      "身份与 Access Role 说明",
+    );
+    await expect(identityHelp.tooltip).toContainText(
+      "服务端授权才是安全边界",
+    );
+    await expectTooltipUsable(page);
+    await closeHelpWithEscape(page);
+  });
+});
+
+test.describe("console feed touch help", () => {
+  test.use({ viewport: { width: 1024, height: 900 }, hasTouch: true });
+
+  test("Feed Subscription help toggles on touch tap", async ({ page }) => {
+    await page.goto("/console");
+    await expect(
+      page.getByRole("region", { name: "Feed Subscription" }),
+    ).toBeVisible();
+    await toggleHelpByTouch(page, "Feed Subscription 说明");
+    await expectNoHorizontalOverflow(page);
+  });
+});
+
+test.describe("security touch help", () => {
+  test.use({ hasTouch: true, viewport: { width: 1024, height: 900 } });
+
+  test("a tap toggles identity help and Escape dismisses it", async ({
+    page,
+  }) => {
+    await openSecurity(page);
+
+    await toggleHelpByTouch(page, "身份与 Access Role 说明");
+    await expectNoBannedUiSymbols(page);
+
+    const trigger = helpTrigger(page, "身份与 Access Role 说明");
+    await trigger.tap();
+    await expect(page.getByRole("tooltip")).toBeVisible();
+    await closeHelpWithEscape(page);
+  });
+});
