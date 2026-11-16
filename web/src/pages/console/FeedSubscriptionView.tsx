@@ -864,6 +864,13 @@ export function FeedSubscriptionView() {
                 {feedRoleReason ? "当前只读" : "当前可写"}
               </StatusBadge>
             ) : null}
+            {canReadFeed &&
+            subscriptionsQuery.isFetching &&
+            !subscriptionsQuery.isPending ? (
+              <StatusBadge tone="info" live>
+                正在刷新
+              </StatusBadge>
+            ) : null}
           </div>
         </CardHeader>
 
@@ -895,17 +902,24 @@ export function FeedSubscriptionView() {
               API Rate Limit 与 WebSocket Slow Consumer 独立配置，分别版本化与审计。
             </p>
           </div>
-          {discovering ? (
-            <StatusBadge tone="unknown">发现能力中</StatusBadge>
-          ) : canReadFlow ? (
-            <StatusBadge tone={flowRoleReason ? "unknown" : "good"}>
-              {flowRoleReason ? "当前只读" : "当前可写"}
-            </StatusBadge>
-          ) : (
-            <StatusBadge tone={capabilityUnknown ? "warning" : "unknown"}>
-              {capabilityUnknown ? "能力未知" : "需要 Admin API"}
-            </StatusBadge>
-          )}
+          <div className="flex flex-wrap items-center gap-2">
+            {discovering ? (
+              <StatusBadge tone="unknown">发现能力中</StatusBadge>
+            ) : canReadFlow ? (
+              <StatusBadge tone={flowRoleReason ? "unknown" : "good"}>
+                {flowRoleReason ? "当前只读" : "当前可写"}
+              </StatusBadge>
+            ) : (
+              <StatusBadge tone={capabilityUnknown ? "warning" : "unknown"}>
+                {capabilityUnknown ? "能力未知" : "需要 Admin API"}
+              </StatusBadge>
+            )}
+            {canReadFlow && flowQuery.isFetching && !flowQuery.isPending ? (
+              <StatusBadge tone="info" live>
+                正在刷新
+              </StatusBadge>
+            ) : null}
+          </div>
         </CardHeader>
         <CardContent className="pt-4">{flowContent}</CardContent>
       </Card>
