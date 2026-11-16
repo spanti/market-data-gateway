@@ -320,7 +320,7 @@ test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
     await submitStop(page);
 
     await expect(page.getByTestId("global-http-notice")).toContainText(
-      "缺少权限：需要 SuperAdmin 角色。",
+      "缺少权限，需要 SuperAdmin 角色。",
     );
     await expect(page.getByTestId("service-instance-api-1")).toContainText(
       "forbidden: role denied",

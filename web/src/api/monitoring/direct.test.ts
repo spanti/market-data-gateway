@@ -50,6 +50,7 @@ describe("direct Prometheus adapter", () => {
     expect(url.searchParams.get("end")).toBe("1794225600");
     expect(url.searchParams.get("step")).toBe("30s");
     expect(series).toHaveLength(1);
+    expect(series[0]?.id).toBe("qps");
     expect(series[0]?.name).toBe("QPS");
     expect(series[0]?.points).toEqual([
       { ts: 1794222000000, value: 12.5 },
@@ -134,7 +135,39 @@ describe("direct Prometheus adapter", () => {
       "histogram_quantile(0.95, sum by (le) (rate(mdgw_api_http_request_duration_seconds_bucket[5m])))",
       "histogram_quantile(0.99, sum by (le) (rate(mdgw_api_http_request_duration_seconds_bucket[5m])))",
     ]);
+    expect(series.map((item) => item.id)).toEqual(["p50", "p95", "p99"]);
     expect(series.map((item) => item.name)).toEqual(["P50", "P95", "P99"]);
+  });
+
+  it("keeps the latency identity stable when the display label includes a path", async () => {
+    server.use(
+      http.get("*/prometheus/api/v1/query_range", ({ request }) => {
+        const query = new URL(request.url).searchParams.get("query") ?? "";
+        const value = query.includes("0.50")
+          ? "0.02"
+          : query.includes("0.95")
+            ? "0.25"
+            : "2.5";
+        return HttpResponse.json({
+          status: "success",
+          data: {
+            resultType: "matrix",
+            result: [
+              {
+                metric: { path: "/api/v1/bars" },
+                values: [[1794222000, value]],
+              },
+            ],
+          },
+        });
+      }),
+    );
+
+    const series = await fetchLatencyTrends(window, "5m");
+
+    expect(series.map((item) => item.id)).toEqual(["p50", "p95", "p99"]);
+    expect(series[2]?.name).toBe("P99 /api/v1/bars");
+    expect(series[2]?.name).not.toContain("·");
   });
 
   it("propagates a Prometheus error instead of fabricating a zero", async () => {

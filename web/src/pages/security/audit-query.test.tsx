@@ -280,7 +280,7 @@ describe("Operator Audit Event query", () => {
     const section = await openSecurity();
 
     expect(
-      await within(section).findByText(/缺少权限：需要 SuperAdmin 角色/),
+      await within(section).findByText(/缺少权限，需要 SuperAdmin 角色/),
     ).toBeInTheDocument();
     expect(within(section).getByText(/服务端授权才是安全边界/)).toBeInTheDocument();
     expect(within(section).getByText(/req-audit-403/)).toBeInTheDocument();

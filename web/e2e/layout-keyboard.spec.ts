@@ -10,7 +10,7 @@ import { expectNoHorizontalOverflow } from "./support";
  */
 
 const NAV_ITEMS = [
-  { name: "监控", heading: "监控分析工作台", path: "/monitoring" },
+  { name: "监控", heading: "监控总览", path: "/monitoring" },
   { name: "Bar 图与导出", heading: "Bar 图与导出", path: "/bars" },
   { name: "Gateway Console", heading: "Gateway Console", path: "/console" },
   { name: "Quality & Backfill", heading: "Quality & Backfill", path: "/quality" },
@@ -34,6 +34,26 @@ async function tabUntilText(
   throw new Error(`keyboard focus never reached ${text}`);
 }
 
+test.describe("narrow desktop layout 1024px", () => {
+  test.use({ viewport: { width: 1024, height: 900 } });
+
+  test("monitoring stays usable without page-level horizontal overflow", async ({
+    page,
+  }) => {
+    await page.goto("/monitoring");
+    await expect(
+      page.getByRole("heading", { name: "监控总览" }),
+    ).toBeVisible();
+    await expect(page.locator('[data-slot="metric-card"]')).toHaveCount(4);
+    await expect(page.locator('[data-slot="chart-panel"]')).toHaveCount(2);
+    await expect(
+      page.getByRole("region", { name: "Feed Freshness", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByRole("region", { name: "Service Instance" })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+  });
+});
+
 for (const width of [1280, 1440] as const) {
   test.describe(`desktop layout ${width}px`, () => {
     test.use({ viewport: { width, height: 900 } });
@@ -43,9 +63,11 @@ for (const width of [1280, 1440] as const) {
     }) => {
       await page.goto("/monitoring");
       await expect(
-        page.getByRole("heading", { name: "监控分析工作台" }),
+        page.getByRole("heading", { name: "监控总览" }),
       ).toBeVisible();
       await expectNoHorizontalOverflow(page);
+      await expect(page.locator('[data-slot="metric-card"]')).toHaveCount(4);
+      await expect(page.locator('[data-slot="chart-panel"]')).toHaveCount(2);
 
       const nav = page.getByRole("navigation", { name: "一级模块导航" });
       await expect(nav).toBeVisible();
@@ -82,7 +104,7 @@ for (const width of [1280, 1440] as const) {
         end: "2024-01-01T00:02:00.000Z",
       });
       await page.goto(`/monitoring`);
-      await expect(page.getByRole("heading", { name: "监控分析工作台" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "监控总览" })).toBeVisible();
 
       // Reach the first module link with Tab, then navigate with Enter.
       await tabUntilText(page, "监控");

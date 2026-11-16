@@ -11,8 +11,13 @@ import {
   TooltipComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
+import type * as React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChartPanel, type ChartPanelState } from "@/components/chart-panel";
+import {
+  ChartPanel,
+  type ChartPanelHelp,
+  type ChartPanelState,
+} from "@/components/chart-panel";
 import { ChartDataTable } from "@/components/monitoring/chart-data-table";
 import {
   alignTrendPoints,
@@ -38,11 +43,12 @@ registerEChartsModules([
 export interface TrendChartProps {
   title: string;
   description?: string;
+  help?: ChartPanelHelp;
   unit: string;
   series: TrendSeries[];
   state?: ChartPanelState;
   unknownCause?: UnknownCause;
-  errorMessage?: string;
+  errorMessage?: React.ReactNode;
   onRetry?: () => void;
   palette?: ChartPalette;
   className?: string;
@@ -63,6 +69,15 @@ function pointCount(series: TrendSeries[]): number {
 }
 
 /**
+ * jsdom can provide a ResizeObserver stub but not a canvas context. Treat it
+ * as a non-rendering host so the accessible data table remains the only
+ * representation instead of logging ECharts canvas failures.
+ */
+function isNonRenderingDom(): boolean {
+  return typeof navigator !== "undefined" && /jsdom/i.test(navigator.userAgent);
+}
+
+/**
  * Trend chart with an inline legend, keyboard point readout, hover tooltip, and
  * a data-table fallback. The canvas is a visual summary only; the table below
  * it is always the exact-value source.
@@ -70,6 +85,7 @@ function pointCount(series: TrendSeries[]): number {
 export function TrendChart({
   title,
   description = "",
+  help,
   unit,
   series,
   state = "ready",
@@ -110,9 +126,9 @@ export function TrendChart({
 
   useEffect(() => {
     const element = hostRef.current;
-    // jsdom has no ResizeObserver/canvas; production browsers do. The table
-    // fallback keeps the chart data available either way.
-    if (!element || typeof ResizeObserver === "undefined") {
+    // jsdom has no canvas; production browsers do. The table fallback keeps
+    // the chart data available either way.
+    if (!element || typeof ResizeObserver === "undefined" || isNonRenderingDom()) {
       return;
     }
     let chart: ECharts | null = null;
@@ -148,16 +164,20 @@ export function TrendChart({
     chartRef.current?.dispatchAction({ type: "showTip", dataIndex: index });
   }, []);
 
-  const readout =
+  const readoutTime =
     aligned.timestamps.length > 0
-      ? [
-          formatUtcTime(aligned.timestamps[activeIndex] ?? null),
-          ...series.map((item, index) => {
-            const value = aligned.rows[activeIndex]?.values[index] ?? null;
-            return `${item.name} ${formatNumber(value, 3)}${unit ? ` ${unit}` : ""}`;
-          }),
-        ].join(" · ")
-      : "";
+      ? formatUtcTime(aligned.timestamps[activeIndex] ?? null)
+      : null;
+  const readoutValues =
+    aligned.timestamps.length > 0
+      ? series.map((item, index) => {
+          const value = aligned.rows[activeIndex]?.values[index] ?? null;
+          return {
+            name: item.name,
+            text: `${item.name} ${formatNumber(value, 3)}${unit ? ` ${unit}` : ""}`,
+          };
+        })
+      : [];
 
   const legend = series.map((item, index) => ({
     name: item.name,
@@ -172,6 +192,7 @@ export function TrendChart({
     <ChartPanel
       title={title}
       description={description}
+      help={help}
       legend={legend}
       state={state}
       unknownCause={unknownCause}
@@ -225,13 +246,16 @@ export function TrendChart({
           </p>
         ) : null}
       </div>
-      {readout ? (
+      {readoutTime ? (
         <p
           role="status"
           aria-live="polite"
-          className="mt-2 text-[11px] tabular-nums text-muted-foreground"
+          className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] tabular-nums text-muted-foreground"
         >
-          {readout}
+          <span>{readoutTime}</span>
+          {readoutValues.map((item) => (
+            <span key={item.name}>{` ${item.text}`}</span>
+          ))}
         </p>
       ) : null}
     </ChartPanel>

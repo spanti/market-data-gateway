@@ -2,13 +2,17 @@ import type * as React from "react";
 import { cn } from "@/lib/utils";
 
 /**
- * Flat, square panel: Variant B uses borders, never shadows or card radii.
+ * Shared Variant D business panel. The API is unchanged for modules that have
+ * not migrated yet; only the surface treatment moved to the D card language.
  */
 function Panel({ className, ...props }: React.ComponentProps<"section">) {
   return (
     <section
       data-slot="panel"
-      className={cn("border border-border bg-card", className)}
+      className={cn(
+        "min-w-0 rounded-xl border border-card-border bg-card text-card-foreground shadow-card",
+        className,
+      )}
       {...props}
     />
   );
@@ -28,7 +32,7 @@ function PanelTitle({ className, ...props }: React.ComponentProps<"h2">) {
   return (
     <h2
       data-slot="panel-title"
-      className={cn("text-sm font-semibold text-foreground", className)}
+      className={cn("text-sm font-semibold tracking-tight text-foreground", className)}
       {...props}
     />
   );
@@ -38,7 +42,7 @@ function PanelDescription({ className, ...props }: React.ComponentProps<"p">) {
   return (
     <p
       data-slot="panel-description"
-      className={cn("mt-1 text-xs text-muted-foreground", className)}
+      className={cn("mt-1 text-xs leading-relaxed text-muted-foreground", className)}
       {...props}
     />
   );

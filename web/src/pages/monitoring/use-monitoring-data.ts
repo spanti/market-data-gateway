@@ -202,7 +202,8 @@ export function adminInstanceToServiceRow(
   const observed = Date.parse(row.lastObservedAt);
   return {
     role: row.role,
-    service: row.role,
+    instanceId: row.instanceId,
+    service: row.displayName,
     ready: row.ready,
     readyReason: row.readyReason || null,
     uptimeS: null,
@@ -281,8 +282,9 @@ function secondsToMilliseconds(series: TrendSeries[]): TrendSeries[] {
 function adminSeriesToMs(
   response: AdminMonitoringQueryResponse,
   fallback: string,
+  identity: string,
 ): TrendSeries[] {
-  const series = adminResponseToTrendSeries(response, fallback);
+  const series = adminResponseToTrendSeries(response, fallback, identity);
   return response.unit === "seconds"
     ? secondsToMilliseconds(series)
     : series;
@@ -488,7 +490,7 @@ export function useMonitoringTrends(
           : "Prometheus（/prometheus）",
       windowLabel,
       rateWindow: range.qpsRateWindow,
-      peakLabel: `${peakRangeLabel(range)} · ${range.peakRateWindow} rate · ${range.peakStepSeconds}s step`,
+      peakLabel: `${peakRangeLabel(range)}，${range.peakRateWindow} rate，${range.peakStepSeconds}s step`,
     };
 
     if (directEnabled) {
@@ -540,14 +542,14 @@ export function useMonitoringTrends(
 
     if (adminEnabled) {
       const qpsSeries = adminQpsQuery.data
-        ? adminSeriesToMs(adminQpsQuery.data, "QPS")
+        ? adminSeriesToMs(adminQpsQuery.data, "QPS", "qps")
         : [];
       const latencySeries = [
-        { query: adminP50Query, name: "P50" },
-        { query: adminP95Query, name: "P95" },
-        { query: adminP99Query, name: "P99" },
-      ].flatMap(({ query, name }) =>
-        query.data ? adminSeriesToMs(query.data, name) : [],
+        { query: adminP50Query, name: "P50", identity: "p50" },
+        { query: adminP95Query, name: "P95", identity: "p95" },
+        { query: adminP99Query, name: "P99", identity: "p99" },
+      ].flatMap(({ query, name, identity }) =>
+        query.data ? adminSeriesToMs(query.data, name, identity) : [],
       );
       const adminError =
         templatesQuery.isError ||
@@ -635,7 +637,7 @@ export function useMonitoringTrends(
             missingTemplates.length > 0
               ? {
                   code: "backend-unsupported",
-                  message: `监控模板未提供：${missingTemplates.join(", ")}`,
+                  message: `监控模板未提供 ${missingTemplates.join(", ")}`,
                 }
               : null,
         },
