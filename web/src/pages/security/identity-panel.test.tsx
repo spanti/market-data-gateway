@@ -1,8 +1,13 @@
 import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { renderApp } from "@/test/render-app";
 import { server } from "@/test/server";
+import { installResizeObserverStub } from "@/test/tooltip-env";
+import { expectNoBannedUiSymbols } from "@/test/ui-copy";
+
+installResizeObserverStub();
 
 const capabilityDocument = {
   schema_version: 1,
@@ -102,6 +107,41 @@ describe("Security identity panel in Current Contract", () => {
     expect(screen.queryByText(/切换角色/)).not.toBeInTheDocument();
     expect(screen.queryByText(/提升权限/)).not.toBeInTheDocument();
     expect(screen.queryAllByRole("combobox")).toHaveLength(0);
+  });
+
+  it("uses the shared card and moves identity guidance into accessible help", async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ["/security"] });
+
+    const panel = await screen.findByRole("region", { name: "当前身份" });
+    expect(panel).toHaveAttribute("data-slot", "card");
+
+    // Access Role is a console-user permission, never a Service Role.
+    expect(within(panel).getByText("Access Role")).toBeInTheDocument();
+    expect(within(panel).queryByText(/Service Role/)).not.toBeInTheDocument();
+
+    const trigger = within(panel).getByRole("button", {
+      name: "身份与 Access Role 说明",
+    });
+    await user.hover(trigger);
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip).toHaveTextContent(/服务端授权才是安全边界/);
+    expect(tooltip).toHaveTextContent(/与 Service Role 进程职责无关/);
+    expectNoBannedUiSymbols(panel);
+  });
+
+  it("keeps page-level Security guidance in help instead of a description stack", async () => {
+    const user = userEvent.setup();
+    renderApp({ initialEntries: ["/security"] });
+
+    await screen.findByRole("region", { name: "当前身份" });
+    const trigger = screen.getByRole("button", {
+      name: "Security & Audit 说明",
+    });
+    await user.hover(trigger);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      /首版不做 IAM 管理/,
+    );
   });
 });
 

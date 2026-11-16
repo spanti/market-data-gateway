@@ -4,6 +4,7 @@ import {
   expectNoBannedUiSymbols,
   expectNoHorizontalOverflow,
   expectTooltipUsable,
+  helpTrigger,
   openHelpByHover,
   openHelpByKeyboard,
   toggleHelpByTouch,
@@ -24,6 +25,14 @@ const NAV_ITEMS = [
   { name: "Quality & Backfill", heading: "Quality & Backfill", path: "/quality" },
   { name: "Security & Audit", heading: "Security & Audit", path: "/security" },
 ] as const;
+
+async function openSecurity(page: Page): Promise<void> {
+  await page.goto("/security");
+  await expect(
+    page.getByRole("heading", { name: "Security & Audit" }),
+  ).toBeVisible();
+  await expect(page.getByRole("region", { name: "当前身份" })).toBeVisible();
+}
 
 function barsQueryUrl(): string {
   const params = new URLSearchParams({
@@ -141,6 +150,32 @@ test.describe("narrow desktop layout 1024px", () => {
     await page.getByRole("tab", { name: "Feed Subscription" }).click();
     await expectNoBannedUiSymbols(page, "#main-content");
   });
+
+  test("security stays usable and honest without page-level horizontal overflow", async ({
+    page,
+  }) => {
+    await openSecurity(page);
+
+    // The identity card exposes Access Role, not a Service Role.
+    await expect(
+      page.getByRole("region", { name: "当前身份" }).getByText("Access Role", {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "当前身份" }).getByText(/Service Role/),
+    ).toHaveCount(0);
+
+    // Current Contract has no Admin API. The audit area stays honestly
+    // forbidden and never fabricates rows.
+    await expect(page.getByText("需要 Admin API", { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Operator Audit Event 查询" }),
+    ).toHaveCount(0);
+
+    await expectNoBannedUiSymbols(page);
+    await expectNoHorizontalOverflow(page);
+  });
 });
 
 for (const width of [1280, 1440] as const) {
@@ -170,6 +205,12 @@ for (const width of [1280, 1440] as const) {
         await expect(
           page.getByRole("heading", { name: item.heading }),
         ).toBeVisible();
+        if (item.path === "/security") {
+          await expect(
+            page.getByRole("region", { name: "当前身份" }),
+          ).toBeVisible();
+          await expectNoBannedUiSymbols(page);
+        }
         await expectNoHorizontalOverflow(page);
       }
 
@@ -270,6 +311,33 @@ test.describe("console feed help", () => {
   });
 });
 
+test.describe("security help interactions", () => {
+  test.use({ viewport: { width: 1280, height: 900 } });
+
+  test("hover, keyboard focus and Escape work on Security help", async ({
+    page,
+  }) => {
+    await openSecurity(page);
+
+    const { tooltip } = await openHelpByHover(page, "Security & Audit 说明");
+    await expect(tooltip).toContainText("首版不做 IAM 管理");
+    await expectTooltipUsable(page);
+    await expectNoBannedUiSymbols(page);
+    await closeHelpWithEscape(page);
+
+    await openSecurity(page);
+    const identityHelp = await openHelpByKeyboard(
+      page,
+      "身份与 Access Role 说明",
+    );
+    await expect(identityHelp.tooltip).toContainText(
+      "服务端授权才是安全边界",
+    );
+    await expectTooltipUsable(page);
+    await closeHelpWithEscape(page);
+  });
+});
+
 test.describe("console feed touch help", () => {
   test.use({ viewport: { width: 1024, height: 900 }, hasTouch: true });
 
@@ -280,5 +348,23 @@ test.describe("console feed touch help", () => {
     ).toBeVisible();
     await toggleHelpByTouch(page, "Feed Subscription 说明");
     await expectNoHorizontalOverflow(page);
+  });
+});
+
+test.describe("security touch help", () => {
+  test.use({ hasTouch: true, viewport: { width: 1024, height: 900 } });
+
+  test("a tap toggles identity help and Escape dismisses it", async ({
+    page,
+  }) => {
+    await openSecurity(page);
+
+    await toggleHelpByTouch(page, "身份与 Access Role 说明");
+    await expectNoBannedUiSymbols(page);
+
+    const trigger = helpTrigger(page, "身份与 Access Role 说明");
+    await trigger.tap();
+    await expect(page.getByRole("tooltip")).toBeVisible();
+    await closeHelpWithEscape(page);
   });
 });
