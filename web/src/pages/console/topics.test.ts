@@ -91,6 +91,21 @@ describe("controlled Topic builder and hints", () => {
       true,
     );
   });
+
+  it("keeps Topic hints and validation copy free of UI separators", () => {
+    for (const hint of TOPIC_PREFIX_HINTS) {
+      expect(hint.label).not.toMatch(/[·：]/);
+    }
+
+    const result = parseFreeformFrame(
+      '{"op":"subscribe","topics":["replay.rpl-1.control"]}',
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("Topic 无效");
+      expect(result.error).not.toMatch(/[·：]/);
+    }
+  });
 });
 
 describe("free-form JSON whitelist", () => {
