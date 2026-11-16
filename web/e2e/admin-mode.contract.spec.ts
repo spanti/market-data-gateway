@@ -5,7 +5,10 @@ import {
   type Request,
   type Route,
 } from "@playwright/test";
-import { expectNoBannedUiSymbols } from "./support";
+import {
+  expectNoBannedUiSymbols,
+  expectNoHorizontalOverflow,
+} from "./support";
 
 /**
  * CONTRACT-ONLY: the Admin API does not exist in the current backend.
@@ -554,6 +557,9 @@ test.describe("CONTRACT-ONLY Admin API Quality flows (backend absent)", () => {
       ],
     });
 
+    // Narrow desktop: the wide gap and job tables scroll locally instead of
+    // making the whole page horizontally scrollable.
+    await page.setViewportSize({ width: 1024, height: 900 });
     await page.goto("/quality");
 
     const gaps = page.getByRole("region", {
@@ -592,6 +598,17 @@ test.describe("CONTRACT-ONLY Admin API Quality flows (backend absent)", () => {
     await expect(raw).toHaveText("upstream · failed：timeout");
     await expect(jobs.getByText(/已中断/)).toBeVisible();
 
+    for (const region of [gaps, jobs]) {
+      const scroller = region
+        .locator('[data-slot="table-container"]')
+        .first();
+      const widths = await scroller.evaluate((element) => ({
+        scrollWidth: element.scrollWidth,
+        clientWidth: element.clientWidth,
+      }));
+      expect(widths.scrollWidth).toBeGreaterThan(widths.clientWidth);
+    }
+    await expectNoHorizontalOverflow(page);
     await expectNoBannedUiSymbols(page);
   });
 
@@ -620,6 +637,7 @@ test.describe("CONTRACT-ONLY Admin API Quality flows (backend absent)", () => {
       );
     });
 
+    await page.setViewportSize({ width: 1024, height: 900 });
     await page.goto("/quality");
     const jobs = page.getByRole("region", { name: "Backfill Job" });
     await expect(jobs.getByText("没有 Backfill Job")).toBeVisible();
@@ -630,6 +648,8 @@ test.describe("CONTRACT-ONLY Admin API Quality flows (backend absent)", () => {
     const dialog = page.getByRole("dialog", {
       name: "确认触发 Backfill Job",
     });
+    await expect(dialog).toBeVisible();
+    await expectNoHorizontalOverflow(page);
     await expect(dialog).toContainText("补采 1m + 内部 Bar Aggregation");
     await expect(dialog).toContainText("不是调用原生高周期接口");
     await expect(

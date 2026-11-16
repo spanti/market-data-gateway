@@ -135,6 +135,31 @@ describe("Quality & Backfill — Collector current snapshot", () => {
     expect(copy).not.toContain("：");
   });
 
+  it("shows a real loading state and never reports an empty snapshot early", async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.get("*/ops/collector/status", async () => {
+        await pending;
+        return HttpResponse.json(collectorStatus([]));
+      }),
+    );
+
+    renderApp({ initialEntries: ["/quality"] });
+
+    expect(
+      await screen.findByText("正在读取 Collector 进程内快照…"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/本次快照没有/)).not.toBeInTheDocument();
+
+    release();
+    expect(
+      await screen.findByText(/本次快照没有/),
+    ).toBeInTheDocument();
+  });
+
   it("shows 未知 when the Collector is unreachable instead of an empty healthy state", async () => {
     server.use(
       http.get("*/ops/collector/status", () =>
