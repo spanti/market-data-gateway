@@ -1,8 +1,31 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { BarMessageEnvelope } from "@/api/endpoints/bars";
 import { BarChart } from "@/components/bar-chart";
+import { TooltipProvider } from "@/components/ui/tooltip";
+
+function renderChart(ui: React.ReactElement) {
+  return render(<TooltipProvider>{ui}</TooltipProvider>);
+}
+
+function expectNoBannedSymbols(scope: HTMLElement) {
+  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const element = walker.currentNode.parentElement;
+    if (
+      !element ||
+      element.closest('[data-raw-evidence="true"]') ||
+      element.closest(".sr-only")
+    ) {
+      continue;
+    }
+    expect(walker.currentNode.textContent, "banned UI separator").not.toMatch(
+      /[·：]/,
+    );
+  }
+}
 
 vi.mock("echarts/core", () => ({
   use: vi.fn(),
@@ -51,9 +74,13 @@ const BARS = [
 describe("BarChart accessibility fallbacks", () => {
   it("shows the exact current values in the legend and the same data in the table", async () => {
     const user = userEvent.setup();
-    render(<BarChart bars={BARS} />);
+    renderChart(<BarChart bars={BARS} />);
 
     const panel = screen.getByRole("region", { name: "最大 Revision Bar 图" });
+    expect(
+      within(panel).getByRole("button", { name: "最大 Revision Bar 图说明" }),
+    ).toBeInTheDocument();
+    expectNoBannedSymbols(panel);
     expect(
       within(panel).getAllByText("0.000000000000000001").length,
     ).toBeGreaterThan(0);
@@ -77,7 +104,7 @@ describe("BarChart accessibility fallbacks", () => {
   });
 
   it("provides a keyboard point readout without relying on color", () => {
-    render(<BarChart bars={BARS} />);
+    renderChart(<BarChart bars={BARS} />);
 
     const chart = screen.getByRole("img", {
       name: /最大 Revision Bar 价格图/,
@@ -103,19 +130,21 @@ describe("BarChart accessibility fallbacks", () => {
   });
 
   it("keeps the empty and error states explicit instead of drawing zero", () => {
-    const { rerender } = render(<BarChart bars={[]} />);
+    const { rerender } = renderChart(<BarChart bars={[]} />);
     expect(screen.getByText("没有数据")).toBeInTheDocument();
     expect(
       screen.queryByRole("img", { name: /最大 Revision Bar 价格图/ }),
     ).not.toBeInTheDocument();
 
     rerender(
-      <BarChart
-        bars={[]}
-        state="error"
-        errorMessage="服务端拒绝 JSON 输出"
-        requestId="request-123"
-      />,
+      <TooltipProvider>
+        <BarChart
+          bars={[]}
+          state="error"
+          errorMessage="服务端拒绝 JSON 输出"
+          requestId="request-123"
+        />
+      </TooltipProvider>,
     );
     expect(screen.getByText("服务端拒绝 JSON 输出")).toBeInTheDocument();
     expect(screen.getByText(/request-123/)).toBeInTheDocument();

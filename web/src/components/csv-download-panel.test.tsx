@@ -1,5 +1,6 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CsvDownloadCancelledError,
@@ -7,8 +8,31 @@ import {
   type CsvDownloadResult,
   type CsvProgress,
 } from "@/api/endpoints/bars";
+import { HttpError } from "@/api/http/types";
 import { CsvDownloadPanel } from "@/components/csv-download-panel";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { classifyExportRange } from "@/lib/export-policy";
+
+function renderPanel(ui: React.ReactElement) {
+  return render(<TooltipProvider>{ui}</TooltipProvider>);
+}
+
+function expectNoBannedSymbols(scope: HTMLElement) {
+  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const element = walker.currentNode.parentElement;
+    if (
+      !element ||
+      element.closest('[data-raw-evidence="true"]') ||
+      element.closest(".sr-only")
+    ) {
+      continue;
+    }
+    expect(walker.currentNode.textContent, "banned UI separator").not.toMatch(
+      /[·：]/,
+    );
+  }
+}
 
 vi.mock("@/api/endpoints/bars", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
@@ -75,7 +99,7 @@ describe("CSV download progress", () => {
     });
 
     const user = userEvent.setup();
-    render(<CsvDownloadPanel query={QUERY} decision={DIRECT} />);
+    renderPanel(<CsvDownloadPanel query={QUERY} decision={DIRECT} />);
     await user.click(
       screen.getByRole("button", { name: "直接下载 CSV（≤31 天）" }),
     );
@@ -108,7 +132,7 @@ describe("CSV download progress", () => {
     });
 
     const user = userEvent.setup();
-    render(<CsvDownloadPanel query={QUERY} decision={DIRECT} />);
+    renderPanel(<CsvDownloadPanel query={QUERY} decision={DIRECT} />);
     await user.click(
       screen.getByRole("button", { name: "直接下载 CSV（≤31 天）" }),
     );
@@ -137,7 +161,7 @@ describe("CSV download progress", () => {
     });
 
     const user = userEvent.setup();
-    render(<CsvDownloadPanel query={QUERY} decision={DIRECT} />);
+    renderPanel(<CsvDownloadPanel query={QUERY} decision={DIRECT} />);
     await user.click(
       screen.getByRole("button", { name: "直接下载 CSV（≤31 天）" }),
     );
@@ -153,7 +177,7 @@ describe("CSV download progress", () => {
       START,
       new Date(START.getTime() + 45 * 24 * 60 * 60 * 1000),
     );
-    render(<CsvDownloadPanel query={QUERY} decision={jobDecision} />);
+    renderPanel(<CsvDownloadPanel query={QUERY} decision={jobDecision} />);
 
     expect(
       screen.getByRole("button", { name: "直接下载 CSV（≤31 天）" }),
@@ -161,5 +185,46 @@ describe("CSV download progress", () => {
     expect(
       screen.getByText(/只创建 Admin Export Job，不自动退回超大 Blob/),
     ).toBeInTheDocument();
+  });
+});
+
+describe("CSV download D surface", () => {
+  it("uses a shared card, inline help and clean UI copy", () => {
+    renderPanel(<CsvDownloadPanel query={QUERY} decision={DIRECT} />);
+
+    const region = screen.getByRole("region", { name: "CSV 直接下载" });
+    expect(region).toHaveAttribute("data-slot", "card");
+    expect(
+      within(region).getByRole("button", {
+        name: "小文件 CSV 直接下载说明",
+      }),
+    ).toBeInTheDocument();
+    expectNoBannedSymbols(region);
+  });
+
+  it("marks backend error text as verbatim raw evidence", async () => {
+    mockFetch.mockRejectedValue(
+      new HttpError({
+        kind: "rest",
+        status: 500,
+        code: "internal_error",
+        message: "upstream · failed：timeout",
+        details: {},
+        requestId: "req-raw-evidence",
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderPanel(<CsvDownloadPanel query={QUERY} decision={DIRECT} />);
+    await user.click(
+      screen.getByRole("button", { name: "直接下载 CSV（≤31 天）" }),
+    );
+
+    const raw = await screen.findByText("upstream · failed：timeout");
+    expect(raw).toHaveAttribute("data-raw-evidence", "true");
+    expect(screen.getByText(/req-raw-evidence/)).toBeInTheDocument();
+
+    const region = screen.getByRole("region", { name: "CSV 直接下载" });
+    expectNoBannedSymbols(region);
   });
 });
