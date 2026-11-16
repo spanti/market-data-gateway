@@ -269,7 +269,7 @@ test("chart value readout and help tooltip keep distinct responsibilities", asyn
   await helpTrigger(page, "QPS 趋势说明").focus();
   const tooltip = page.getByRole("tooltip");
   await expect(tooltip).toBeVisible();
-  await expect(tooltip.locator('[data-help-content="true"]')).toBeVisible();
+  await expect(tooltip).not.toBeEmpty();
   await expect(tooltip.getByRole("status")).toBeHidden();
   await expect(tooltip).toContainText("数据源");
   await expect(readout).not.toContainText("数据源");

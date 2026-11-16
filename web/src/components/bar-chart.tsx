@@ -302,6 +302,7 @@ export function BarChart({
         />
         <p
           id="bar-chart-readout"
+          role="status"
           aria-live="polite"
           className="mt-2 min-h-4 text-[11px] text-muted-foreground"
         >

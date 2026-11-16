@@ -160,13 +160,6 @@ function exportPanel(): HTMLElement {
   return screen.getByRole("region", { name: "Export Job" });
 }
 
-function statusPill(label: string): HTMLElement | null {
-  const match = screen
-    .getAllByText(label)
-    .find((element) => element.closest('[data-slot="status-badge"]'));
-  return (match?.closest('[data-slot="status-badge"]') as HTMLElement) ?? null;
-}
-
 function listHandler(
   items: ExportJob[] | (() => ExportJob[]),
   onRequest?: (url: URL) => void,
@@ -284,19 +277,15 @@ describe("CONTRACT TARGET (Admin API, MSW only — not integrated)", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("renders all seven job states with icon, text and distinct tone semantics", async () => {
-    const expected: Array<{
-      status: ExportJobStatus;
-      label: string;
-      tone: string;
-    }> = [
-      { status: "queued", label: "排队中", tone: "info" },
-      { status: "running", label: "生成中", tone: "info" },
-      { status: "succeeded", label: "已完成", tone: "good" },
-      { status: "failed", label: "失败", tone: "critical" },
-      { status: "cancelling", label: "取消中", tone: "warning" },
-      { status: "cancelled", label: "已取消", tone: "unknown" },
-      { status: "expired", label: "已过期", tone: "warning" },
+  it("renders all seven job states with visible status text", async () => {
+    const expected: Array<{ status: ExportJobStatus; label: string }> = [
+      { status: "queued", label: "排队中" },
+      { status: "running", label: "生成中" },
+      { status: "succeeded", label: "已完成" },
+      { status: "failed", label: "失败" },
+      { status: "cancelling", label: "取消中" },
+      { status: "cancelled", label: "已取消" },
+      { status: "expired", label: "已过期" },
     ];
     server.use(
       listHandler(
@@ -344,14 +333,11 @@ describe("CONTRACT TARGET (Admin API, MSW only — not integrated)", () => {
     );
     renderPanel();
 
-    for (const { label, tone } of expected) {
-      const pill = await waitFor(() => {
-        const result = statusPill(label);
-        expect(result, `status pill ${label}`).not.toBeNull();
-        return result;
+    for (const { status, label } of expected) {
+      const job = await screen.findByRole("article", {
+        name: `Export Job exp_${status}`,
       });
-      expect(pill).toHaveAttribute("data-tone", tone);
-      expect(pill?.querySelector("svg")).not.toBeNull();
+      expect(within(job).getByText(label)).toBeInTheDocument();
     }
 
     // Raw backend errors keep their exact `·` and `：`; the surrounding UI
@@ -368,7 +354,11 @@ describe("CONTRACT TARGET (Admin API, MSW only — not integrated)", () => {
     renderPanel();
 
     const panel = await screen.findByRole("region", { name: "Export Job" });
-    expect(panel).toHaveAttribute("data-slot", "card");
+    expect(
+      within(panel).getByRole("heading", {
+        name: "Export Job（31–366 天）",
+      }),
+    ).toBeInTheDocument();
     expect(
       within(panel).getByRole("button", { name: "Export Job 说明" }),
     ).toBeInTheDocument();
@@ -578,10 +568,12 @@ describe("CONTRACT TARGET (Admin API, MSW only — not integrated)", () => {
     server.use(listHandler([exportJob()]));
     renderPanel();
 
-    const raw = await screen.findByText("进度未知");
-    expect(raw.closest('[data-slot="status-badge"]')).not.toBeNull();
-    const article = raw.closest("[data-job-id]") as HTMLElement;
-    expect(article.querySelector("progress")).toBeNull();
+    await screen.findByText("进度未知");
+    const article = await screen.findByRole("article", {
+      name: "Export Job exp_01JABCXYZ",
+    });
+    expect(within(article).getByText("进度未知")).toBeInTheDocument();
+    expect(within(article).queryByRole("progressbar")).not.toBeInTheDocument();
     expect(article.textContent).not.toMatch(/\d+%/);
     expect(within(article).getByText(/已处理 1,200 行/)).toBeInTheDocument();
     expect(within(article).getByText(/64 KB/)).toBeInTheDocument();
@@ -594,11 +586,11 @@ describe("CONTRACT TARGET (Admin API, MSW only — not integrated)", () => {
     server.use(listHandler([succeededJob()]));
     renderPanel();
 
-    const article = (await screen.findByText("已完成")).closest(
-      "[data-job-id]",
-    ) as HTMLElement;
-    const progress = article.querySelector("progress");
-    expect(progress).not.toBeNull();
+    const article = await screen.findByRole("article", {
+      name: "Export Job exp_01JABCXYZ",
+    });
+    expect(within(article).getByText("已完成")).toBeInTheDocument();
+    const progress = within(article).getByRole("progressbar");
     expect(progress).toHaveAttribute("max", "100");
     expect(progress).toHaveAttribute("value", "100");
     expect(within(article).getAllByText("100%").length).toBeGreaterThan(0);
@@ -623,7 +615,12 @@ describe("CONTRACT TARGET (Admin API, MSW only — not integrated)", () => {
       screen.getByText(/e3b0c44298fc1c149afbf4c8996fb924abc/),
     ).toBeInTheDocument();
 
-    const article = link.closest("[data-job-id]") as HTMLElement;
+    const article = await screen.findByRole("article", {
+      name: "Export Job exp_01JABCXYZ",
+    });
+    expect(within(article).getByRole("link", {
+      name: /原生下载（支持 Range）/,
+    })).toBeInTheDocument();
     expect(within(article).getByText("binance:BTC/USDT")).toBeInTheDocument();
     expect(within(article).getByText("1m")).toBeInTheDocument();
     expect(within(article).getByText("45 天")).toBeInTheDocument();

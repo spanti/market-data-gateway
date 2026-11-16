@@ -207,7 +207,8 @@ from the curated screenshots and are no longer asserted through private `data-sl
 computed Tailwind styles. Behaviour assertions use roles, accessible names, visible text,
 states, focus, downloads and overflow. The spec still checks visible page properties: no
 full-page decorative divider-like elements and no numeric headings. Status pills are verified as
-user-visible icon + text through roles/text, and the screenshots carry the visual review.
+user-visible text through roles/text; the icon and colour encoding are reviewed from the
+screenshots.
 
 ### Curated screenshots
 
@@ -296,21 +297,21 @@ simulation, `PrototypeMark`, prototype CSS or fourth Service Role.
 |---|---|
 | Pre-v2 baseline main chunk (historical `acceptance-report.md`) | 541.80 kB / 162.22 kB gzip |
 | Main chunk before this ticket's vendor split | 656.66 kB / 197.60 kB gzip |
-| Final main chunk after review fixes (`index-*.js`) | **564.28 kB / 168.31 kB gzip** |
-| Final delta vs pre-v2 baseline | **+22.48 kB raw (+4.15%), +6.09 kB gzip (+3.75%)** |
+| Final main chunk after review fixes (`index-*.js`) | **564.32 kB / 168.33 kB gzip** |
+| Final delta vs pre-v2 baseline | **+22.52 kB raw (+4.16%), +6.11 kB gzip (+3.77%)** |
 | Final ECharts chunk | 490.83 kB / 166.13 kB gzip |
-| Final total JS | 1,420,792 bytes across 9 chunks |
+| Final total JS | 1,420,834 bytes across 9 chunks |
 | Final CSS | 61.40 kB / 14.18 kB gzip |
-| Final JS+CSS total | 1,482,188 bytes; 465.33 kB gzip by the Vite-reported gzip sizes |
-| Final `dist/` including fonts and HTML | 1,577,823 bytes |
+| Final JS+CSS total | 1,482,230 bytes; 465.35 kB gzip by the Vite-reported gzip sizes |
+| Final `dist/` including fonts and HTML | 1,577,865 bytes |
 
 Assessment: the main chunk remains above Vite's 500 kB advisory, exactly as the pre-v2 baseline
 did; this is a continuing advisory, not a new build failure. The v2 growth comes from the shared D
 components, HelpTrigger, the Monitoring cards/freshness/alerts surfaces and the migrated Console,
 Quality and Security views. The vendor split is deliberately **kept** after the review-fix
 decision: ticket 09 required the bundle to be inspected with no unassessed regression, the split is
-the assessed mitigation, and it reduces the main chunk by 92.38 kB raw / 29.29 kB gzip from the
-pre-split v2 build (656.66 → 564.28 kB raw; 197.60 → 168.31 kB gzip). It is a pure
+the assessed mitigation, and it reduces the main chunk by 92.34 kB raw / 29.27 kB gzip from the
+pre-split v2 build (656.66 → 564.32 kB raw; 197.60 → 168.33 kB gzip). It is a pure
 `manualChunks` partitioning of dependencies: no dynamic `import()` was added, every route remains
 a static import, and the module graph is unchanged, so loading behaviour is the same graph split
 into vendor files. ECharts remains isolated. Route-level lazy loading was not introduced because
@@ -389,7 +390,7 @@ inert in a normal checkout, and the full real-stack suite was rerun in this work
    client only surfaces `Ops endpoint returned HTTP 500`; the test now asserts that exact visible
    text, asserts the JSON body message is not rendered, and asserts the absence of a healthy
    badge. Banned-symbol raw samples are covered by the Admin, Export Job, Feed and WebSocket specs.
-6. **Bundle advisory.** Main chunk is 564.28 kB / 168.31 kB gzip, still above 500 kB like the
+6. **Bundle advisory.** Main chunk is 564.32 kB / 168.33 kB gzip, still above 500 kB like the
    baseline. The vendor split and full assessment are recorded in section 8; no build failure.
 7. **Dev-server dependency path.** The `fs.allow` allowance is now conditional on `node_modules`
    resolving outside the project root. Normal checkouts use Vite's default allow list; the linked
@@ -439,5 +440,25 @@ Standards and Spec findings recorded in `notes/review-findings.md`.
 - **Vite (finding 14).** Vendor `manualChunks` kept with explicit justification and no loading
   behavior change (section 8); the dev-server allowance is conditional on a linked dependency
   layout (section 8/10). The full real-stack suite passes in this worktree.
+
+### Follow-up private-DOM cleanup
+
+A second pass removed the remaining private `data-slot`/`data-tone`/`data-metric-label`/
+`data-role`/`data-job-id`/`table-container`/`#bar-chart-readout` assertions from every acceptance
+and unit test. The tests now use:
+
+- `getByRole("group", { name: <KPI label> })` for Metric Cards;
+- role `region` + accessible name for chart panels and migrated cards;
+- role `status` for live status readouts and `article` + accessible name for Export Jobs;
+- role `dialog` for confirmation surfaces, role `table` bounding boxes for local-scroll proof;
+- `getByRole("group", { name: <page title> })` for the page header (the PageHeader now exposes a
+  named group);
+- visible status text instead of reading tone attributes. The icon/colour encoding is verified by
+  the curated screenshots, not by private DOM.
+
+The status tone/palette assertions that previously read `data-tone` or an inline swatch style were
+replaced with user-visible text and chart/region checks. The `data-raw-evidence="true"` boundary is
+kept deliberately: it is the documented content-classification contract that separates raw backend
+evidence from UI copy, and the copy scans depend on it.
 
 No ticket Status or `## Comments` section was modified.

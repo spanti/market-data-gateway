@@ -177,7 +177,11 @@ describe("CSV download D surface", () => {
     renderPanel(<CsvDownloadPanel query={QUERY} decision={DIRECT} />);
 
     const region = screen.getByRole("region", { name: "CSV 直接下载" });
-    expect(region).toHaveAttribute("data-slot", "card");
+    expect(
+      within(region).getByRole("heading", {
+        name: "小文件 CSV 直接下载",
+      }),
+    ).toBeInTheDocument();
     expect(
       within(region).getByRole("button", {
         name: "小文件 CSV 直接下载说明",

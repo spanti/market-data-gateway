@@ -95,7 +95,7 @@ describe("BarChart accessibility fallbacks", () => {
     });
     fireEvent.focus(chart);
 
-    const readout = document.getElementById("bar-chart-readout");
+    const readout = screen.getByRole("status");
     expect(readout).toHaveTextContent(
       "时间 2024-01-01T00:01:00.000000000Z",
     );

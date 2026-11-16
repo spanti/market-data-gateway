@@ -114,7 +114,6 @@ describe("Security identity panel in Current Contract", () => {
     renderApp({ initialEntries: ["/security"] });
 
     const panel = await screen.findByRole("region", { name: "当前身份" });
-    expect(panel).toHaveAttribute("data-slot", "card");
 
     // Access Role is a console-user permission, never a Service Role.
     expect(within(panel).getByText("Access Role")).toBeInTheDocument();

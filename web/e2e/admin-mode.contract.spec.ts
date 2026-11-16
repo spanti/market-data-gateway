@@ -411,7 +411,7 @@ test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
     await expect(dialog).toContainText("确认 Graceful Stop api-1");
     await expect(dialog).toContainText("目标 Service Instance api-1");
     await expect(dialog).toContainText("排空");
-    await expectNoBannedUiSymbols(page, '[data-slot="dialog-content"]');
+    await expectNoBannedUiSymbols(page, '[role="dialog"]');
     const confirm = dialog.getByRole("button", { name: "确认执行" });
     await expect(confirm).toBeDisabled();
 
@@ -982,14 +982,12 @@ test.describe("CONTRACT-ONLY Admin API Quality flows (backend absent)", () => {
     await expect(jobs.getByText(/已中断/)).toBeVisible();
 
     for (const region of [gaps, jobs]) {
-      const scroller = region
-        .locator('[data-slot="table-container"]')
-        .first();
-      const widths = await scroller.evaluate((element) => ({
-        scrollWidth: element.scrollWidth,
-        clientWidth: element.clientWidth,
-      }));
-      expect(widths.scrollWidth).toBeGreaterThan(widths.clientWidth);
+      // The wide table exceeds its card but the page itself never widens.
+      const tableBox = await region.getByRole("table").first().boundingBox();
+      const regionBox = await region.boundingBox();
+      expect(tableBox).not.toBeNull();
+      expect(regionBox).not.toBeNull();
+      expect(tableBox!.width).toBeGreaterThan(regionBox!.width);
     }
     await expectNoHorizontalOverflow(page);
     await expectNoBannedUiSymbols(page);

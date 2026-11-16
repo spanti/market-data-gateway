@@ -525,7 +525,9 @@ for (const width of [1280, 1440] as const) {
         name: /最大 Revision Bar 价格图/,
       });
       await chart.focus();
-      const readout = page.locator("#bar-chart-readout");
+      const readout = page
+        .getByRole("region", { name: "最大 Revision Bar 图" })
+        .getByRole("status");
       await expect(readout).toContainText("close 65015.0");
 
       await page.keyboard.press("ArrowLeft");
@@ -729,7 +731,7 @@ test.describe("console service instance help", () => {
     await expect(hovered.tooltip).toContainText("PID 存在不等于 Ready");
     await expect(hovered.tooltip).toContainText("不是热加载");
     await expectTooltipUsable(page);
-    await expectNoBannedUiSymbols(page, '[data-help-content="true"]');
+    await expectNoBannedUiSymbols(page, '[role="tooltip"]');
     await closeHelpWithEscape(page);
 
     const focused = await openHelpByKeyboard(page, "Service Instance 说明");

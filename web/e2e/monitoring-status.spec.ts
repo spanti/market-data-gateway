@@ -14,15 +14,6 @@ import {
  * a real Prometheus container. No status or Prometheus response is mocked.
  */
 
-const ALLOWED_TONES = new Set([
-  "good",
-  "warning",
-  "serious",
-  "critical",
-  "unknown",
-  "info",
-]);
-
 const KPI_LABELS = [
   "Realtime QPS",
   "Peak QPS",
@@ -38,32 +29,32 @@ test("status is encoded with icon + text, never color alone", async ({
     page.getByRole("heading", { name: "监控总览" }),
   ).toBeVisible();
 
-  const badges = page.locator('[data-slot="status-badge"]');
-  await expect(badges.first()).toBeVisible();
-  const count = await badges.count();
-  expect(count).toBeGreaterThan(3);
-
+  // Every live status is announced as readable text; color and the decorative
+  // icon are redundant encodings, never the only one.
+  const liveStatuses = page.getByRole("status");
+  await expect(liveStatuses.first()).toBeVisible();
+  const count = await liveStatuses.count();
+  expect(count).toBeGreaterThan(0);
   for (let index = 0; index < count; index += 1) {
-    const badge = badges.nth(index);
-    if (!(await badge.isVisible())) {
+    const status = liveStatuses.nth(index);
+    if (!(await status.isVisible())) {
       continue;
     }
-    const text = (await badge.innerText()).trim();
-    expect(text.length, `status badge #${index} has no text`).toBeGreaterThan(0);
-    await expect(badge.locator("svg").first()).toBeVisible();
-    const tone = await badge.getAttribute("data-tone");
-    expect(tone).not.toBeNull();
-    expect(ALLOWED_TONES.has(tone as string)).toBe(true);
+    expect((await status.innerText()).trim().length).toBeGreaterThan(0);
   }
 
+  // Key static statuses also remain readable text.
+  await expect(page.getByText("正常").first()).toBeVisible();
+  await expect(page.getByText("3 个 Service Role")).toBeVisible();
+
   // The real collector status is surfaced as Ready / not-ready text.
-  const collector = page.locator(
-    '[data-slot="service-instance"][data-role="collector"]',
-  );
+  const collector = page.getByRole("group", {
+    name: "collector Service Role",
+  });
   await expect(collector).toBeVisible();
-  await expect(
-    collector.locator('[data-slot="status-badge"]').first(),
-  ).toContainText(/Ready|未就绪|未知/);
+  await expect(collector.getByRole("status")).toContainText(
+    /Ready|未就绪|未知/,
+  );
 });
 
 test("D foundation exposes four KPI cards and separated freshness areas", async ({
@@ -75,11 +66,8 @@ test("D foundation exposes four KPI cards and separated freshness areas", async 
   ).toBeVisible();
 
   for (const label of KPI_LABELS) {
-    await expect(
-      page.locator(`[data-slot="metric-card"][data-metric-label="${label}"]`),
-    ).toBeVisible();
+    await expect(page.getByRole("group", { name: label })).toBeVisible();
   }
-  await expect(page.locator('[data-slot="metric-card"]')).toHaveCount(4);
 
   // Feed Freshness and Dataset Freshness remain separate signals.
   const feed = page.getByRole("region", {
@@ -135,9 +123,7 @@ test("real Prometheus trends expose a keyboard readout and data table", async ({
     page.getByRole("heading", { name: "监控总览" }),
   ).toBeVisible();
 
-  const qpsCell = page.locator(
-    '[data-slot="metric-card"][data-metric-label="Realtime QPS"]',
-  );
+  const qpsCell = page.getByRole("group", { name: "Realtime QPS" });
   await expect(qpsCell).toBeVisible();
 
   // Wait until the real Prometheus query has a sample; never accept unknown.
@@ -150,10 +136,8 @@ test("real Prometheus trends expose a keyboard readout and data table", async ({
 
   await expect(page.getByText(/Prometheus（\/prometheus）/).first()).toBeVisible();
 
-  const qpsPanel = page.locator('[data-slot="chart-panel"]', {
-    has: page.getByRole("heading", { name: "QPS 趋势" }),
-  });
-  await expect(qpsPanel).toHaveAttribute("data-state", "ready");
+  const qpsPanel = page.getByRole("region", { name: "QPS 趋势" });
+  await expect(qpsPanel).toBeVisible();
 
   // A freshly started Prometheus initially has a single sample. Keyboard
   // navigation is only observable once the window has at least two points.

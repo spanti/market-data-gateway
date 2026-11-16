@@ -32,10 +32,11 @@ describe("HelpTrigger", () => {
     const trigger = screen.getByRole("button", {
       name: "Realtime QPS 说明",
     });
-    expect(trigger).toHaveAttribute("data-slot", "help-trigger");
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
 
     await user.hover(trigger);
     const tip = await screen.findByRole("tooltip");
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
     expect(tip).toHaveTextContent(
       "1 分钟滑动窗口的请求速率，只取最近一个成功样本。",
     );

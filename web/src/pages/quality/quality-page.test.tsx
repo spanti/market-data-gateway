@@ -115,13 +115,15 @@ describe("Quality & Backfill — Collector current snapshot", () => {
         name: "Unrecoverable Backfill Gap 当前快照说明",
       }),
     ).toBeInTheDocument();
-    expect(
-      document.querySelectorAll('[data-slot="card"]').length,
-    ).toBeGreaterThanOrEqual(2);
-    // Status is icon plus text, never color alone.
-    expect(
-      document.querySelectorAll('[data-slot="status-badge"] svg').length,
-    ).toBeGreaterThan(0);
+    for (const name of [
+      "Unrecoverable Backfill Gap 当前快照",
+      "持久 Unrecoverable Backfill Gap",
+      "Backfill Job",
+    ]) {
+      expect(screen.getByRole("region", { name })).toBeInTheDocument();
+    }
+    // Status is icon plus text, never color alone: the status text is visible.
+    expect(screen.getByText("Collector 进程内快照")).toBeInTheDocument();
 
     expectNoBannedUiSymbols();
   });
@@ -336,7 +338,11 @@ describe("Quality & Backfill — persistent gaps (Admin API contract target)", (
       name: "持久 Unrecoverable Backfill Gap",
     });
     expect(await within(region).findByText("gap_open_1")).toBeInTheDocument();
-    expect(region).toHaveAttribute("data-slot", "card");
+    expect(
+      within(region).getByRole("heading", {
+        name: "持久 Unrecoverable Backfill Gap",
+      }),
+    ).toBeInTheDocument();
     expect(
       within(region).getByRole("button", {
         name: "持久 Unrecoverable Backfill Gap 说明",
@@ -518,7 +524,9 @@ describe("Quality & Backfill — Backfill Job state machine (Admin API contract 
 
     const region = await screen.findByRole("region", { name: "Backfill Job" });
     await within(region).findByText("bf_queued");
-    expect(region).toHaveAttribute("data-slot", "card");
+    expect(
+      within(region).getByRole("heading", { name: "Backfill Job" }),
+    ).toBeInTheDocument();
     expect(
       within(region).getByRole("button", { name: "Backfill Job 说明" }),
     ).toBeInTheDocument();

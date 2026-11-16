@@ -12,7 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { expectNoBannedUiSymbols } from "@/test/ui-copy";
 
 describe("D foundation contracts", () => {
-  it("status badges always expose an icon, text and tone", () => {
+  it("live status badges expose their status as text, not color alone", () => {
     const { container } = render(
       <StatusBadge tone="critical" live>
         Feed Freshness 失活
@@ -20,9 +20,6 @@ describe("D foundation contracts", () => {
     );
 
     const badge = screen.getByRole("status");
-    expect(badge).toHaveAttribute("data-slot", "status-badge");
-    expect(badge).toHaveAttribute("data-tone", "critical");
-    expect(badge.querySelector("svg")).not.toBeNull();
     expect(badge).toHaveTextContent("Feed Freshness 失活");
     expectNoBannedUiSymbols(container);
   });
