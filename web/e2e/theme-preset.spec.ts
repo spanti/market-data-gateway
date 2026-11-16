@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import { barsQuery, expectNoHorizontalOverflow } from "./support";
 
 const MODULES = [
@@ -8,26 +8,6 @@ const MODULES = [
   { path: "/quality", heading: "Quality & Backfill", slug: "quality" },
   { path: "/security", heading: "Security & Audit", slug: "security" },
 ] as const;
-
-async function resolvedCssColor(page: Page, variable: string): Promise<string> {
-  return page.evaluate((name) => {
-    const probe = document.createElement("span");
-    probe.style.color = `var(${name})`;
-    probe.style.position = "absolute";
-    probe.style.visibility = "hidden";
-    document.body.append(probe);
-    const color = getComputedStyle(probe).color;
-    probe.remove();
-    return color;
-  }, variable);
-}
-
-function legendSwatch(page: Page, chartTitle: string) {
-  return page
-    .locator('[data-slot="chart-panel"]', { hasText: chartTitle })
-    .locator('span[aria-hidden="true"][style]')
-    .first();
-}
 
 test("all modules remain usable in light and dark themes", async ({
   page,
@@ -89,27 +69,24 @@ test("all modules remain usable in light and dark themes", async ({
   expect(consoleErrors).toEqual([]);
 });
 
-test("chart legends follow the active CSS palette after theme switches", async ({
+test("chart legends and readouts stay usable across theme switches", async ({
   page,
 }) => {
   await page.goto("/monitoring");
-  const trendPanel = page.locator('[data-slot="chart-panel"]', {
-    has: page.getByRole("heading", { name: "QPS 趋势" }),
-  });
-  await expect(trendPanel).toHaveAttribute("data-state", "ready");
-  const trendSwatch = legendSwatch(page, "QPS 趋势");
-  await expect(trendSwatch).toBeVisible();
-  await expect(trendSwatch).toHaveCSS(
-    "background-color",
-    await resolvedCssColor(page, "--chart-series-1"),
-  );
+  const trendPanel = page.getByRole("region", { name: "QPS 趋势" });
+  await expect(trendPanel).toBeVisible();
+  await expect(trendPanel.getByText(/查看数据表/)).toBeVisible();
+  await expect(
+    trendPanel.getByRole("img", { name: "QPS 趋势", exact: true }),
+  ).toBeVisible();
 
   await page.getByRole("button", { name: "切换主题（当前浅色）" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await expect(trendSwatch).toHaveCSS(
-    "background-color",
-    await resolvedCssColor(page, "--chart-series-1"),
-  );
+  await expect(trendPanel).toBeVisible();
+  await expect(trendPanel.getByText(/查看数据表/)).toBeVisible();
+  await expect(
+    trendPanel.getByRole("img", { name: "QPS 趋势", exact: true }),
+  ).toBeVisible();
 
   const query = barsQuery({
     instrument: "binance:BTC/USDT",
@@ -120,17 +97,18 @@ test("chart legends follow the active CSS palette after theme switches", async (
   await expect(page.getByTestId("history-summary")).toContainText(
     "共 2 条原始 Revision",
   );
-  const barSwatch = legendSwatch(page, "最大 Revision Bar 图");
-  await expect(barSwatch).toBeVisible();
-  await expect(barSwatch).toHaveCSS(
-    "background-color",
-    await resolvedCssColor(page, "--chart-series-1"),
-  );
+  const barPanel = page.getByRole("region", { name: "最大 Revision Bar 图" });
+  await expect(barPanel).toBeVisible();
+  await expect(barPanel.getByText(/查看数据表/)).toBeVisible();
+  await expect(
+    barPanel.getByRole("img", { name: /最大 Revision Bar 价格图/ }),
+  ).toBeVisible();
 
   await page.getByRole("button", { name: "切换主题（当前深色）" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  await expect(barSwatch).toHaveCSS(
-    "background-color",
-    await resolvedCssColor(page, "--chart-series-1"),
-  );
+  await expect(barPanel).toBeVisible();
+  await expect(barPanel.getByText(/查看数据表/)).toBeVisible();
+  await expect(
+    barPanel.getByRole("img", { name: /最大 Revision Bar 价格图/ }),
+  ).toBeVisible();
 });

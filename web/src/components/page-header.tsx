@@ -28,6 +28,8 @@ export function PageHeader({
 }: PageHeaderProps) {
   return (
     <div
+      role="group"
+      aria-label={title}
       data-slot="page-header"
       className={cn(
         "flex flex-wrap items-start justify-between gap-4",

@@ -20,8 +20,12 @@ import {
 } from "@/components/ui/table";
 import { errorText } from "@/lib/errors";
 import { STATUS_POLL_INTERVAL_MS } from "@/lib/monitoring-config";
+import {
+  capabilityModeKind,
+  capabilityModePresentation,
+} from "@/runtime/mode-presentation";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
-import { QualityCardHeading } from "./quality-card-heading";
+import { CardHeading } from "@/components/card-heading";
 import {
   formatRange,
   formatUtcTimestamp,
@@ -48,8 +52,8 @@ const POLL_SECONDS = STATUS_POLL_INTERVAL_MS / 1000;
  */
 export function CollectorBackfillGapSnapshot() {
   const { capability } = useRuntimeMode();
-  const mode = capability?.mode ?? null;
-  const directEnabled = mode === "current-contract";
+  const modeKind = capabilityModeKind(capability);
+  const directEnabled = modeKind === "current-contract";
   const query = useQuery({
     queryKey: COLLECTOR_BACKFILL_GAP_SNAPSHOT_QUERY_KEY,
     queryFn: ({ signal }) => fetchCollectorStatus(signal),
@@ -61,15 +65,15 @@ export function CollectorBackfillGapSnapshot() {
   const serverCount = query.data?.health?.gap_unrecoverable_count;
   const hasError = directEnabled && query.isError;
 
+  const modeBadge = capabilityModePresentation(capability, {
+    "capabilities-unknown": { tone: "warning", label: "未知" },
+    "admin-api": { tone: "warning", label: "需要 Current Contract" },
+  });
   const badge = (() => {
-    if (mode === null) {
-      return <StatusBadge tone="unknown">发现能力中</StatusBadge>;
-    }
-    if (mode === "capabilities-unknown") {
-      return <StatusBadge tone="warning">未知</StatusBadge>;
-    }
-    if (mode === "admin-api") {
-      return <StatusBadge tone="warning">需要 Current Contract</StatusBadge>;
+    if (modeKind !== "current-contract") {
+      return (
+        <StatusBadge tone={modeBadge.tone}>{modeBadge.label}</StatusBadge>
+      );
     }
     if (hasError) {
       return <StatusBadge tone="unknown">未知</StatusBadge>;
@@ -91,7 +95,7 @@ export function CollectorBackfillGapSnapshot() {
       aria-label="Unrecoverable Backfill Gap 当前快照"
       className="min-w-0"
     >
-      <QualityCardHeading
+      <CardHeading
         icon={Database}
         title="Unrecoverable Backfill Gap"
         helpLabel="Unrecoverable Backfill Gap 当前快照说明"
@@ -108,18 +112,18 @@ export function CollectorBackfillGapSnapshot() {
           Collector 当前进程内快照，重启后丢失。只展示最新一次读取，不累积历史。
         </CardDescription>
 
-        {mode === null ? (
+        {modeKind === "discovering" ? (
           <LoadingState
             className="mt-3"
             label="正在发现运行时能力…"
           />
-        ) : mode === "capabilities-unknown" ? (
+        ) : modeKind === "capabilities-unknown" ? (
           <UnknownState
             className="mt-3"
             cause="not-loaded"
             reason="能力未知，暂不可用。能力发现失败；未向 Collector /status 发出任何请求。"
           />
-        ) : mode === "admin-api" ? (
+        ) : modeKind === "admin-api" ? (
           <div
             role="note"
             className="mt-3 rounded-lg bg-surface-sunken p-3 text-sm"

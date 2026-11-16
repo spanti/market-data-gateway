@@ -44,6 +44,7 @@ import {
   formatAuditTimestamp,
 } from "@/pages/security/audit-presentation";
 import { ACCESS_ROLES, isAccessRole } from "@/runtime/roles";
+import { IconTile } from "@/components/icon-tile";
 
 const AUDIT_QUERY_ROOT = ["admin", "audit-events"] as const;
 const MAX_CURSOR_HISTORY = 50;
@@ -260,9 +261,7 @@ export function OperatorAuditQuerySection() {
       >
         <CardHeader className="p-5 pb-0">
           <div className="flex min-w-0 items-start gap-2.5">
-            <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-strong">
-              <ScrollText className="size-4" aria-hidden="true" />
-            </span>
+            <IconTile icon={ScrollText} />
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-1.5">
                 <CardTitle>Operator Audit Event 查询</CardTitle>

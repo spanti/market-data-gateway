@@ -1,4 +1,5 @@
 import { formatUtcDateTime } from "@/lib/format";
+import type { FeedFreshnessRow } from "@/lib/freshness";
 
 /**
  * In-page alerts are derived only from real loaded conditions and real query
@@ -22,14 +23,15 @@ export interface MonitoringAlert {
   evidence?: string;
 }
 
-export interface StaleFeedAlertInput {
-  instrumentId: string;
-  feed: string;
-  interval: string;
-  ageS: number | null;
-  thresholdS: number | null;
-  lastEventTs: string | null;
-}
+export type StaleFeedAlertInput = Pick<
+  FeedFreshnessRow,
+  | "instrumentId"
+  | "feed"
+  | "interval"
+  | "ageS"
+  | "thresholdS"
+  | "lastEventTs"
+>;
 
 export interface SourceFailureInput {
   label: string;
@@ -95,10 +97,12 @@ export function deriveMonitoringAlerts(
   }
 
   for (const service of input.notReadyServices) {
+    const target = service.instanceId ?? service.role;
+    const subject = service.instanceId ? "Service Instance" : "Service Role";
     alerts.push({
-      id: `service-not-ready:${service.instanceId ?? service.role}:${service.role}`,
+      id: `service-not-ready:${target}:${service.role}`,
       tone: "warning",
-      title: `Service Instance ${service.role} 未就绪`,
+      title: `${subject} ${target} 未就绪`,
       detail: service.reason ?? "服务端未给出原因",
     });
   }

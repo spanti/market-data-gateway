@@ -13,6 +13,7 @@ const t1 = Date.parse("2026-11-09T11:00:30.000Z");
 
 const series: TrendSeries[] = [
   {
+    id: "p50",
     name: "P50",
     points: [
       { ts: t0, value: 10 },
@@ -20,6 +21,7 @@ const series: TrendSeries[] = [
     ],
   },
   {
+    id: "p95",
     name: "P95",
     points: [
       { ts: t0, value: 20 },

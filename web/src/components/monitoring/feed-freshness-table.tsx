@@ -4,7 +4,7 @@ import {
   HelpTrigger,
   type HelpTriggerSide,
 } from "@/components/help-trigger";
-import type { FreshnessRow } from "@/components/freshness-matrix";
+import type { FeedFreshnessRow } from "@/lib/freshness";
 import {
   EmptyState,
   ErrorState,
@@ -23,9 +23,10 @@ import {
 } from "@/components/ui/table";
 import { formatUtcDateTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { IconTile } from "@/components/icon-tile";
 
 export interface FeedFreshnessTableProps {
-  rows: FreshnessRow[];
+  rows: FeedFreshnessRow[];
   help?: { label: string; content: React.ReactNode; side?: HelpTriggerSide };
   state?: "loading" | "ready" | "error" | "unknown";
   unknownReason?: React.ReactNode;
@@ -60,9 +61,7 @@ export function FeedFreshnessTable({
     >
       <CardHeader className="p-0">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-strong">
-            <Database className="size-4" aria-hidden="true" />
-          </span>
+          <IconTile icon={Database} />
           <CardTitle>Feed Freshness 明细</CardTitle>
           {help ? (
             <HelpTrigger

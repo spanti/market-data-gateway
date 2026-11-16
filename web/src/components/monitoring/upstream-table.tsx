@@ -24,6 +24,7 @@ import {
 import { formatUtcDateTime } from "@/lib/format";
 import type { VenueRow } from "@/lib/venues";
 import { cn } from "@/lib/utils";
+import { IconTile } from "@/components/icon-tile";
 
 export interface UpstreamTableProps {
   rows: VenueRow[];
@@ -61,9 +62,7 @@ export function UpstreamTable({
     >
       <CardHeader className="p-0">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-strong">
-            <Network className="size-4" aria-hidden="true" />
-          </span>
+          <IconTile icon={Network} />
           <CardTitle>上游状态</CardTitle>
           {help ? (
             <HelpTrigger

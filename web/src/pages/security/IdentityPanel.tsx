@@ -2,13 +2,18 @@ import { UserRound } from "lucide-react";
 import { useLocation } from "react-router-dom";
 import { DisabledAction } from "@/components/disabled-reason";
 import { HelpTrigger } from "@/components/help-trigger";
-import { StatusBadge } from "@/components/status-badge";
+import { StatusBadge, type StatusTone } from "@/components/status-badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatUtcTimestamp } from "@/lib/format";
 import { buildLoginUrl } from "@/runtime/auth";
 import { loginDisabledReason } from "@/runtime/login-availability";
+import {
+  capabilityModeKind,
+  capabilityModePresentation,
+} from "@/runtime/mode-presentation";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
 import type { DisabledReason } from "@/runtime/permissions";
+import { IconTile } from "@/components/icon-tile";
 
 interface IdentityView {
   name: string;
@@ -18,7 +23,7 @@ interface IdentityView {
   issuedAt: string | null;
   idleExpiresAt: string | null;
   absoluteExpiresAt: string | null;
-  badge: { tone: "good" | "warning" | "unknown"; label: string };
+  badge: { tone: StatusTone; label: string };
 }
 
 function identityView(
@@ -26,7 +31,13 @@ function identityView(
   session: ReturnType<typeof useRuntimeMode>["session"],
   role: ReturnType<typeof useRuntimeMode>["role"],
 ): IdentityView {
-  if (!capability) {
+  const modeKind = capabilityModeKind(capability);
+  const modeBadge = capabilityModePresentation(capability, {
+    discovering: { tone: "warning", label: "能力未知" },
+    "capabilities-unknown": { tone: "warning", label: "能力未知" },
+    "current-contract": { tone: "unknown", label: "匿名只读" },
+  });
+  if (modeKind === "discovering" || modeKind === "capabilities-unknown") {
     return {
       name: "能力未知",
       subject: "—",
@@ -35,22 +46,10 @@ function identityView(
       issuedAt: null,
       idleExpiresAt: null,
       absoluteExpiresAt: null,
-      badge: { tone: "warning", label: "能力未知" },
+      badge: { tone: modeBadge.tone, label: modeBadge.label },
     };
   }
-  if (capability.mode === "capabilities-unknown") {
-    return {
-      name: "能力未知",
-      subject: "—",
-      roleLabel: "无",
-      authMode: "未知（能力发现失败）",
-      issuedAt: null,
-      idleExpiresAt: null,
-      absoluteExpiresAt: null,
-      badge: { tone: "warning", label: "能力未知" },
-    };
-  }
-  if (capability.mode === "current-contract") {
+  if (modeKind === "current-contract") {
     return {
       name: "匿名只读",
       subject: "—",
@@ -59,7 +58,7 @@ function identityView(
       issuedAt: null,
       idleExpiresAt: null,
       absoluteExpiresAt: null,
-      badge: { tone: "unknown", label: "匿名只读" },
+      badge: { tone: modeBadge.tone, label: modeBadge.label },
     };
   }
 
@@ -148,9 +147,7 @@ export function IdentityPanel() {
     <Card role="region" aria-label="当前身份" className="mt-4">
       <CardHeader className="p-5 pb-0">
         <div className="flex min-w-0 items-start gap-2.5">
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-strong">
-            <UserRound className="size-4" aria-hidden="true" />
-          </span>
+          <IconTile icon={UserRound} />
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-1.5">
               <CardTitle>当前身份</CardTitle>

@@ -16,74 +16,77 @@ export interface HelpTriggerProps {
 }
 
 /**
+ * Help disclosure state for the shared `?` affordance.
+ *
+ * Radix owns hover, focus and Escape. Pointer activation needs one extra
+ * decision: a tap that begins while help is closed must end open, while a tap
+ * that begins while help is open must end closed. The trigger remembers the
+ * disclosure state at press start so Radix's focus/click ordering cannot
+ * invert that result.
+ */
+function useHelpDisclosure() {
+  const [open, setOpen] = React.useState(false);
+  const openAtPressStart = React.useRef<boolean | null>(null);
+
+  const startPointerGesture = () => {
+    openAtPressStart.current = open;
+  };
+
+  const cancelPointerGesture = () => {
+    openAtPressStart.current = null;
+  };
+
+  const resolveActivation = (event: React.MouseEvent<HTMLButtonElement>) => {
+    const startedOpen = openAtPressStart.current;
+    openAtPressStart.current = null;
+
+    if (startedOpen === null) {
+      // Keyboard or assistive-technology activation. Focus may already have
+      // opened help; do not let Radix's click-to-close dismiss it.
+      event.preventDefault();
+      setOpen(true);
+      return;
+    }
+
+    if (startedOpen) {
+      // The press already closed help; Radix's click handler finishes the
+      // gesture without reopening it.
+      return;
+    }
+
+    // The gesture began closed, so it must end open. Focus may have opened
+    // help during the gesture; suppressing Radix's click toggle keeps it open.
+    event.preventDefault();
+    setOpen(true);
+  };
+
+  return { open, setOpen, startPointerGesture, cancelPointerGesture, resolveActivation };
+}
+
+/**
  * Shared `?` help affordance.
  *
- * Radix handles hover, keyboard focus and Escape dismissal. This wrapper adds
- * pointer and touch click-to-toggle on top of those defaults so a tap works
- * without a hover-capable pointer. The tooltip is portaled, collision-aware,
- * width-limited and offset from its trigger; it never replaces in-place
- * permission, error, risk or operation feedback.
+ * Hover and keyboard focus open the help surface; touch taps toggle it and
+ * Escape closes it. The content is portaled, collision-aware, width-limited
+ * and offset from the trigger so it never covers its own control. Only
+ * supplementary definitions belong here: permission, risk, validation,
+ * operation-result and Request ID feedback stay inline.
  */
 export function HelpTrigger({
   label,
   content,
   side = "top",
 }: HelpTriggerProps) {
-  const [open, setOpenState] = React.useState(false);
-  const openRef = React.useRef(false);
-  const pointerTypeRef = React.useRef<string | null>(null);
-  const wasOpenAtPointerDownRef = React.useRef(false);
-
-  const setOpen = React.useCallback((next: boolean) => {
-    openRef.current = next;
-    setOpenState(next);
-  }, []);
-
-  const handlePointerDownCapture = React.useCallback(
-    (event: React.PointerEvent<HTMLButtonElement>) => {
-      // Capture runs before Radix's own pointerdown close, so this snapshot is
-      // independent of event-handler merge order.
-      pointerTypeRef.current = event.pointerType;
-      wasOpenAtPointerDownRef.current = openRef.current;
-    },
-    [],
-  );
-
-  const handleClick = React.useCallback(
-    (event: React.MouseEvent<HTMLButtonElement>) => {
-      const pointerType = pointerTypeRef.current;
-      pointerTypeRef.current = null;
-      if (!pointerType) {
-        // Keyboard activation (or assistive-technology click) must not close
-        // help that focus just opened. Radix closes on click by default.
-        event.preventDefault();
-        event.stopPropagation();
-        if (!openRef.current) {
-          setOpen(true);
-        }
-        return;
-      }
-      if (wasOpenAtPointerDownRef.current) {
-        // Radix closed it on pointerdown; let its click handler finish.
-        return;
-      }
-      // A pointer gesture that began closed must end open. Radix closes on
-      // click, and focus or hover may have opened the tooltip during the same
-      // gesture, so prevent its click handler from closing it again.
-      event.preventDefault();
-      if (!openRef.current) {
-        setOpen(true);
-      }
-    },
-    [setOpen],
-  );
-
-  const handlePointerCancel = React.useCallback(() => {
-    pointerTypeRef.current = null;
-  }, []);
+  const {
+    open,
+    setOpen,
+    startPointerGesture,
+    cancelPointerGesture,
+    resolveActivation,
+  } = useHelpDisclosure();
 
   return (
-    <Tooltip open={open} onOpenChange={setOpen} delayDuration={150}>
+    <Tooltip open={open} onOpenChange={setOpen}>
       <TooltipTrigger asChild>
         <button
           type="button"
@@ -91,9 +94,9 @@ export function HelpTrigger({
           aria-label={label}
           aria-expanded={open}
           className="inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-card-border bg-card text-xs font-semibold leading-none text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          onPointerDownCapture={handlePointerDownCapture}
-          onClickCapture={handleClick}
-          onPointerCancel={handlePointerCancel}
+          onPointerDownCapture={startPointerGesture}
+          onClickCapture={resolveActivation}
+          onPointerCancel={cancelPointerGesture}
         >
           <span aria-hidden="true">?</span>
         </button>

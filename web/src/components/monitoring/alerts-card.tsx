@@ -12,6 +12,7 @@ import type {
   MonitoringAlertTone,
 } from "@/pages/monitoring/monitoring-alerts";
 import { cn } from "@/lib/utils";
+import { IconTile } from "@/components/icon-tile";
 
 const TONE_LABEL: Record<MonitoringAlertTone, string> = {
   critical: "严重",
@@ -39,9 +40,7 @@ export function AlertsCard({ alerts, help, className }: AlertsCardProps) {
     >
       <CardHeader className="p-0">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-strong">
-            <BellRing className="size-4" aria-hidden="true" />
-          </span>
+          <IconTile icon={BellRing} />
           <CardTitle>页面内告警</CardTitle>
           {help ? (
             <HelpTrigger

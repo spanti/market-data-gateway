@@ -35,7 +35,7 @@ const HELP_NAMES = [
 
 const MIGRATED_REGION_SELECTORS = [
   '[role="region"][aria-label="Bar 查询条件"]',
-  '[data-slot="chart-panel"]',
+  '[role="region"][aria-label="最大 Revision Bar 图"]',
   '[role="region"][aria-label="原始 Revision 表"]',
   '[role="region"][aria-label="CSV 直接下载"]',
   '[role="region"][aria-label="Export Job"]',
@@ -100,8 +100,8 @@ test("chart data table renders exact server strings and keyboard readout works",
 
   const summary = page.getByText("查看数据表（2 个时间点）");
   await summary.click();
-  const chartPanel = page.locator('[data-slot="chart-panel"]', {
-    has: page.getByRole("heading", { name: "最大 Revision Bar 图" }),
+  const chartPanel = page.getByRole("region", {
+    name: "最大 Revision Bar 图",
   });
   const table = chartPanel.getByRole("table");
   await expect(table).toBeVisible();
@@ -118,7 +118,7 @@ test("chart data table renders exact server strings and keyboard readout works",
     name: /最大 Revision Bar 价格图/,
   });
   await chart.focus();
-  const readout = page.locator("#bar-chart-readout");
+  const readout = chartPanel.getByRole("status");
   await expect(readout).toContainText("close 65015.0");
   await page.keyboard.press("ArrowLeft");
   await expect(readout).toContainText("close 65005.5");
@@ -221,7 +221,7 @@ test("migrated Bars help opens by hover and keyboard and closes with Escape", as
     expect(
       ((await hovered.tooltip.textContent()) ?? "").trim().length,
     ).toBeGreaterThan(0);
-    await expectNoBannedUiSymbols(page, '[data-help-content="true"]');
+    await expectNoBannedUiSymbols(page, '[role="tooltip"]');
     await closeHelpWithEscape(page);
 
     const focused = await openHelpByKeyboard(page, name);

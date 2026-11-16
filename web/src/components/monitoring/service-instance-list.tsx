@@ -14,6 +14,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatDurationSeconds, formatUtcDateTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { IconTile } from "@/components/icon-tile";
 
 export interface ServiceInstanceRow {
   role: ServiceRole;
@@ -30,7 +31,14 @@ export interface ServiceInstanceRow {
   errorMessage?: string | null;
 }
 
+/**
+ * Current Contract exposes one process per Service Role; Admin API exposes
+ * concrete Service Instances. The card must name the rows it actually has.
+ */
+export type ServiceInstanceSourceKind = "role" | "instance";
+
 export interface ServiceInstanceListProps {
+  sourceKind: ServiceInstanceSourceKind;
   rows: ServiceInstanceRow[];
   /** Overall source state. Unknown means a real capability gap, not an error. */
   state?: "loading" | "ready" | "error" | "unknown";
@@ -66,6 +74,7 @@ function ReadinessBadge({ row }: { row: ServiceInstanceRow }) {
  * separately with no cluster, leader or failover inference.
  */
 export function ServiceInstanceList({
+  sourceKind,
   rows,
   state = "ready",
   unknownReason,
@@ -75,19 +84,18 @@ export function ServiceInstanceList({
   help,
   className,
 }: ServiceInstanceListProps) {
+  const subject = sourceKind === "role" ? "Service Role" : "Service Instance";
   return (
     <Card
       data-slot="service-instance-list"
       role="region"
-      aria-label="Service Instance"
+      aria-label={subject}
       className={cn("min-w-0 p-5", className)}
     >
       <CardHeader className="p-0">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-strong">
-            <Radio className="size-4" aria-hidden="true" />
-          </span>
-          <CardTitle>Service Instance</CardTitle>
+          <IconTile icon={Radio} />
+          <CardTitle>{subject}</CardTitle>
           {help ? (
             <HelpTrigger
               label={help.label}
@@ -99,7 +107,7 @@ export function ServiceInstanceList({
         <div className="flex flex-wrap items-center gap-2">
           {overallStatus}
           <span className="font-mono text-[11px] tabular-nums text-faint-foreground">
-            {rows.length} 个 Service Role
+            {rows.length} 个 {subject}
           </span>
         </div>
       </CardHeader>
@@ -107,13 +115,13 @@ export function ServiceInstanceList({
         {state === "unknown" ? (
           <UnknownState cause="not-exposed" reason={unknownReason} />
         ) : state === "loading" ? (
-          <LoadingState label="正在读取 Service Instance 状态" showSkeleton />
+          <LoadingState label={`正在读取 ${subject} 状态`} showSkeleton />
         ) : state === "error" ? (
           <ErrorState
             className="mb-3"
             description={
               <span>
-                Service Instance 状态加载失败。最后成功{" "}
+                {subject} 状态加载失败。最后成功{" "}
                 {formatUtcDateTime(lastSuccessAt)}。旧快照不会继续显示为 Ready。
               </span>
             }
@@ -122,13 +130,19 @@ export function ServiceInstanceList({
 
         {state === "unknown" ? null : rows.length === 0 ? (
           <p className="text-xs text-muted-foreground">
-            当前没有可展示的 Service Instance 数据。
+            当前没有可展示的 {subject} 数据。
           </p>
         ) : (
           <div className="space-y-2.5">
             {rows.map((row) => (
               <div
                 key={row.role}
+                role="group"
+                aria-label={
+                  row.instanceId
+                    ? `${row.instanceId} ${row.role} Service Instance`
+                    : `${row.role} Service Role`
+                }
                 data-slot="service-instance"
                 data-role={row.role}
                 data-state={row.statusState}

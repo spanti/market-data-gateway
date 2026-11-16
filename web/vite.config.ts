@@ -9,21 +9,23 @@ import tailwindcss from "@tailwindcss/vite";
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
- * Worktrees use a `node_modules` junction to the main checkout. Vite resolves
- * the real path, which lies outside this worktree root, and its default dev
- * allow list then rejects dependency assets such as webfonts. Allow the
- * resolved dependency directory explicitly (dev server only; the production
- * build is unaffected).
+ * A normal checkout keeps `node_modules` inside the project, so Vite's default
+ * dev-server allow list is sufficient. Linked worktrees expose it through a
+ * junction whose resolved path lies outside the root; only then is that real
+ * dependency path added, so fonts and other dependency assets are not rejected
+ * with HTTP 403.
  */
-function realPathOrSelf(target: string): string {
+function linkedDependencyRoot(): string | null {
+  const declared = path.resolve(dirname, "node_modules");
   try {
-    return fs.realpathSync(target);
+    const resolved = fs.realpathSync(declared);
+    return resolved === declared ? null : resolved;
   } catch {
-    return target;
+    return null;
   }
 }
 
-const dependencyRoot = realPathOrSelf(path.resolve(dirname, "node_modules"));
+const externalDependencyRoot = linkedDependencyRoot();
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, dirname, "");
@@ -45,9 +47,9 @@ export default defineConfig(({ mode }) => {
     server: {
       host: "127.0.0.1",
       port: 5173,
-      fs: {
-        allow: [realPathOrSelf(dirname), dependencyRoot],
-      },
+      ...(externalDependencyRoot
+        ? { fs: { allow: [dirname, externalDependencyRoot] } }
+        : {}),
       proxy: {
         // Current Contract REST + WebSocket + ops endpoints (same origin).
         "/api": { target: apiTarget, changeOrigin: true },

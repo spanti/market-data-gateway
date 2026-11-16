@@ -27,6 +27,7 @@ import {
   formatUtcDateTime,
 } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { IconTile } from "@/components/icon-tile";
 
 export interface DatasetFreshnessHelp {
   label: string;
@@ -65,9 +66,7 @@ export function DatasetFreshness({
     >
       <CardHeader className="p-0">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-strong">
-            <Database className="size-4" aria-hidden="true" />
-          </span>
+          <IconTile icon={Database} />
           <CardTitle id="dataset-freshness-title">Dataset Freshness</CardTitle>
           {help ? (
             <HelpTrigger

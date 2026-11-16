@@ -23,10 +23,7 @@ describe("MetricCard", () => {
       />,
     );
 
-    const card = document.querySelector<HTMLElement>(
-      '[data-slot="metric-card"][data-metric-label="Realtime QPS"]',
-    );
-    expect(card).not.toBeNull();
+    const card = screen.getByRole("group", { name: "Realtime QPS" });
     expect(card).toHaveTextContent("12.5");
     expect(card).toHaveTextContent("req/s");
     expect(card).toHaveTextContent("最后成功 2026-11-09 12:00:00 UTC");
@@ -43,9 +40,7 @@ describe("MetricCard", () => {
       />,
     );
 
-    const card = document.querySelector<HTMLElement>(
-      '[data-slot="metric-card"][data-metric-label="HTTP P99"]',
-    );
+    const card = screen.getByRole("group", { name: "HTTP P99" });
     expect(card).toHaveTextContent("未知");
     expect(card).toHaveTextContent("能力未知，暂不可用");
     expect(card).not.toHaveTextContent("0 ms");

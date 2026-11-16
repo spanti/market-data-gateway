@@ -5,13 +5,9 @@ import type { TrendSeries } from "@/api/monitoring/types";
  *
  * A series carries a stable internal identity (`id`) that is independent of
  * its display name. Labels may change for readability without changing which
- * metric is read. Legacy series without an `id` fall back to their name for
- * compatibility, but new adapters always set `id`.
+ * metric is read. Every adapter supplies an explicit identity; selection
+ * never parses or falls back to the display name.
  */
-
-export function seriesIdentity(series: TrendSeries): string {
-  return series.id ?? series.name;
-}
 
 /** The last finite value of one line, or null when the line has no sample. */
 export function latestFiniteValue(series: Pick<TrendSeries, "points">): number | null {
@@ -33,7 +29,7 @@ export function latestSeriesValue(
   identity: string,
 ): number | null {
   const values = series
-    .filter((item) => seriesIdentity(item) === identity)
+    .filter((item) => item.id === identity)
     .map(latestFiniteValue)
     .filter((value): value is number => value !== null);
   return values.length > 0 ? Math.max(...values) : null;

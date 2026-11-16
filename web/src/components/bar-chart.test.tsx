@@ -5,26 +5,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { BarMessageEnvelope } from "@/api/endpoints/bars";
 import { BarChart } from "@/components/bar-chart";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { expectNoBannedUiSymbols } from "@/test/ui-copy";
 
 function renderChart(ui: React.ReactElement) {
   return render(<TooltipProvider>{ui}</TooltipProvider>);
-}
-
-function expectNoBannedSymbols(scope: HTMLElement) {
-  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
-  while (walker.nextNode()) {
-    const element = walker.currentNode.parentElement;
-    if (
-      !element ||
-      element.closest('[data-raw-evidence="true"]') ||
-      element.closest(".sr-only")
-    ) {
-      continue;
-    }
-    expect(walker.currentNode.textContent, "banned UI separator").not.toMatch(
-      /[·：]/,
-    );
-  }
 }
 
 vi.mock("echarts/core", () => ({
@@ -80,7 +64,7 @@ describe("BarChart accessibility fallbacks", () => {
     expect(
       within(panel).getByRole("button", { name: "最大 Revision Bar 图说明" }),
     ).toBeInTheDocument();
-    expectNoBannedSymbols(panel);
+    expectNoBannedUiSymbols(panel);
     expect(
       within(panel).getAllByText("0.000000000000000001").length,
     ).toBeGreaterThan(0);
@@ -111,7 +95,7 @@ describe("BarChart accessibility fallbacks", () => {
     });
     fireEvent.focus(chart);
 
-    const readout = document.getElementById("bar-chart-readout");
+    const readout = screen.getByRole("status");
     expect(readout).toHaveTextContent(
       "时间 2024-01-01T00:01:00.000000000Z",
     );

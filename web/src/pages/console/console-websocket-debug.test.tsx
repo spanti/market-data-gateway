@@ -12,6 +12,7 @@ import type { AdminSession } from "@/runtime/session";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { WebSocketDebugView } from "@/pages/console/WebSocketDebugView";
 import { WsDebugSession } from "@/pages/console/ws-debug-session";
+import { expectNoBannedUiSymbols } from "@/test/ui-copy";
 
 const envelope = {
   schema_version: 1,
@@ -169,33 +170,6 @@ async function connect(
   act(() => {
     sockets[0]?.fireOpen();
   });
-}
-
-/**
- * UI-generated copy must not contain the banned separators. Raw evidence
- * regions render exact text and are explicitly exempt.
- */
-function bannedUiCopy(container: HTMLElement): string[] {
-  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
-  const hits: string[] = [];
-  while (walker.nextNode()) {
-    const node = walker.currentNode;
-    const element = node.parentElement;
-    if (!element) {
-      continue;
-    }
-    if (element.closest('[data-raw-evidence="true"]')) {
-      continue;
-    }
-    if (element.closest(".sr-only")) {
-      continue;
-    }
-    const text = node.textContent ?? "";
-    if (text.includes("·") || text.includes("：")) {
-      hits.push(text.trim());
-    }
-  }
-  return hits;
 }
 
 beforeEach(() => {
@@ -639,7 +613,7 @@ describe("WebSocket Debug raw detail", () => {
     expect(detail).toHaveAttribute("data-raw-evidence", "true");
     expect(detail.textContent).toContain('"note": "a·b：c"');
 
-    expect(bannedUiCopy(container)).toEqual([]);
+    expectNoBannedUiSymbols(container);
   });
 
   it("never persists messages in web storage", async () => {

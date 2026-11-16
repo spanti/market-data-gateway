@@ -54,15 +54,9 @@ function futureSession() {
 }
 
 function consoleHeader() {
-  const heading = screen.getByRole("heading", {
-    name: "Gateway Console",
-    level: 1,
-  });
-  const header = heading.closest('[data-slot="page-header"]');
-  if (!(header instanceof HTMLElement)) {
-    throw new Error("Console page header not found");
-  }
-  return within(header);
+  return within(
+    screen.getByRole("group", { name: "Gateway Console" }),
+  );
 }
 
 async function findConsoleHeader() {

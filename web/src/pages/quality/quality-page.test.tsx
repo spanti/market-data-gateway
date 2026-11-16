@@ -4,6 +4,7 @@ import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it } from "vitest";
 import { renderApp } from "@/test/render-app";
 import { server } from "@/test/server";
+import { expectNoBannedUiSymbols } from "@/test/ui-copy";
 import { resetRetryAfter } from "@/runtime/retry-after";
 
 afterEach(() => {
@@ -70,14 +71,6 @@ function collectorStatus(gaps: unknown[]) {
   };
 }
 
-function uiCopyWithoutRawEvidence(): string {
-  const clone = document.body.cloneNode(true) as HTMLElement;
-  clone
-    .querySelectorAll('[data-raw-evidence="true"], .sr-only')
-    .forEach((node) => node.remove());
-  return clone.textContent ?? "";
-}
-
 describe("Quality & Backfill — Collector current snapshot", () => {
   it("labels gap_unrecoverable as a process-local snapshot lost on restart", async () => {
     server.use(
@@ -122,17 +115,17 @@ describe("Quality & Backfill — Collector current snapshot", () => {
         name: "Unrecoverable Backfill Gap 当前快照说明",
       }),
     ).toBeInTheDocument();
-    expect(
-      document.querySelectorAll('[data-slot="card"]').length,
-    ).toBeGreaterThanOrEqual(2);
-    // Status is icon plus text, never color alone.
-    expect(
-      document.querySelectorAll('[data-slot="status-badge"] svg').length,
-    ).toBeGreaterThan(0);
+    for (const name of [
+      "Unrecoverable Backfill Gap 当前快照",
+      "持久 Unrecoverable Backfill Gap",
+      "Backfill Job",
+    ]) {
+      expect(screen.getByRole("region", { name })).toBeInTheDocument();
+    }
+    // Status is icon plus text, never color alone: the status text is visible.
+    expect(screen.getByText("Collector 进程内快照")).toBeInTheDocument();
 
-    const copy = uiCopyWithoutRawEvidence();
-    expect(copy).not.toContain("·");
-    expect(copy).not.toContain("：");
+    expectNoBannedUiSymbols();
   });
 
   it("shows a real loading state and never reports an empty snapshot early", async () => {
@@ -345,7 +338,11 @@ describe("Quality & Backfill — persistent gaps (Admin API contract target)", (
       name: "持久 Unrecoverable Backfill Gap",
     });
     expect(await within(region).findByText("gap_open_1")).toBeInTheDocument();
-    expect(region).toHaveAttribute("data-slot", "card");
+    expect(
+      within(region).getByRole("heading", {
+        name: "持久 Unrecoverable Backfill Gap",
+      }),
+    ).toBeInTheDocument();
     expect(
       within(region).getByRole("button", {
         name: "持久 Unrecoverable Backfill Gap 说明",
@@ -527,7 +524,9 @@ describe("Quality & Backfill — Backfill Job state machine (Admin API contract 
 
     const region = await screen.findByRole("region", { name: "Backfill Job" });
     await within(region).findByText("bf_queued");
-    expect(region).toHaveAttribute("data-slot", "card");
+    expect(
+      within(region).getByRole("heading", { name: "Backfill Job" }),
+    ).toBeInTheDocument();
     expect(
       within(region).getByRole("button", { name: "Backfill Job 说明" }),
     ).toBeInTheDocument();
@@ -636,9 +635,7 @@ describe("Quality & Backfill — Backfill Job state machine (Admin API contract 
     expect(raw).toHaveAttribute("data-raw-evidence", "true");
     expect(within(region).getByText(/已中断/)).toBeInTheDocument();
 
-    const copy = uiCopyWithoutRawEvidence();
-    expect(copy).not.toContain("·");
-    expect(copy).not.toContain("：");
+    expectNoBannedUiSymbols();
   });
 
   it("does not fabricate jobs when the admin list is empty", async () => {
@@ -904,9 +901,7 @@ describe("Quality & Backfill — create Backfill Job (Admin API contract target)
     expect(raw).toHaveAttribute("data-raw-evidence", "true");
     expect(within(region).getByText(/req_raw_create/)).toBeInTheDocument();
 
-    const copy = uiCopyWithoutRawEvidence();
-    expect(copy).not.toContain("·");
-    expect(copy).not.toContain("：");
+    expectNoBannedUiSymbols();
   });
 
   it("honours a 429 Retry-After and blocks further writes", async () => {
@@ -1155,9 +1150,7 @@ describe("Quality & Backfill — cancel and retry (Admin API contract target)", 
       within(region).queryByText(/取消请求已接受/),
     ).not.toBeInTheDocument();
 
-    const copy = uiCopyWithoutRawEvidence();
-    expect(copy).not.toContain("·");
-    expect(copy).not.toContain("：");
+    expectNoBannedUiSymbols();
   });
 
   it("retries as a new linked Job without rewriting the old one", async () => {

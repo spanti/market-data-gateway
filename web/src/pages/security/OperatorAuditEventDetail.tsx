@@ -15,6 +15,7 @@ import {
   AUDIT_RESULT_TONE,
   formatAuditTimestamp,
 } from "@/pages/security/audit-presentation";
+import { IconTile } from "@/components/icon-tile";
 
 function Field({
   label,
@@ -115,9 +116,7 @@ export function OperatorAuditEventDetail({
     >
       <CardHeader className="p-5 pb-0">
         <div className="flex min-w-0 items-start gap-2.5">
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-strong">
-            <ShieldCheck className="size-4" aria-hidden="true" />
-          </span>
+          <IconTile icon={ShieldCheck} />
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-1.5">
               <CardTitle>事件详情</CardTitle>

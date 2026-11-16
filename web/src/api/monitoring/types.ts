@@ -10,7 +10,7 @@ export interface TrendSeries {
    * Stable internal metric identity, independent of the display `name`.
    * KPI selection reads this field; display labels may change freely.
    */
-  id?: string;
+  id: string;
   name: string;
   labels?: Record<string, string>;
   points: TrendPoint[];

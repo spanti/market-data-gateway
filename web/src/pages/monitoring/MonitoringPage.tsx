@@ -13,16 +13,14 @@ import { FeedFreshnessTable } from "@/components/monitoring/feed-freshness-table
 import {
   ServiceInstanceList,
   type ServiceInstanceRow,
+  type ServiceInstanceSourceKind,
 } from "@/components/monitoring/service-instance-list";
 import { SourcePanel } from "@/components/monitoring/source-panel";
 import type { SourceStatusProps } from "@/components/monitoring/source-status";
 import { TrendChart } from "@/components/monitoring/trend-chart";
 import { UpstreamStatus } from "@/components/monitoring/upstream-status";
 import { UpstreamTable } from "@/components/monitoring/upstream-table";
-import {
-  FreshnessMatrix,
-  type FreshnessRow,
-} from "@/components/freshness-matrix";
+import { FreshnessMatrix } from "@/components/freshness-matrix";
 import { HelpTrigger } from "@/components/help-trigger";
 import {
   MetricCard,
@@ -38,7 +36,9 @@ import {
 import {
   summarizeFeedFreshness,
   toDatasetFreshnessRows,
+  toFeedFreshnessRow,
   toFeedFreshnessView,
+  type FeedFreshnessRow,
 } from "@/lib/freshness";
 import { deriveVenueRows } from "@/lib/venues";
 import {
@@ -210,15 +210,7 @@ export function MonitoringPage() {
   const feedViews = feedReady && collectorHealth
     ? collectorHealth.tracked.map(toFeedFreshnessView)
     : [];
-  const feedRows: FreshnessRow[] = feedViews.map((view) => ({
-    instrumentId: view.instrumentId,
-    feed: view.feed,
-    interval: view.interval as FreshnessRow["interval"],
-    ageS: view.ageS,
-    thresholdS: view.thresholdS,
-    stale: view.tone === "unknown" ? null : view.stale,
-    lastEventTs: view.lastEventTs,
-  }));
+  const feedRows: FeedFreshnessRow[] = feedViews.map(toFeedFreshnessRow);
 
   const feedState: CardState = !sources.directOpsEnabled
     ? "unknown"
@@ -371,6 +363,12 @@ export function MonitoringPage() {
   const readyServices = serviceRows.filter(
     (row) => row.statusState === "ready" && row.ready === true,
   );
+  // Current Contract rows are one process per Service Role. Admin API rows
+  // are concrete Service Instances. Never call one the other.
+  const serviceSourceKind: ServiceInstanceSourceKind =
+    sources.serviceSource.kind === "direct" ? "role" : "instance";
+  const serviceSubject =
+    serviceSourceKind === "role" ? "Service Role" : "Service Instance";
 
   const qpsSeries = chartSeries(trends.qps);
   const latencySeries = chartSeries(trends.latency);
@@ -446,20 +444,20 @@ export function MonitoringPage() {
 
   const serviceSummaryBadge =
     sources.serviceSource.kind === "gap" ? (
-      <StatusBadge tone="warning">Service Instance 需要 Admin API</StatusBadge>
+      <StatusBadge tone="warning">{serviceSubject} 需要 Admin API</StatusBadge>
     ) : serviceState === "error" ? (
-      <StatusBadge tone="warning">Service Instance 状态未知</StatusBadge>
+      <StatusBadge tone="warning">{serviceSubject} 状态未知</StatusBadge>
     ) : serviceState === "loading" ? (
-      <StatusBadge tone="unknown">Service Instance 加载中</StatusBadge>
+      <StatusBadge tone="unknown">{serviceSubject} 加载中</StatusBadge>
     ) : notReadyServices.length > 0 ? (
       <StatusBadge tone="critical" live>
-        {notReadyServices.length} 个 Service Instance 未就绪
+        {notReadyServices.length} 个 {serviceSubject} 未就绪
       </StatusBadge>
     ) : serviceRows.length === 0 ? (
-      <StatusBadge tone="unknown">Service Instance 无运行实例</StatusBadge>
+      <StatusBadge tone="unknown">{serviceSubject} 无运行实例</StatusBadge>
     ) : (
       <StatusBadge tone="good" live>
-        {readyServices.length} / {serviceRows.length} Service Instance Ready
+        {readyServices.length} / {serviceRows.length} {serviceSubject} Ready
       </StatusBadge>
     );
 
@@ -558,16 +556,7 @@ export function MonitoringPage() {
   const alerts: MonitoringAlert[] = deriveMonitoringAlerts({
     directOpsEnabled: sources.directOpsEnabled,
     opsGapReason: sources.opsGapReason,
-    staleFeeds: feedViews
-      .filter((view) => view.stale)
-      .map((view) => ({
-        instrumentId: view.instrumentId,
-        feed: view.feed,
-        interval: view.interval,
-        ageS: view.ageS,
-        thresholdS: view.thresholdS,
-        lastEventTs: view.lastEventTs,
-      })),
+    staleFeeds: feedRows.filter((row) => row.stale),
     staleVenues: venueRows
       .filter((row) => row.staleCount > 0)
       .map((row) => ({ venue: row.venue, staleCount: row.staleCount })),
@@ -833,14 +822,15 @@ export function MonitoringPage() {
           />
           <ServiceInstanceList
             className="xl:col-span-5"
+            sourceKind={serviceSourceKind}
             rows={serviceRows}
             state={serviceState}
-            unknownReason={sources.opsGapReason ?? "Service Instance 能力未知"}
+            unknownReason={sources.opsGapReason ?? `${serviceSubject} 能力未知`}
             lastSuccessAt={serviceLastSuccessAt}
             errorMessage={serviceErrorMessage}
             overallStatus={serviceSummaryBadge}
             help={{
-              label: "Service Instance 说明",
+              label: `${serviceSubject} 说明`,
               content:
                 "Service Role 是进程职责 collector/api/replay。Service Instance 是某个 Role 的一个实际运行实例。Current Contract 只暴露每个 Role 的当前进程信息，Admin API 可暴露实例 ID。没有集群、Leader 或分片推断。",
             }}

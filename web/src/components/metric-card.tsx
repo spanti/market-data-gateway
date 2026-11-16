@@ -9,6 +9,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { IconTile } from "@/components/icon-tile";
 
 export interface MetricHelp {
   /** Accessible name for the `?` trigger. */
@@ -74,9 +75,7 @@ export function MetricCard({
           ) : null}
         </div>
         {Icon ? (
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-strong">
-            <Icon className="size-4" aria-hidden="true" />
-          </span>
+          <IconTile icon={Icon} />
         ) : null}
       </CardHeader>
       <CardContent className="flex flex-1 flex-col p-0 pt-3">

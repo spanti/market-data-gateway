@@ -12,26 +12,10 @@ import { HttpError } from "@/api/http/types";
 import { CsvDownloadPanel } from "@/components/csv-download-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { classifyExportRange } from "@/lib/export-policy";
+import { expectNoBannedUiSymbols } from "@/test/ui-copy";
 
 function renderPanel(ui: React.ReactElement) {
   return render(<TooltipProvider>{ui}</TooltipProvider>);
-}
-
-function expectNoBannedSymbols(scope: HTMLElement) {
-  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
-  while (walker.nextNode()) {
-    const element = walker.currentNode.parentElement;
-    if (
-      !element ||
-      element.closest('[data-raw-evidence="true"]') ||
-      element.closest(".sr-only")
-    ) {
-      continue;
-    }
-    expect(walker.currentNode.textContent, "banned UI separator").not.toMatch(
-      /[·：]/,
-    );
-  }
 }
 
 vi.mock("@/api/endpoints/bars", async (importOriginal) => {
@@ -193,13 +177,17 @@ describe("CSV download D surface", () => {
     renderPanel(<CsvDownloadPanel query={QUERY} decision={DIRECT} />);
 
     const region = screen.getByRole("region", { name: "CSV 直接下载" });
-    expect(region).toHaveAttribute("data-slot", "card");
+    expect(
+      within(region).getByRole("heading", {
+        name: "小文件 CSV 直接下载",
+      }),
+    ).toBeInTheDocument();
     expect(
       within(region).getByRole("button", {
         name: "小文件 CSV 直接下载说明",
       }),
     ).toBeInTheDocument();
-    expectNoBannedSymbols(region);
+    expectNoBannedUiSymbols(region);
   });
 
   it("marks backend error text as verbatim raw evidence", async () => {
@@ -225,6 +213,6 @@ describe("CSV download D surface", () => {
     expect(screen.getByText(/req-raw-evidence/)).toBeInTheDocument();
 
     const region = screen.getByRole("region", { name: "CSV 直接下载" });
-    expectNoBannedSymbols(region);
+    expectNoBannedUiSymbols(region);
   });
 });

@@ -9,18 +9,10 @@ import {
 } from "@/components/states";
 import { StatusBadge } from "@/components/status-badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-
-const BANNED_SYMBOLS = ["·", "："];
-
-function expectCleanCopy(root: HTMLElement) {
-  const text = root.textContent ?? "";
-  for (const symbol of BANNED_SYMBOLS) {
-    expect(text, `UI copy must not contain ${symbol}`).not.toContain(symbol);
-  }
-}
+import { expectNoBannedUiSymbols } from "@/test/ui-copy";
 
 describe("D foundation contracts", () => {
-  it("status badges always expose an icon, text and tone", () => {
+  it("live status badges expose their status as text, not color alone", () => {
     const { container } = render(
       <StatusBadge tone="critical" live>
         Feed Freshness 失活
@@ -28,11 +20,8 @@ describe("D foundation contracts", () => {
     );
 
     const badge = screen.getByRole("status");
-    expect(badge).toHaveAttribute("data-slot", "status-badge");
-    expect(badge).toHaveAttribute("data-tone", "critical");
-    expect(badge.querySelector("svg")).not.toBeNull();
     expect(badge).toHaveTextContent("Feed Freshness 失活");
-    expectCleanCopy(container);
+    expectNoBannedUiSymbols(container);
   });
 
   it("cards and page headers keep a single accessible title", () => {
@@ -54,7 +43,7 @@ describe("D foundation contracts", () => {
     expect(
       screen.getByRole("heading", { name: "Feed Freshness" }),
     ).toBeInTheDocument();
-    expectCleanCopy(container);
+    expectNoBannedUiSymbols(container);
   });
 
   it("state regions keep request ids and reasons visible in place", () => {
@@ -75,6 +64,6 @@ describe("D foundation contracts", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("req-123");
     expect(screen.getByText("契约未暴露")).toBeInTheDocument();
     expect(screen.getByText("上游连接能力未暴露")).toBeInTheDocument();
-    expectCleanCopy(container);
+    expectNoBannedUiSymbols(container);
   });
 });

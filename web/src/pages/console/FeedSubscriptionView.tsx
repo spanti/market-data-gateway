@@ -1,90 +1,71 @@
-import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useForm } from "react-hook-form";
-import { z } from "zod";
-import type { CapabilityState } from "@/api/capabilities";
+import { useState, type ReactNode } from "react";
 import {
   deleteFeedSubscription,
   fetchFeedSubscriptions,
-  fetchFlowControl,
-  updateApiRateLimit,
   updateFeedSubscription,
-  updateWsSlowConsumer,
 } from "@/api/endpoints/admin-console";
-import type {
-  FeedSubscription,
-  FlowControlResponse,
-} from "@/api/endpoints/admin";
+import type { FeedSubscription } from "@/api/endpoints/admin";
 import { HttpError } from "@/api/http/types";
 import { ConfirmDialog } from "@/components/confirm-dialog";
-import { DisabledAction, DisabledReason } from "@/components/disabled-reason";
+import { DisabledReason } from "@/components/disabled-reason";
 import { HelpTrigger } from "@/components/help-trigger";
 import {
   EmptyState,
-  ErrorState,
   LoadingState,
   UnknownState,
 } from "@/components/states";
 import { StatusBadge, type StatusTone } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { formatUtcTimestamp } from "@/lib/format";
-import { errorText } from "@/lib/errors";
+import {
+  CardTitleWithHelp,
+  QueryFailure,
+  UnavailableActions,
+} from "@/pages/console/console-parts";
 import {
   buildManualMergeDraft,
   conflictFromError,
   describeFeedSubscription,
-  describeFlowControl,
   FEED_DELETION_HISTORY_NOTE,
   feedSubscriptionUpdateBody,
   type FeedConflictState,
   type FeedSubscriptionView as FeedSubscriptionPresentation,
 } from "@/pages/console/feed-subscription";
 import {
-  adminCapabilityAvailability,
+  adminCapabilityReason,
   CAPABILITY_KEYS,
-  type CapabilityKey,
 } from "@/runtime/capability-gates";
+import {
+  capabilityModeKind,
+  capabilityModePresentation,
+} from "@/runtime/mode-presentation";
 import type { DisabledReason as DisabledReasonValue } from "@/runtime/permissions";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
 import { useActionReason } from "@/runtime/use-permission";
 import { useRetryAfter } from "@/runtime/use-retry-after";
 
 /**
- * Feed Subscription + flow control console.
+ * Feed Subscription console.
  *
- * CONTRACT TARGET: these Admin API resources do not exist in the current
+ * CONTRACT TARGET: this Admin API resource does not exist in the current
  * backend. Current Contract renders a disabled area with visible reasons and
  * never a fabricated subscription table.
  *
- * Desired, Observed, Drift and Last Error stay separate groups in every
- * state. A 409 stops the write and requires a manual merge from a refreshed
- * version; nothing is ever overwritten automatically.
+ * Desired, Observed, Drift and Last Error stay separate groups in every state.
+ * A 409 stops the write and requires a manual merge from a refreshed version;
+ * nothing is ever overwritten automatically.
+ *
+ * Flow-control editing is a sibling resource and lives in
+ * `flow-control-section.tsx`.
  */
 
 const FEED_QUERY_KEY = ["console", "feed-subscriptions"] as const;
-const FLOW_QUERY_KEY = ["console", "flow-control"] as const;
 
 const FEED_HELP =
   "Feed Subscription 是采集配置。Desired 是已接受的目标，Observed 是 Collector 最近确认的状态，Drift 比较两者，Last Error 保留最近失败的原始 code、message、时间与 Request ID。遇到 409 必须刷新后人工合并，不会自动覆盖他人修改。删除只停止后续采集。";
-
-const FLOW_HELP =
-  "API Rate Limit 与 WebSocket Slow Consumer 是两个分别版本化、分别审计的资源。没有通用阈值，也不控制 Venue、Collector 写队列或存储背压。";
-
-const API_RATE_LIMIT_HELP =
-  "enabled 开启或关闭 API 限流。requests_per_second 是每秒请求数。burst 是允许的突发请求数。max_ws_sessions_per_ip 是每个 IP 允许的最大 WebSocket 会话数。写入需要 Admin API 与 Operator 或 SuperAdmin 角色。";
-
-const WS_SLOW_CONSUMER_HELP =
-  "enabled 开启或关闭慢消费者保护。queue_size 是每个会话保留的最大待发送消息数。lag_notice_interval_ms 是发送 lag_notice 的间隔，单位毫秒。需要重启 Service Instance 后生效。";
 
 const GROUP_HELP = {
   desired:
@@ -96,25 +77,6 @@ const GROUP_HELP = {
   lastError:
     "Last Error 保留最近一次应用失败的原始 code、message、时间与 Request ID。message 原样展示。",
 } as const;
-
-function adminCapabilityReason(
-  capability: CapabilityState | null,
-  key: CapabilityKey,
-): DisabledReasonValue | null {
-  const availability = adminCapabilityAvailability(capability, key);
-  return availability.kind === "disabled" ? availability.reason : null;
-}
-
-function rawErrorMessage(error: unknown, fallback: string): string {
-  if (error instanceof HttpError) {
-    return `${error.code}: ${error.message}`;
-  }
-  return errorText(error, fallback);
-}
-
-function errorRequestId(error: unknown): string | null {
-  return error instanceof HttpError ? error.requestId : null;
-}
 
 function desiredTone(view: FeedSubscriptionPresentation): StatusTone {
   if (view.desired.deleted) {
@@ -136,91 +98,6 @@ function observedTone(state: string): StatusTone {
     default:
       return "unknown";
   }
-}
-
-function QueryFailure({
-  error,
-  fallback,
-  onRetry,
-}: {
-  error: unknown;
-  fallback: string;
-  onRetry: () => void;
-}) {
-  return (
-    <ErrorState
-      description={
-        <span data-raw-evidence="true" className="break-words">
-          {rawErrorMessage(error, fallback)}
-        </span>
-      }
-      requestId={errorRequestId(error)}
-      onRetry={onRetry}
-    />
-  );
-}
-
-function CardTitleWithHelp({
-  title,
-  helpLabel,
-  help,
-}: {
-  title: string;
-  helpLabel: string;
-  help: ReactNode;
-}) {
-  return (
-    <div className="flex min-w-0 items-center gap-2">
-      <CardTitle>{title}</CardTitle>
-      <HelpTrigger label={helpLabel} content={help} side="bottom" />
-    </div>
-  );
-}
-
-function UnavailableActions({
-  label,
-  readReason,
-  writeReason,
-}: {
-  label: string;
-  readReason: DisabledReasonValue | null;
-  writeReason: DisabledReasonValue | null;
-}) {
-  return (
-    <div className="mt-3 flex flex-wrap items-center gap-2">
-      <DisabledAction label={`读取 ${label}`} reason={readReason} />
-      <DisabledAction label={`修改 ${label}`} reason={writeReason} />
-    </div>
-  );
-}
-
-function FlowResourceUnavailable({
-  title,
-  help,
-  readReason,
-  writeReason,
-}: {
-  title: string;
-  help: ReactNode;
-  readReason: DisabledReasonValue | null;
-  writeReason: DisabledReasonValue | null;
-}) {
-  return (
-    <div className="rounded-lg border border-card-border bg-surface-sunken p-3">
-      <div className="flex min-w-0 items-center gap-2">
-        <h3 className="text-sm font-semibold text-foreground">{title}</h3>
-        <HelpTrigger label={`${title} 说明`} content={help} side="top" />
-      </div>
-      <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-        独立版本化与审计，不与其他流控设置共用阈值。
-      </p>
-      <UnavailableActions
-        label={title}
-        readReason={readReason}
-        writeReason={writeReason}
-      />
-    </div>
-  );
 }
 
 function FeedGroup({
@@ -432,24 +309,18 @@ export function FeedSubscriptionView() {
 
   const readReason = useActionReason("feed.subscription.view");
   const writeReason = useActionReason("feed.subscription.write");
-  const flowReadReason = useActionReason("flow.control.view");
-  const flowWriteReason = useActionReason("flow.control.write");
+
+  const modeKind = capabilityModeKind(capability);
+  const isAdmin = modeKind === "admin-api";
+  const discovering = modeKind === "discovering";
+  const capabilityUnknown = modeKind === "capabilities-unknown";
 
   const feedCapabilityReason = adminCapabilityReason(
     capability,
     CAPABILITY_KEYS.feedSubscription,
   );
-  const flowCapabilityReason = adminCapabilityReason(
-    capability,
-    CAPABILITY_KEYS.feedFlowControl,
-  );
-
-  const isAdmin = capability?.mode === "admin-api";
-  const discovering = capability === null;
   const feedReadReason = readReason ?? feedCapabilityReason;
-  const flowReadBlockReason = flowReadReason ?? flowCapabilityReason;
   const canReadFeed = isAdmin && feedReadReason === null;
-  const canReadFlow = isAdmin && flowReadBlockReason === null;
   const stoppedWriteReason: DisabledReasonValue | null = writesStopped
     ? {
         code: "requires-login",
@@ -458,21 +329,12 @@ export function FeedSubscriptionView() {
     : null;
   const feedWriteBlockReason =
     stoppedWriteReason ?? writeReason ?? retryAfter.reason ?? feedCapabilityReason;
-  const flowWriteBlockReason =
-    stoppedWriteReason ?? flowWriteReason ?? retryAfter.reason ?? flowCapabilityReason;
   const feedRoleReason = writeReason ?? feedCapabilityReason;
-  const flowRoleReason = flowWriteReason ?? flowCapabilityReason;
 
   const subscriptionsQuery = useQuery({
     queryKey: FEED_QUERY_KEY,
     queryFn: ({ signal }) => fetchFeedSubscriptions(signal),
     enabled: canReadFeed,
-  });
-
-  const flowQuery = useQuery({
-    queryKey: FLOW_QUERY_KEY,
-    queryFn: ({ signal }) => fetchFlowControl(signal),
-    enabled: canReadFlow,
   });
 
   const [conflict, setConflict] = useState<{
@@ -587,24 +449,13 @@ export function FeedSubscriptionView() {
     );
   };
 
-  const flow = flowQuery.data ?? null;
-  const flowView = flow ? describeFlowControl(flow) : null;
-
-  const feedStatusLabel = discovering
-    ? "发现能力中"
-    : isAdmin
-      ? "Admin API 契约目标"
-      : capability?.mode === "capabilities-unknown"
-        ? "能力未知"
-        : "需要 Admin API";
-
-  const feedStatusTone: StatusTone = discovering
-    ? "unknown"
-    : isAdmin
-      ? "info"
-      : capability?.mode === "capabilities-unknown"
-        ? "warning"
-        : "unknown";
+  const feedMode = capabilityModePresentation(capability, {
+    "current-contract": { label: "需要 Admin API", tone: "unknown" },
+    "admin-api": { label: "Admin API 契约目标", tone: "info" },
+    "capabilities-unknown": { label: "能力未知", tone: "warning" },
+  });
+  const feedStatusLabel = feedMode.label;
+  const feedStatusTone: StatusTone = feedMode.tone;
 
   const conflictPanel = conflict ? (
     <Card
@@ -701,8 +552,6 @@ export function FeedSubscriptionView() {
     </Card>
   ) : null;
 
-  const capabilityUnknown = capability?.mode === "capabilities-unknown";
-
   const feedDependencyCopy = isAdmin
     ? "Admin API 已连接，但当前服务端能力或 Access Role 不允许读取该资源。Desired、Observed、Drift 与 Last Error 只来自真实服务端。"
     : "依赖 Admin API feed_subscription 能力与对应的服务端 Access Role。Current Contract 不伪造订阅表，Desired、Observed、Drift 与 Last Error 必须来自真实服务端。";
@@ -763,79 +612,6 @@ export function FeedSubscriptionView() {
     </div>
   );
 
-  const flowContent = !canReadFlow ? (
-    discovering ? (
-      <LoadingState label="正在发现运行时能力…" />
-    ) : (
-      <>
-        {capabilityUnknown ? (
-          <UnknownState
-            cause="failed"
-            reason="运行时能力发现失败，无法确认 API Rate Limit 与 WebSocket Slow Consumer 的读写能力。"
-          />
-        ) : (
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            API Rate Limit 与 WebSocket Slow Consumer 分别依赖 Admin API 能力与对应的服务端
-            Access Role。没有通用阈值。
-          </p>
-        )}
-        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <FlowResourceUnavailable
-            title="API Rate Limit"
-            help={API_RATE_LIMIT_HELP}
-            readReason={flowReadBlockReason}
-            writeReason={flowWriteBlockReason}
-          />
-          <FlowResourceUnavailable
-            title="WebSocket Slow Consumer"
-            help={WS_SLOW_CONSUMER_HELP}
-            readReason={flowReadBlockReason}
-            writeReason={flowWriteBlockReason}
-          />
-        </div>
-      </>
-    )
-  ) : flowQuery.isPending ? (
-    <LoadingState label="正在加载流控配置…" />
-  ) : flowQuery.isError || !flowView || !flow ? (
-    <QueryFailure
-      error={flowQuery.error}
-      fallback="无法读取流控配置"
-      onRetry={() => void flowQuery.refetch()}
-    />
-  ) : (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-      <FlowControlEditor
-        resource="api_rate_limit"
-        title="API Rate Limit"
-        help={API_RATE_LIMIT_HELP}
-        version={flowView.apiRateLimit.version}
-        applyNote={flowView.apiRateLimit.applyNote}
-        observedVersion={flowView.apiRateLimit.observedVersion}
-        inSync={flowView.apiRateLimit.inSync}
-        writeReason={flowWriteBlockReason}
-        retryAfterReason={retryAfter.reason}
-        csrfToken={csrfToken}
-        initial={flow.api_rate_limit}
-        onSaved={() => void queryClient.invalidateQueries({ queryKey: FLOW_QUERY_KEY })}
-      />
-      <FlowControlEditor
-        resource="ws_slow_consumer"
-        title="WebSocket Slow Consumer"
-        help={WS_SLOW_CONSUMER_HELP}
-        version={flowView.wsSlowConsumer.version}
-        applyNote={flowView.wsSlowConsumer.applyNote}
-        observedVersion={flowView.wsSlowConsumer.observedVersion}
-        inSync={flowView.wsSlowConsumer.inSync}
-        writeReason={flowWriteBlockReason}
-        retryAfterReason={retryAfter.reason}
-        csrfToken={csrfToken}
-        initial={flow.ws_slow_consumer}
-        onSaved={() => void queryClient.invalidateQueries({ queryKey: FLOW_QUERY_KEY })}
-      />
-    </div>
-  );
-
   return (
     <>
       <Card
@@ -890,40 +666,6 @@ export function FeedSubscriptionView() {
         </CardContent>
       </Card>
 
-      <Card role="region" aria-label="Flow Control" className="mt-4">
-        <CardHeader className="p-5 pb-0">
-          <div className="min-w-0">
-            <CardTitleWithHelp
-              title="Flow Control"
-              helpLabel="Flow Control 说明"
-              help={FLOW_HELP}
-            />
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-              API Rate Limit 与 WebSocket Slow Consumer 独立配置，分别版本化与审计。
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {discovering ? (
-              <StatusBadge tone="unknown">发现能力中</StatusBadge>
-            ) : canReadFlow ? (
-              <StatusBadge tone={flowRoleReason ? "unknown" : "good"}>
-                {flowRoleReason ? "当前只读" : "当前可写"}
-              </StatusBadge>
-            ) : (
-              <StatusBadge tone={capabilityUnknown ? "warning" : "unknown"}>
-                {capabilityUnknown ? "能力未知" : "需要 Admin API"}
-              </StatusBadge>
-            )}
-            {canReadFlow && flowQuery.isFetching && !flowQuery.isPending ? (
-              <StatusBadge tone="info" live>
-                正在刷新
-              </StatusBadge>
-            ) : null}
-          </div>
-        </CardHeader>
-        <CardContent className="pt-4">{flowContent}</CardContent>
-      </Card>
-
       <ConfirmDialog
         open={deleteTarget !== null}
         onOpenChange={(open) => {
@@ -946,475 +688,5 @@ export function FeedSubscriptionView() {
         }}
       />
     </>
-  );
-}
-
-const apiRateLimitSchema = z.object({
-  enabled: z.boolean(),
-  requests_per_second: z
-    .number({ invalid_type_error: "请输入数字" })
-    .positive("requests_per_second 必须大于 0"),
-  burst: z
-    .number({ invalid_type_error: "请输入数字" })
-    .int("burst 必须是整数")
-    .min(0, "burst 不能小于 0"),
-  max_ws_sessions_per_ip: z
-    .number({ invalid_type_error: "请输入数字" })
-    .int("max_ws_sessions_per_ip 必须是整数")
-    .min(1, "max_ws_sessions_per_ip 至少为 1"),
-});
-
-const wsSlowConsumerSchema = z.object({
-  enabled: z.boolean(),
-  queue_size: z
-    .number({ invalid_type_error: "请输入数字" })
-    .int("queue_size 必须是整数")
-    .min(1, "queue_size 至少为 1"),
-  lag_notice_interval_ms: z
-    .number({ invalid_type_error: "请输入数字" })
-    .int("lag_notice_interval_ms 必须是整数")
-    .min(1, "lag_notice_interval_ms 至少为 1"),
-});
-
-type ApiRateLimitForm = z.infer<typeof apiRateLimitSchema>;
-type WsSlowConsumerForm = z.infer<typeof wsSlowConsumerSchema>;
-
-function FieldError({
-  id,
-  message,
-}: {
-  id: string;
-  message: string | undefined;
-}) {
-  if (!message) {
-    return null;
-  }
-  return (
-    <p id={id} role="alert" className="text-[11px] text-status-critical-fg">
-      {message}
-    </p>
-  );
-}
-
-function InlineMutationResult({
-  saving,
-  success,
-  error,
-}: {
-  saving: boolean;
-  success: boolean;
-  error: unknown;
-}) {
-  if (saving) {
-    return (
-      <span role="status" className="text-[11px] text-muted-foreground">
-        正在保存…
-      </span>
-    );
-  }
-  if (error !== null) {
-    return (
-      <div
-        role="alert"
-        className="mt-2 w-full rounded-md bg-status-critical-bg px-3 py-2 text-[11px] text-muted-foreground"
-      >
-        <div className="font-medium text-status-critical-fg">保存失败</div>
-        <span data-raw-evidence="true" className="break-words">
-          {rawErrorMessage(error, "保存失败")}
-        </span>
-        {errorRequestId(error) ? (
-          <div className="mt-1 font-mono">
-            Request ID {errorRequestId(error)}
-          </div>
-        ) : null}
-      </div>
-    );
-  }
-  if (success) {
-    return (
-      <span role="status" className="text-[11px] text-status-good-fg">
-        保存请求已提交，等待 Observed 确认。
-      </span>
-    );
-  }
-  return null;
-}
-
-function LabelWithUnit({
-  htmlFor,
-  label,
-  unit,
-}: {
-  htmlFor: string;
-  label: string;
-  unit: string;
-}) {
-  return (
-    <div className="flex items-baseline justify-between gap-2">
-      <Label htmlFor={htmlFor}>{label}</Label>
-      <span className="text-[11px] text-faint-foreground">{unit}</span>
-    </div>
-  );
-}
-
-function ApiRateLimitEditor({
-  version,
-  csrfToken,
-  initial,
-  readOnlyReason,
-  onSaved,
-}: {
-  version: number;
-  csrfToken: string | null;
-  initial: FlowControlResponse["api_rate_limit"];
-  readOnlyReason: DisabledReasonValue | null;
-  onSaved: () => void;
-}) {
-  const defaultValues = useMemo<ApiRateLimitForm>(
-    () => ({
-      enabled: initial.enabled,
-      requests_per_second: initial.requests_per_second,
-      burst: initial.burst,
-      max_ws_sessions_per_ip: initial.max_ws_sessions_per_ip,
-    }),
-    [initial],
-  );
-  const {
-    register,
-    handleSubmit,
-    reset,
-    formState: { errors },
-  } = useForm<ApiRateLimitForm>({
-    resolver: zodResolver(apiRateLimitSchema),
-    mode: "onSubmit",
-    defaultValues,
-  });
-
-  useEffect(() => {
-    reset(defaultValues);
-  }, [defaultValues, reset]);
-
-  const mutation = useMutation({
-    mutationFn: (form: ApiRateLimitForm) =>
-      updateApiRateLimit(form, version, csrfToken),
-    onSuccess: onSaved,
-  });
-  const readOnly = readOnlyReason !== null;
-  const saving = mutation.isPending;
-
-  return (
-    <form
-      onSubmit={handleSubmit((values) => {
-        if (!readOnly) {
-          mutation.mutate(values);
-        }
-      })}
-      noValidate
-    >
-      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <label className="col-span-full inline-flex items-center gap-2 text-xs">
-          <input
-            type="checkbox"
-            disabled={readOnly}
-            {...register("enabled")}
-          />
-          启用此资源
-        </label>
-        <div className="flex flex-col gap-1">
-          <LabelWithUnit
-            htmlFor="api-rps"
-            label="requests_per_second"
-            unit="req/s"
-          />
-          <Input
-            id="api-rps"
-            type="number"
-            step="any"
-            disabled={readOnly}
-            aria-invalid={Boolean(errors.requests_per_second)}
-            aria-describedby={
-              errors.requests_per_second ? "api-rps-error" : undefined
-            }
-            {...register("requests_per_second", { valueAsNumber: true })}
-          />
-          <FieldError
-            id="api-rps-error"
-            message={errors.requests_per_second?.message}
-          />
-        </div>
-        <div className="flex flex-col gap-1">
-          <LabelWithUnit htmlFor="api-burst" label="burst" unit="requests" />
-          <Input
-            id="api-burst"
-            type="number"
-            step="1"
-            disabled={readOnly}
-            aria-invalid={Boolean(errors.burst)}
-            aria-describedby={errors.burst ? "api-burst-error" : undefined}
-            {...register("burst", { valueAsNumber: true })}
-          />
-          <FieldError id="api-burst-error" message={errors.burst?.message} />
-        </div>
-        <div className="col-span-full flex flex-col gap-1">
-          <LabelWithUnit
-            htmlFor="api-ws-sessions"
-            label="max_ws_sessions_per_ip"
-            unit="sessions"
-          />
-          <Input
-            id="api-ws-sessions"
-            type="number"
-            step="1"
-            disabled={readOnly}
-            aria-invalid={Boolean(errors.max_ws_sessions_per_ip)}
-            aria-describedby={
-              errors.max_ws_sessions_per_ip
-                ? "api-ws-sessions-error"
-                : undefined
-            }
-            {...register("max_ws_sessions_per_ip", { valueAsNumber: true })}
-          />
-          <FieldError
-            id="api-ws-sessions-error"
-            message={errors.max_ws_sessions_per_ip?.message}
-          />
-        </div>
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button
-          type="submit"
-          size="sm"
-          variant="outline"
-          disabled={readOnly || saving}
-          aria-describedby={
-            readOnlyReason ? "flow-api_rate_limit-reason" : undefined
-          }
-        >
-          保存 API Rate Limit
-        </Button>
-        <DisabledReason
-          id="flow-api_rate_limit-reason"
-          reason={readOnlyReason}
-        />
-        <InlineMutationResult
-          saving={saving}
-          success={mutation.isSuccess}
-          error={mutation.isError ? mutation.error : null}
-        />
-      </div>
-    </form>
-  );
-}
-
-function WsSlowConsumerEditor({
-  version,
-  csrfToken,
-  initial,
-  readOnlyReason,
-  onSaved,
-}: {
-  version: number;
-  csrfToken: string | null;
-  initial: FlowControlResponse["ws_slow_consumer"];
-  readOnlyReason: DisabledReasonValue | null;
-  onSaved: () => void;
-}) {
-  const defaultValues = useMemo<WsSlowConsumerForm>(
-    () => ({
-      enabled: initial.enabled,
-      queue_size: initial.queue_size,
-      lag_notice_interval_ms: initial.lag_notice_interval_ms,
-    }),
-    [initial],
-  );
-  const {
-    register,
-    handleSubmit,
-    reset,
-    formState: { errors },
-  } = useForm<WsSlowConsumerForm>({
-    resolver: zodResolver(wsSlowConsumerSchema),
-    mode: "onSubmit",
-    defaultValues,
-  });
-
-  useEffect(() => {
-    reset(defaultValues);
-  }, [defaultValues, reset]);
-
-  const mutation = useMutation({
-    mutationFn: (form: WsSlowConsumerForm) =>
-      updateWsSlowConsumer(form, version, csrfToken),
-    onSuccess: onSaved,
-  });
-  const readOnly = readOnlyReason !== null;
-  const saving = mutation.isPending;
-
-  return (
-    <form
-      onSubmit={handleSubmit((values) => {
-        if (!readOnly) {
-          mutation.mutate(values);
-        }
-      })}
-      noValidate
-    >
-      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <label className="col-span-full inline-flex items-center gap-2 text-xs">
-          <input
-            type="checkbox"
-            disabled={readOnly}
-            {...register("enabled")}
-          />
-          启用此资源
-        </label>
-        <div className="flex flex-col gap-1">
-          <LabelWithUnit htmlFor="ws-queue-size" label="queue_size" unit="messages" />
-          <Input
-            id="ws-queue-size"
-            type="number"
-            step="1"
-            disabled={readOnly}
-            aria-invalid={Boolean(errors.queue_size)}
-            aria-describedby={
-              errors.queue_size ? "ws-queue-size-error" : undefined
-            }
-            {...register("queue_size", { valueAsNumber: true })}
-          />
-          <FieldError
-            id="ws-queue-size-error"
-            message={errors.queue_size?.message}
-          />
-        </div>
-        <div className="flex flex-col gap-1">
-          <LabelWithUnit
-            htmlFor="ws-lag-ms"
-            label="lag_notice_interval_ms"
-            unit="ms"
-          />
-          <Input
-            id="ws-lag-ms"
-            type="number"
-            step="1"
-            disabled={readOnly}
-            aria-invalid={Boolean(errors.lag_notice_interval_ms)}
-            aria-describedby={
-              errors.lag_notice_interval_ms
-                ? "ws-lag-ms-error"
-                : undefined
-            }
-            {...register("lag_notice_interval_ms", { valueAsNumber: true })}
-          />
-          <FieldError
-            id="ws-lag-ms-error"
-            message={errors.lag_notice_interval_ms?.message}
-          />
-        </div>
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button
-          type="submit"
-          size="sm"
-          variant="outline"
-          disabled={readOnly || saving}
-          aria-describedby={
-            readOnlyReason ? "flow-ws_slow_consumer-reason" : undefined
-          }
-        >
-          保存 WebSocket Slow Consumer
-        </Button>
-        <DisabledReason
-          id="flow-ws_slow_consumer-reason"
-          reason={readOnlyReason}
-        />
-        <InlineMutationResult
-          saving={saving}
-          success={mutation.isSuccess}
-          error={mutation.isError ? mutation.error : null}
-        />
-      </div>
-    </form>
-  );
-}
-
-function FlowControlEditor({
-  resource,
-  title,
-  help,
-  version,
-  applyNote,
-  observedVersion,
-  inSync,
-  writeReason,
-  retryAfterReason,
-  csrfToken,
-  initial,
-  onSaved,
-}: {
-  resource: "api_rate_limit" | "ws_slow_consumer";
-  title: string;
-  help: ReactNode;
-  version: number;
-  applyNote: string;
-  observedVersion: number;
-  inSync: boolean;
-  writeReason: DisabledReasonValue | null;
-  retryAfterReason: DisabledReasonValue | null;
-  csrfToken: string | null;
-  initial: FlowControlResponse["api_rate_limit"] | FlowControlResponse["ws_slow_consumer"];
-  onSaved: () => void;
-}) {
-  const readOnlyReason = writeReason ?? retryAfterReason;
-
-  return (
-    <Card
-      role="group"
-      aria-label={title}
-      data-testid={`flow-${resource.replaceAll("_", "-")}`}
-      className="bg-surface-sunken shadow-none"
-    >
-      <div className="flex flex-wrap items-start justify-between gap-2 p-4 pb-0">
-        <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-2">
-            <h3 className="text-sm font-semibold text-foreground">{title}</h3>
-            <HelpTrigger label={`${title} 说明`} content={help} side="top" />
-          </div>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-            <StatusBadge tone={inSync ? "good" : "warning"}>
-              {inSync ? "已同步" : "存在漂移"}
-            </StatusBadge>
-            <span>Desired 版本 {version}</span>
-            <span>Observed 版本 {observedVersion}</span>
-          </div>
-          <p className="mt-1 text-[11px] leading-relaxed text-faint-foreground">
-            {applyNote}
-          </p>
-        </div>
-      </div>
-
-      <div className="p-4 pt-3">
-        {resource === "api_rate_limit" && "requests_per_second" in initial ? (
-          <ApiRateLimitEditor
-            version={version}
-            csrfToken={csrfToken}
-            initial={initial}
-            readOnlyReason={readOnlyReason}
-            onSaved={onSaved}
-          />
-        ) : null}
-
-        {resource === "ws_slow_consumer" && "queue_size" in initial ? (
-          <WsSlowConsumerEditor
-            version={version}
-            csrfToken={csrfToken}
-            initial={initial}
-            readOnlyReason={readOnlyReason}
-            onSaved={onSaved}
-          />
-        ) : null}
-      </div>
-    </Card>
   );
 }

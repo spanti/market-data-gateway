@@ -65,7 +65,10 @@ describe("monitoring in-page alerts", () => {
     const alerts = deriveMonitoringAlerts({
       ...base,
       staleVenues: [{ venue: "venue-a", staleCount: 2 }],
-      notReadyServices: [{ role: "collector", reason: "starting" }],
+      notReadyServices: [
+        { role: "collector", reason: "starting" },
+        { role: "api", instanceId: "api-2", reason: "draining" },
+      ],
       capabilityGaps: [
         {
           title: "Feed Freshness 能力未知",
@@ -76,12 +79,14 @@ describe("monitoring in-page alerts", () => {
 
     expect(alerts.map((alert) => alert.title)).toEqual([
       "上游 venue-a 有 Feed 失活",
-      "Service Instance collector 未就绪",
+      "Service Role collector 未就绪",
+      "Service Instance api-2 未就绪",
       "Feed Freshness 能力未知",
     ]);
     expect(alerts[0]?.tone).toBe("warning");
     expect(alerts[1]?.tone).toBe("warning");
-    expect(alerts[2]?.tone).toBe("info");
+    expect(alerts[2]?.tone).toBe("warning");
+    expect(alerts[3]?.tone).toBe("info");
   });
 
   it("invents no alert when every loaded condition is healthy", () => {

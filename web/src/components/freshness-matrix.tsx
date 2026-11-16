@@ -13,18 +13,9 @@ import {
 import { StatusBadge } from "@/components/status-badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatUtcDateTime } from "@/lib/format";
-import type { BarInterval } from "@/lib/time-range";
+import type { FeedFreshnessRow } from "@/lib/freshness";
 import { cn } from "@/lib/utils";
-
-export interface FreshnessRow {
-  instrumentId: string;
-  feed: string;
-  interval: BarInterval;
-  ageS: number | null;
-  thresholdS: number | null;
-  stale: boolean | null;
-  lastEventTs?: string | null;
-}
+import { IconTile } from "@/components/icon-tile";
 
 export interface FreshnessMatrixHelp {
   label: string;
@@ -37,7 +28,7 @@ export interface FreshnessMatrixProps {
   description?: React.ReactNode;
   help?: FreshnessMatrixHelp;
   overallStatus?: React.ReactNode;
-  rows: FreshnessRow[];
+  rows: FeedFreshnessRow[];
   /** Overall source state. Unknown is a real capability gap. */
   state?: "loading" | "ready" | "error" | "unknown";
   unknownReason?: React.ReactNode;
@@ -53,7 +44,7 @@ function formatSeconds(value: number | null): string {
   return `${Math.round(value)}s`;
 }
 
-function remainingLabel(row: FreshnessRow): string {
+function remainingLabel(row: FeedFreshnessRow): string {
   if (row.ageS === null || row.thresholdS === null) {
     return "阈值未知";
   }
@@ -64,7 +55,7 @@ function remainingLabel(row: FreshnessRow): string {
   return `剩余 ${Math.round(remaining)}s`;
 }
 
-function usagePercent(row: FreshnessRow): number | null {
+function usagePercent(row: FeedFreshnessRow): number | null {
   if (row.ageS === null || row.thresholdS === null || row.thresholdS <= 0) {
     return null;
   }
@@ -108,9 +99,7 @@ export function FreshnessMatrix({
     >
       <CardHeader className="p-0">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-strong">
-            <Database className="size-4" aria-hidden="true" />
-          </span>
+          <IconTile icon={Database} />
           <CardTitle id="feed-freshness-title">{title}</CardTitle>
           {help ? (
             <HelpTrigger

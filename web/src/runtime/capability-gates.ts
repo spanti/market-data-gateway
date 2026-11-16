@@ -97,6 +97,15 @@ export function adminCapabilityAvailability(
     : { kind: "enabled" };
 }
 
+/** The disabled reason for an Admin capability, or null when it is usable. */
+export function adminCapabilityReason(
+  capability: CapabilityState | null,
+  key: CapabilityKey,
+): DisabledReason | null {
+  const availability = adminCapabilityAvailability(capability, key);
+  return availability.kind === "disabled" ? availability.reason : null;
+}
+
 export interface ActionCapabilityGate {
   enabled: boolean;
   reason: DisabledReason | null;

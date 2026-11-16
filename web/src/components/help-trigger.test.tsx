@@ -32,10 +32,11 @@ describe("HelpTrigger", () => {
     const trigger = screen.getByRole("button", {
       name: "Realtime QPS 说明",
     });
-    expect(trigger).toHaveAttribute("data-slot", "help-trigger");
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
 
     await user.hover(trigger);
     const tip = await screen.findByRole("tooltip");
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
     expect(tip).toHaveTextContent(
       "1 分钟滑动窗口的请求速率，只取最近一个成功样本。",
     );
@@ -72,6 +73,30 @@ describe("HelpTrigger", () => {
     fireEvent.pointerDown(trigger, { pointerType: "touch", button: 0 });
     fireEvent.pointerUp(trigger, { pointerType: "touch", button: 0 });
     fireEvent.click(trigger);
+    await expectClosed();
+  });
+
+  it("keeps toggling across repeated touch taps and Escape closes it", async () => {
+    const user = userEvent.setup();
+    renderHelp();
+    const trigger = screen.getByRole("button", {
+      name: "Realtime QPS 说明",
+    });
+    const tap = () => {
+      fireEvent.pointerDown(trigger, { pointerType: "touch", button: 0 });
+      fireEvent.pointerUp(trigger, { pointerType: "touch", button: 0 });
+      fireEvent.click(trigger);
+    };
+
+    tap();
+    expect(await screen.findByRole("tooltip")).toBeInTheDocument();
+    tap();
+    await expectClosed();
+    tap();
+    expect(await screen.findByRole("tooltip")).toBeInTheDocument();
+
+    trigger.focus();
+    await user.keyboard("{Escape}");
     await expectClosed();
   });
 
