@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 监控全页建立 D 视觉与共享基础
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] 查询表单、Bar 图、Revision 明细和直接 CSV 区域采用共享卡片、状态药丸、简洁标题与 `?` 帮助，不保留数字标题、整页装饰分割线或冗余说明。
 - [ ] 五种 Bar Interval、默认最近 24 小时、单次图表最多 31 个 UTC 天、start 闭区间与 end 开区间保持现有行为，无数据时不自动扩大范围。
@@ -19,3 +19,5 @@
 - [ ] typecheck、lint、相关 Vitest、production build 与 Bar 查询、图表、分页、实时跟随及真实下载浏览器验收通过。
 
 ## Comments
+
+**Resolved (2026-11-16):** 已在 `4c598cc` 完成并合并为 `b3c68f1`。Bars 查询、图表、原始 Revision 表、直接 CSV 与实时跟随迁移到共享 Card/ChartPanel、HelpTrigger 与 StatusBadge；五种 Bar Interval、默认最近 24 小时、图表最多 31 个 UTC 天、start 闭区间与 end 开区间、URL 与浏览器前进后退共享上下文保持不变。最大 Revision 仅用于图，原始 Revision 表与 CSV 不去重，服务端列顺序与精确十进制文本保持原样；Revision-safe Cursor 继续以不透明 `next_cursor` 原样回传。修正了既有 `bars-chart-cursor.spec.ts` 中针对 `next_start`/Time Cursor 缺陷的过时断言，改为当前 opaque cursor 行为，并以真实栈证明 5001 个 Revision 恰在两个 opaque-cursor 页内完成、唯一 cursor 原样回传、无重复无缺口且无旧 Time Cursor 回退；原始 JSON 与后端错误以 `data-raw-evidence` 原样展示。CSV 保留安全文件名、未知长度进度、取消、Blob 错误信封与 Request ID 行为。分支 tip `61` 个测试文件 / `495` 个 Vitest 测试通过（本次复核），typecheck、lint、production build 与 `10/10` 定向 Playwright 通过，真实 Bar 查询、图表、分页、实时跟随及下载均纳入验收。

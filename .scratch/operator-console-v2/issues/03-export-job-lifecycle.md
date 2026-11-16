@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 Bar 查询、图表、Revision 与直接 CSV 完成迁移
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] 31 至 366 个 UTC 天使用 Export Job，更大范围按现有策略拆分，不在异步能力不可用时自动退回超大 Blob。
 - [ ] 创建表单、拆分确认、任务列表、进度、结果与错误采用共享卡片和状态药丸，必要说明与危险后果保持就地显示。
@@ -18,3 +18,5 @@
 - [ ] typecheck、lint、相关 Vitest、production build 与 Export Job 契约及可用真实流程验收通过， CONTRACT-ONLY 与真实联调结果分别记录。
 
 ## Comments
+
+**Resolved (2026-11-16):** 已在 `e8611c3` 实现、`11987b5` 复用共享 UI 文案边界 helper 后合并为 `92f5e0c`。Export Job 创建、拆分确认、任务列表、进度、结果与错误迁移到共享 D 卡片与状态药丸；31 至 366 个 UTC 天继续使用 Export Job，更大范围按现有策略拆分，不在异步能力不可用时退回超大 Blob。queued、running、succeeded、failed、cancelling、cancelled、expired 的文本、图标与颜色语义保持准确，真实不确定进度显示未知而非伪造百分比；创建者、文件大小、SHA-256、24 小时过期时间与关联查询上下文清晰可见，Request ID 保持就地显示。SuperAdmin、Operator、Auditor 的任务可见范围与默认最多一个运行中任务的约束不变；下载继续使用原生浏览器 Range 下载，不重新读入 Blob，原始 Revision、服务端列顺序与精确十进制文本不变；网络错误不自动重试，待提交创建阻止重复提交。新增 `e2e/export-job.contract.spec.ts`，分支 tip `61` 个测试文件 / `522` 个 Vitest 测试通过（本次复核），typecheck、lint、production build 与 `36/36` 定向 Playwright 通过。Admin API 与真实 OIDC 会话在本仓库不存在，Export Job 相关 Admin 流程仅为 CONTRACT-ONLY，不宣称真实 Admin/OIDC 端到端通过。

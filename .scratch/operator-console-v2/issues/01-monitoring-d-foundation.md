@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] 五模块顶部导航保持现有路由与权限行为，浅色 D 使用中性画布、白底微圆角卡片和极浅阴影，不使用整页装饰分割线或数字下划线标题。
 - [ ] 共享 Metric Card、Chart Card、Status Badge、Help Trigger 和状态区域形成可复用接口，同时保留其他尚未迁移模块可继续使用的兼容形式。
@@ -20,3 +20,5 @@
 - [ ] typecheck、lint、相关 Vitest、production build 与监控真实浏览器验收通过，并记录实际结果。
 
 ## Comments
+
+**Resolved (2026-11-16):** 已在 `ticket/operator-console-v2-01` 的 `ee797db` 完成并合并为 `d91fa64`。建立 Variant D 的中性画布、白色微圆角卡片、极浅阴影、Status Badge、Help Trigger 与 Loading/Empty/Error/Unknown 共享状态接口；五模块顶部导航、现有路由与权限行为保持不变。Monitoring 重建为四个 KPI 卡片、独立的 QPS 与 HTTP P50/P95/P99 趋势卡、分离的 Feed/Dataset Freshness、页内告警与按 Service Role/Service Instance 区分的数据明细。帮助在鼠标 hover、键盘 focus、触屏重复点击与 Escape 下可用，并处理碰撞且不遮挡触发目标；上游连接、心跳与重连能力未暴露时显式显示未知；内部 series identity 与显示名分离并有回归测试；旧快照不再标为当前健康，保留最后成功时间与过期语义。迁移区域界面生成文案无 `·` 或 `：`，无整页装饰分割线与数字标题，1440/1280/1024 与暗色回归通过。分支 tip `61` 个测试文件 / `492` 个 Vitest 测试通过（本次复核），typecheck、lint、production build 与 Monitoring/layout/theme 定向 Playwright 验收通过；该票行为随最终集成树通过全量验收（见 09 与 `web/docs/acceptance-report-v2.md`）。

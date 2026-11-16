@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 监控全页建立 D 视觉与共享基础；03 Export Job 完整生命周期完成迁移；05 Service Instance 生命周期操作完成迁移；06 WebSocket Debug 与原始证据完成迁移；07 Quality Gap 与 Backfill Job 完成迁移；08 Security & Audit 完整迁移
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] 旧共享卡片、标题、描述、状态和帮助兼容形式只在确认无调用方后删除，收缩过程不改变五模块外部行为。
 - [ ] 所有界面生成的标题、标签、状态、说明、占位符、校验、错误前缀与动态拼接文本在可见 DOM 中无 `·` 或 `：`。
@@ -21,3 +21,5 @@
 - [ ] 记录实际执行命令、通过数量、截图、CONTRACT-ONLY、未执行项与失败项，旧功能 ticket 和历史验收记录不被篡改。
 
 ## Comments
+
+**Resolved (2026-11-16):** 已在 `c77da37` 完成并合并为 `ca1109e`；随后审查修复 `02ada44`/`e0b77c9` 以 `5f37ce5` 合并，且 `5f37ce5` 与完全通过测试的 review-fix tip `e0b77c9` 树完全一致。按零调用方证据删除 `KpiCell`、`ModulePlaceholder`、`FilterRow`/`Toolbar`、`EventTimeline`、`Panel`/`PanelHeader`/`PanelTitle`/`PanelDescription` 与未使用的 badge/button variants，并移除 `PageHeader.meta`、`ChartPanel.description`、`TrendChart.description`、`HelpTrigger.className`/`contentClassName` 等兼容接口；五模块外部行为不变。全控制台符号检查覆盖五模块默认页、三个 Console 页签、展开的 `?`、表单校验、危险确认、Loading/Empty/Error/Unknown 与操作结果，并扫描可见文本、placeholder、aria 属性与 `sr-only` 文本；WebSocket 原始 JSON、Audit 脱敏 Diff 与后端原始错误经含禁用符号样例验证原样展示。09 分支 tip `61` 个测试文件 / `544` 个 Vitest 测试通过（本次复核），完整真实栈 Playwright `56/56`；审查修复后最终门禁为 typecheck PASS、lint PASS、`65` 个 Vitest 文件 / `560` 个测试 PASS、production build PASS、完整 Playwright `56/56`（`37` REAL、`19` CONTRACT-ONLY）。截图位于 `web/docs/acceptance-v2/`，完整命令、计数、CONTRACT-ONLY、BACKEND-BLOCKED、NOT RUN、偏差与 bundle 评估记录在 `web/docs/acceptance-report-v2.md`。主 chunk 为 `564.32 kB` / `168.33 kB` gzip，对比 v2 前基线 `541.80 kB` / `162.22 kB`；保留经评估的 `manualChunks` vendor split，并保留仅链接 worktree 生效的开发期 `fs.allow`，两者均在报告中说明。审查修复共解决 16 项 Standards/Spec findings，并将 Monitoring Current Contract 的按 Role 行文案由 Service Instance 更正为 Service Role，Admin 行仍标 Service Instance。

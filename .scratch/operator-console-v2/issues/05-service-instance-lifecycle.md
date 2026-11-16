@@ -4,7 +4,7 @@
 
 **Blocked by:** 04 Console Shell 与 Feed Subscription 完成迁移
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] Service Role 与 Service Instance 在标题、表格、状态和帮助中严格区分，不出现 Master、Worker、Leader 或分片语义。
 - [ ] Start、Graceful Stop、Reload 使用共享卡片和状态药丸，目标、原因、危险后果、确认与操作结果就地可见。
@@ -17,3 +17,5 @@
 - [ ] typecheck、lint、相关 Vitest、production build 与生命周期、权限、高危确认及状态未知浏览器验收通过，CONTRACT-ONLY 明确标注。
 
 ## Comments
+
+**Resolved (2026-11-16):** 已在 `d766ae0` 实现，并在合并最新 integration 后以分支 tip `c968896` 全绿合并为 `e9d13ed`。Service Role 与 Service Instance 在标题、列表、状态和帮助中严格区分，未引入 Master、Worker、Leader 或分片语义；Start、Graceful Stop、Reload 使用共享卡片与状态药丸，目标、原因、危险后果、确认与操作结果就地可见。Graceful Stop 与 Reload 继续要求输入目标 Service Instance 名，三类操作均要求原因与确认并防止重复提交；仅 SuperAdmin 可执行，Operator/Auditor 的只读边界与禁用原因准确，前端权限展示不替代服务端授权。待提交、提交中、accepted/running、succeeded、failed 与状态未知保持区分，写操作默认不自动重放；Reload 或 Stop 导致断连时进入状态未知而非直接判为失败，PID 存在不等于 Ready，Reload 不宣传热加载或零停机。分支 tip `61` 个测试文件 / `544` 个 Vitest 测试通过（本次复核），typecheck、lint、production build 与 `33` 项定向 Playwright 通过（`19` REAL、`14` CONTRACT-ONLY）；Admin 写操作仅有 CONTRACT-ONLY 证据，不宣称真实 OIDC/Admin 端到端通过。
