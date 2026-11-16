@@ -421,6 +421,7 @@ test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
     await dialog.getByLabel(/输入目标实例名/).fill("api");
     await expect(confirm).toBeDisabled();
     await expect(dialog.getByText("实例名不匹配，无法提交。")).toBeVisible();
+    await expectNoBannedUiSymbols(page);
 
     await dialog.getByLabel(/输入目标实例名/).fill("api-1");
     await expect(confirm).toBeEnabled();

@@ -577,6 +577,7 @@ describe("Monitoring dashboard", () => {
     expect(
       within(metricCard("Dataset Freshness")).getByText("尚无 flush 记录"),
     ).toBeInTheDocument();
+    expectNoBannedUiSymbols();
   });
 
   it("drives every trend from one range control and labels the peak range", async () => {
