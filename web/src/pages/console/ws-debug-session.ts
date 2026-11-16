@@ -45,6 +45,7 @@ export interface WsCloseSummary {
   code: number;
   reason: string;
   at: string;
+  wasClean: boolean;
 }
 
 export interface WsDebugSnapshot {
@@ -70,7 +71,7 @@ export type FreeformSendResult = { ok: true } | { ok: false; error: string };
 
 function describeEvent(message: WsEventMessage): string {
   const { data } = message;
-  return `${data.instrument_id} · ${data.payload.interval} · close ${data.payload.close}`;
+  return `${data.instrument_id} ${data.payload.interval} close ${data.payload.close}`;
 }
 
 export class WsDebugSession {
@@ -259,6 +260,7 @@ export class WsDebugSession {
       code: info.code,
       reason: info.reason,
       at: this.now().toISOString(),
+      wasClean: info.wasClean,
     };
     this.syncState = "idle";
     if (info.segment > 0) {
@@ -266,7 +268,7 @@ export class WsDebugSession {
       this.append({
         kind: "connection",
         segment: info.segment,
-        summary: `接收段 ${info.segment} 中断（code ${info.code}）；无恢复位点`,
+        summary: `接收段 ${info.segment} 中断（code ${info.code}），无恢复位点`,
         detailText: JSON.stringify(
           {
             op: "connection",
@@ -301,7 +303,7 @@ export class WsDebugSession {
     this.append({
       kind: "pong",
       segment: info.segment,
-      summary: "pong · 已同步（顺序屏障，不是订阅 ACK）",
+      summary: "pong 已同步（顺序屏障，不是订阅 ACK）",
       detailText: JSON.stringify({ op: "pong" }, null, 2),
     });
     this.emit();
@@ -313,7 +315,7 @@ export class WsDebugSession {
     this.append({
       kind: "lag_notice",
       segment: info.segment,
-      summary: `lag_notice · 服务端丢弃 ${info.dropped} 条`,
+      summary: `服务端丢弃 ${info.dropped} 条（lag_notice）`,
       detailText: JSON.stringify(
         { op: "lag_notice", dropped: info.dropped, since: info.since },
         null,
@@ -327,7 +329,7 @@ export class WsDebugSession {
     this.append({
       kind: "protocol_issue",
       segment: issue.segment,
-      summary: `协议问题：${issue.code}`,
+      summary: `协议问题 ${issue.code}`,
       detailText: JSON.stringify(
         { code: issue.code, message: issue.message },
         null,

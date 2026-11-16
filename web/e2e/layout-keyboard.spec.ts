@@ -265,6 +265,20 @@ test.describe("narrow desktop layout 1024px", () => {
     await expect(
       page.getByRole("heading", { name: "WebSocket Debug" }),
     ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "WebSocket Debug" }),
+    ).toBeVisible();
+    // The virtual list is the only horizontally constrained surface; it
+    // scrolls inside its card and never widens the page.
+    const wsListMetrics = await page
+      .getByTestId("ws-message-list")
+      .evaluate((element) => ({
+        overflowY: window.getComputedStyle(element).overflowY,
+        overflowX: window.getComputedStyle(element).overflowX,
+      }));
+    expect(["auto", "scroll"]).toContain(wsListMetrics.overflowY);
+    expect(["auto", "scroll"]).toContain(wsListMetrics.overflowX);
+    await expectNoBannedUiSymbols(page, "#main-content");
     await expectNoHorizontalOverflow(page);
 
     // Back on Feed, every UI-generated string must avoid the banned
@@ -403,6 +417,18 @@ for (const width of [1280, 1440] as const) {
       await expectNoBannedUiSymbols(page, "#main-content");
       await expectNoHorizontalOverflow(page);
 
+      // WebSocket Debug consumes the same D cards and stays clean at 1280
+      // and 1440.
+      await page.getByRole("tab", { name: "WebSocket Debug" }).click();
+      await expect(
+        page.getByRole("region", { name: "WebSocket Debug" }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("group", { name: "WebSocket Session Subscription" }),
+      ).toBeVisible();
+      await expectNoBannedUiSymbols(page, "#main-content");
+      await expectNoHorizontalOverflow(page);
+
       // The migrated Bars query, chart and data regions stay usable and do
       // not overflow at this desktop width.
       await page.goto(barsQueryUrl());
@@ -516,6 +542,38 @@ test.describe("console feed help", () => {
   });
 });
 
+test.describe("console websocket help", () => {
+  test.use({ viewport: { width: 1280, height: 900 } });
+
+  test("WebSocket Debug help opens by hover and keyboard focus and closes with Escape", async ({
+    page,
+  }) => {
+    await page.goto("/console");
+    await page.getByRole("tab", { name: "WebSocket Debug" }).click();
+    await expect(
+      page.getByRole("region", { name: "WebSocket Debug" }),
+    ).toBeVisible();
+
+    const hovered = await openHelpByHover(page, "WebSocket Debug 说明");
+    await expect(hovered.tooltip).toContainText("Feed Subscription");
+    await expectTooltipUsable(page);
+    await expectNoBannedUiSymbols(page);
+    await closeHelpWithEscape(page);
+
+    const focused = await openHelpByKeyboard(
+      page,
+      "WebSocket Session Subscription 说明",
+    );
+    await expect(focused.tooltip).toContainText("采集范围");
+    await expectTooltipUsable(page);
+    await expectNoBannedUiSymbols(page);
+    await closeHelpWithEscape(page);
+
+    await expectNoBannedUiSymbols(page, "#main-content");
+    await expectNoHorizontalOverflow(page);
+  });
+});
+
 test.describe("quality help with a touch context", () => {
   test.use({ viewport: { width: 1280, height: 900 }, hasTouch: true });
 
@@ -579,6 +637,30 @@ test.describe("console feed touch help", () => {
       page.getByRole("region", { name: "Feed Subscription" }),
     ).toBeVisible();
     await toggleHelpByTouch(page, "Feed Subscription 说明");
+    await expectNoHorizontalOverflow(page);
+  });
+});
+
+test.describe("console websocket touch help", () => {
+  test.use({ hasTouch: true, viewport: { width: 1024, height: 900 } });
+
+  test("WebSocket Debug help toggles on touch tap and closes with Escape", async ({
+    page,
+  }) => {
+    await page.goto("/console");
+    await page.getByRole("tab", { name: "WebSocket Debug" }).click();
+    await expect(
+      page.getByRole("region", { name: "WebSocket Debug" }),
+    ).toBeVisible();
+
+    await toggleHelpByTouch(page, "WebSocket Debug 说明");
+
+    await helpTrigger(page, "WebSocket Debug 说明").tap();
+    await expect(page.getByRole("tooltip")).toBeVisible();
+    await expectTooltipUsable(page);
+    await expectNoBannedUiSymbols(page);
+    await closeHelpWithEscape(page);
+
     await expectNoHorizontalOverflow(page);
   });
 });

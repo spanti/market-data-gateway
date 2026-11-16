@@ -249,6 +249,34 @@ describe("WS debug session", () => {
     ]);
   });
 
+  it("keeps UI summaries clean while raw event JSON stays verbatim", () => {
+    const { session, sockets } = setup();
+    open(session, sockets);
+
+    sockets[0]?.fireMessage({
+      op: "event",
+      topic: "market.bar.1m.binance:BTC/USDT",
+      data: { ...envelope, note: "a·b：c" },
+    });
+    sockets[0]?.fireMessage({
+      op: "lag_notice",
+      dropped: 2,
+      since: "2026-11-09T12:00:00.000000000Z",
+    });
+    sockets[0]?.fireMessage({ op: "pong" });
+
+    const snapshot = session.getSnapshot();
+    for (const message of snapshot.messages) {
+      expect(
+        message.summary,
+        `summary must be UI copy: ${message.summary}`,
+      ).not.toMatch(/[·：]/);
+    }
+
+    const event = snapshot.messages.find((message) => message.kind === "event");
+    expect(event?.detailText).toContain('"note": "a·b：c"');
+  });
+
   it("never persists messages", () => {
     const { session, sockets } = setup();
     open(session, sockets);
