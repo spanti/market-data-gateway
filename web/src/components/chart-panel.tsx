@@ -30,7 +30,6 @@ export interface ChartPanelHelp {
 
 export interface ChartPanelProps {
   title: string;
-  description?: React.ReactNode;
   help?: ChartPanelHelp;
   legend?: ChartLegendItem[];
   state?: ChartPanelState;
@@ -53,7 +52,6 @@ export interface ChartPanelProps {
  */
 export function ChartPanel({
   title,
-  description,
   help,
   legend = [],
   state = "ready",
@@ -85,11 +83,6 @@ export function ChartPanel({
               />
             ) : null}
           </div>
-          {description ? (
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-              {description}
-            </p>
-          ) : null}
         </div>
         {legend.length > 0 ? (
           <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs">

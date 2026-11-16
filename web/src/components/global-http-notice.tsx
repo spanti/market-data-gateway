@@ -51,7 +51,7 @@ export function GlobalHttpNotice() {
     <div
       data-testid="global-http-notice"
       role="alert"
-      className="border-b border-border bg-surface-sunken"
+      className="bg-surface-sunken"
     >
       <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-3 px-5 py-2 text-xs lg:px-8">
         <span className="font-medium">{message}</span>

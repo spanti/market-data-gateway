@@ -431,6 +431,7 @@ test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
     await expect(row.getByText("成功", { exact: true })).toBeVisible();
     await expect(row.getByText("目标 api-1")).toBeVisible();
     await expect(row.getByText("Request ID req_1")).toBeVisible();
+    await expectNoBannedUiSymbols(page, "#main-content");
     expect(postCount).toBe(1);
     expect(captured.body).toMatchObject({
       reason: "drain before certificate rotation",
@@ -836,6 +837,21 @@ test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
     expect(await before.evaluate((node) => node.textContent)).toBe(
       JSON.stringify({ note: "a·b：c" }, null, 2),
     );
+    // Diff columns are local, focusable scroll containers: wide evidence never
+    // widens the page.
+    for (const side of [before, diff.getByTestId("audit-diff-after")]) {
+      const metrics = await side.evaluate((node) => {
+        const style = window.getComputedStyle(node);
+        return {
+          overflowX: style.overflowX,
+          overflowY: style.overflowY,
+          tabIndex: node.tabIndex,
+        };
+      });
+      expect(["auto", "scroll"]).toContain(metrics.overflowX);
+      expect(["auto", "scroll"]).toContain(metrics.overflowY);
+      expect(metrics.tabIndex).toBe(0);
+    }
     const redactedPath = diff.getByText("/secret·path：x");
     await expect(redactedPath).toHaveAttribute("data-raw-evidence", "true");
 
@@ -1113,6 +1129,7 @@ test.describe("CONTRACT-ONLY Admin API Quality flows (backend absent)", () => {
     expect(retried).toBe(true);
     // The old row still reports its original state.
     await expect(jobs.getByText("failed", { exact: true })).toBeVisible();
+    await expectNoBannedUiSymbols(page);
   });
 
   test("a 409 active-job conflict stays inline and never shows success", async ({

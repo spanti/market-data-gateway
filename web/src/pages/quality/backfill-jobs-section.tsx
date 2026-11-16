@@ -206,7 +206,12 @@ function describeActionError(
   return {
     tone: "critical",
     title: fallbackTitle,
-    detail: error instanceof Error ? error.message : "未知错误",
+    detail:
+      error instanceof Error ? (
+        <span data-raw-evidence="true">{error.message}</span>
+      ) : (
+        "未知错误"
+      ),
     requestId: null,
   };
 }
