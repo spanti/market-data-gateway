@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import { expect, test } from "@playwright/test";
+import { expectNoBannedUiSymbols, helpTrigger } from "./support";
 
 /**
  * Real small-file CSV download against a real local gateway API and a
@@ -22,6 +23,27 @@ test("downloads the real small CSV with server bytes and filename", async ({
   await expect(
     page.getByRole("region", { name: "最大 Revision Bar 图" }),
   ).toBeVisible();
+
+  const csvRegion = page.getByRole("region", { name: "CSV 直接下载" });
+  await expect(csvRegion).toBeVisible();
+  await expect(
+    helpTrigger(page, "小文件 CSV 直接下载说明"),
+  ).toBeVisible();
+  await expectNoBannedUiSymbols(
+    page,
+    '[role="region"][aria-label="CSV 直接下载"]',
+  );
+
+  // The migrated Export Job area is present for the same query, stays
+  // disabled in Current Contract and keeps its copy separator-free.
+  const exportRegion = page.getByRole("region", { name: "Export Job" });
+  await expect(exportRegion).toBeVisible();
+  await expect(exportRegion).toContainText("不需要 Export Job");
+  await expect(helpTrigger(page, "Export Job 说明")).toBeVisible();
+  await expectNoBannedUiSymbols(
+    page,
+    '[role="region"][aria-label="Export Job"]',
+  );
 
   const downloadPromise = page.waitForEvent("download");
   await page
@@ -53,5 +75,13 @@ test("downloads the real small CSV with server bytes and filename", async ({
   );
   expect(lines[2]).toContain(
     ",fake,,external,65005.5,65020.0,65000.0,65015.0,10.5,64,0",
+  );
+
+  // The completion notice is UI-generated copy and must stay separator-free.
+  await expect(csvRegion).toContainText("已触发浏览器下载");
+  await expect(csvRegion).toContainText("1m-bars.csv");
+  await expectNoBannedUiSymbols(
+    page,
+    '[role="region"][aria-label="CSV 直接下载"]',
   );
 });

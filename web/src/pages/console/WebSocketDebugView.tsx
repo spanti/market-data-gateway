@@ -6,19 +6,26 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type ReactNode,
 } from "react";
 import { DisabledReason } from "@/components/disabled-reason";
-import { EmptyState } from "@/components/states";
+import { HelpTrigger } from "@/components/help-trigger";
+import {
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  UnknownState,
+} from "@/components/states";
 import { StatusBadge, type StatusTone } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Panel,
-  PanelDescription,
-  PanelHeader,
-  PanelTitle,
-} from "@/components/ui/panel";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { BAR_INTERVALS } from "@/lib/time-range";
@@ -43,6 +50,10 @@ import {
  * Fully real in Current Contract: it talks to the gateway `/ws` through
  * GatewayWsTransport. There is no subscribe ACK; pong is an ordering barrier
  * only. Each connection is a new receive segment with no resume position.
+ *
+ * WebSocket Session Subscription only filters this debug session's topics. It
+ * must never be confused with Feed Subscription, which changes the actual
+ * collector acquisition scope in the Admin API contract.
  */
 
 export interface WebSocketDebugViewProps {
@@ -53,6 +64,17 @@ export interface WebSocketDebugViewProps {
    */
   sessionFactory?: (targetUrl: string | null) => WsDebugSession;
 }
+
+const WEBSOCKET_DEBUG_HELP =
+  "WebSocket Debug 使用网关 WebSocket。WebSocket Session Subscription 只筛选当前调试会话的 Topic，不改变 Feed Subscription 的采集配置与采集范围。订阅没有 ACK，pong 只是顺序屏障。每个成功连接都会开始新的接收段，断线后没有恢复位点。报文只保存在内存，最多保留 10,000 条。原始 JSON 原样展示。";
+const SESSION_SUBSCRIPTION_HELP =
+  "WebSocket Session Subscription 只影响当前浏览器调试会话接收哪些 Topic。它不会修改 Collector 的 Feed Subscription，也不会扩大或缩小实际采集范围。Topic 按前缀匹配，订阅没有 ACK。replay.* 不在 Console 范围内。";
+const MESSAGE_BUFFER_HELP =
+  "界面最多保留 10,000 条报文，溢出时丢弃最旧项并计入界面丢弃数。服务端 lag_notice 的 dropped 是服务端队列丢弃，单独累计，两者不能互相替代。报文只保存在内存，不持久化。";
+const PING_HELP =
+  "Ping 发送客户端 ping，服务端以 pong 回应。pong 只证明此前操作已被按序处理，是顺序屏障，不是订阅 ACK。";
+const FREEFORM_HELP =
+  "自由 JSON 仅允许 subscribe / unsubscribe / ping，Topic 仍需符合受控语法。没有订阅 ACK。编辑器按服务端 Access Role 开放，界面禁用不替代服务端拒绝。";
 
 function formatClock(value: string | null): string {
   if (!value) {
@@ -65,43 +87,52 @@ function formatClock(value: string | null): string {
   return `${date.toISOString().slice(11, 23)}Z`;
 }
 
-function connectionLabel(snapshot: WsDebugSnapshot): string {
+interface ConnectionStatus {
+  tone: StatusTone;
+  label: string;
+}
+
+function connectionStatus(snapshot: WsDebugSnapshot): ConnectionStatus {
   switch (snapshot.connection) {
     case "idle":
-      return "未连接";
+      return { tone: "unknown", label: "未连接" };
     case "connecting":
-      return "连接中…";
+      return { tone: "warning", label: "连接中…" };
     case "open":
-      return `已连接 · 接收段 ${snapshot.segment}`;
+      return { tone: "good", label: "已连接" };
     case "closed":
       return snapshot.segmentInterrupted
-        ? `接收段 ${snapshot.segment} 中断`
-        : "连接失败";
+        ? { tone: "critical", label: `接收段 ${snapshot.segment} 中断` }
+        : { tone: "unknown", label: "连接失败" };
   }
 }
 
-function connectionTone(snapshot: WsDebugSnapshot): StatusTone {
-  switch (snapshot.connection) {
-    case "open":
-      return "good";
-    case "connecting":
-      return "warning";
-    case "closed":
-      return snapshot.segmentInterrupted ? "critical" : "unknown";
-    case "idle":
-      return "unknown";
-  }
-}
-
-function syncLabel(snapshot: WsDebugSnapshot): string {
+function syncStatus(snapshot: WsDebugSnapshot): ConnectionStatus {
   switch (snapshot.syncState) {
     case "synced":
-      return "已同步";
+      return { tone: "good", label: "已同步" };
     case "waiting":
-      return "等待 pong…";
+      return { tone: "warning", label: "等待 pong…" };
     case "idle":
-      return "未同步";
+      return { tone: "unknown", label: "未同步" };
   }
+}
+
+function GroupTitleWithHelp({
+  title,
+  helpLabel,
+  help,
+}: {
+  title: string;
+  helpLabel: string;
+  help: string;
+}) {
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+      <HelpTrigger label={helpLabel} content={help} side="top" />
+    </div>
+  );
 }
 
 export function WebSocketDebugView({
@@ -149,6 +180,11 @@ export function WebSocketDebugView({
   const topicValidation = validateControlledTopic(topic);
   const canSendTopic =
     isOpen && topicValidation.valid && subscribeBlockReason === null;
+  const connectionFailure =
+    snapshot.connection === "closed" &&
+    !snapshot.segmentInterrupted &&
+    snapshot.lastClose !== null &&
+    !snapshot.lastClose.wasClean;
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const filtered = useMemo(
@@ -185,11 +221,11 @@ export function WebSocketDebugView({
       ? session.unsubscribe(topic)
       : session.subscribe(topic);
     if (!sent) {
-      setTopicError("无法发送：WebSocket 未连接或 Topic 无效。");
+      setTopicError("无法发送。WebSocket 未连接或 Topic 无效。");
       return;
     }
     setProtocolNotice(
-      `${unsubscribe ? "取消订阅" : "订阅"}已发送（没有订阅 ACK）；可用 Ping 确认操作顺序。`,
+      `${unsubscribe ? "取消订阅" : "订阅"}已发送。没有订阅 ACK，可用 Ping 确认操作顺序。`,
     );
   };
 
@@ -201,358 +237,507 @@ export function WebSocketDebugView({
       setFreeformError(result.error);
       return;
     }
-    setFreeformNotice("已通过白名单并发送（没有订阅 ACK）。");
+    setFreeformNotice("已通过白名单并发送。没有订阅 ACK。");
   };
 
-  return (
-    <Panel className="mt-6 p-5" aria-label="WebSocket Debug">
-      <PanelHeader>
-        <div>
-          <PanelTitle>WebSocket Debug</PanelTitle>
-          <PanelDescription>
-            通过 GatewayWsTransport 连接网关 WebSocket。每个连接是新的接收段；断线后没有恢复位点，不宣称无缝恢复。
-            Current Contract 使用公开 /ws；Admin API 模式只连接能力声明中的
-            /api/v1/admin/ws，不降级到公开 /ws。
-          </PanelDescription>
-        </div>
-        <div className="flex flex-col items-end gap-1">
-          <StatusBadge tone={connectionTone(snapshot)} live>
-            {connectionLabel(snapshot)}
-          </StatusBadge>
-          <span className="text-[11px] text-faint-foreground">
-            目标 {wsTarget.url ?? `—（${wsTarget.reason?.message ?? "不可用"}）`}{" "}
-            · 连接时间 {formatClock(snapshot.connectedAt)}
-          </span>
-        </div>
-      </PanelHeader>
+  const connection = connectionStatus(snapshot);
+  const sync = syncStatus(snapshot);
+  const hasMessages = snapshot.messages.length > 0;
 
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button
-          size="sm"
-          onClick={() => session.connect()}
-          disabled={
-            connectionBlockReason !== null ||
-            snapshot.connection === "open" ||
-            snapshot.connection === "connecting"
-          }
-          aria-describedby={
-            connectionBlockReason ? "ws-connection-reason" : undefined
-          }
-        >
-          连接
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => session.disconnect()}
-          disabled={!isOpen && snapshot.connection !== "connecting"}
-        >
-          断开
-        </Button>
-        <DisabledReason
-          id="ws-connection-reason"
-          reason={connectionBlockReason}
+  let messageListState: ReactNode = null;
+  if (hasMessages && filtered.length === 0) {
+    messageListState = (
+      <EmptyState
+        className="m-3"
+        title="没有匹配的报文"
+        description="调整筛选条件后重试。"
+      />
+    );
+  } else if (!hasMessages) {
+    if (capability === null) {
+      messageListState = (
+        <LoadingState className="m-3" label="正在发现运行时能力…" />
+      );
+    } else if (snapshot.connection === "connecting") {
+      messageListState = (
+        <LoadingState className="m-3" label="正在连接 WebSocket…" />
+      );
+    } else if (connectionFailure) {
+      // The explicit ErrorState above the grid carries the raw close reason.
+      messageListState = null;
+    } else if (
+      connectionBlockReason?.code === "capabilities-unknown"
+    ) {
+      messageListState = (
+        <UnknownState
+          className="m-3"
+          cause="failed"
+          reason="运行时能力发现失败，无法确认 WebSocket 目标。"
         />
-        <span className="text-[11px] text-faint-foreground">
-          接收段 {snapshot.segment} · 新连接即新接收段
-        </span>
-      </div>
+      );
+    } else {
+      messageListState = (
+        <EmptyState
+          className="m-3"
+          title={isOpen ? "暂无报文" : "尚未连接"}
+          description={
+            isOpen
+              ? "已连接，等待订阅后的新事件，没有初始快照或历史回放。"
+              : "连接并订阅后才会收到未来事件，没有初始快照或历史回放。"
+          }
+        />
+      );
+    }
+  }
 
-      <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_400px]">
-        <div>
-          <div className="flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
-            <span>界面保留 {snapshot.messages.length} / {WS_DEBUG_MESSAGE_LIMIT.toLocaleString("en-US")}</span>
-            <span data-testid="ws-local-dropped">
-              界面丢弃数 {snapshot.localDropped}
-            </span>
-            <span data-testid="ws-server-lag">
-              服务端丢弃（lag_notice） {snapshot.serverLagDropped}
-            </span>
-            <span>总接收 {snapshot.totalReceived}</span>
-            <span>筛选 {filtered.length} / 总计 {snapshot.messages.length}</span>
+  return (
+    <Card role="region" aria-label="WebSocket Debug" className="mt-5">
+      <CardHeader className="p-5 pb-0">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <CardTitle>WebSocket Debug</CardTitle>
+            <HelpTrigger
+              label="WebSocket Debug 说明"
+              content={WEBSOCKET_DEBUG_HELP}
+              side="bottom"
+            />
           </div>
-          <p className="mt-1 text-[11px] text-faint-foreground">
-            最多保留 {WS_DEBUG_MESSAGE_LIMIT.toLocaleString("en-US")} 条；本地溢出丢弃最旧项并单独计数，与服务端 lag_notice
-            分开。消息只保存在内存，不持久化。
+          <p className="mt-1 max-w-3xl text-xs leading-relaxed text-muted-foreground">
+            WebSocket Session Subscription 只筛选当前调试会话的 Topic，不改变
+            Feed Subscription 的采集范围。
           </p>
-
-          <div className="mt-2 flex flex-wrap items-end gap-2">
-            <div className="flex min-w-52 flex-1 flex-col gap-1">
-              <Label htmlFor="ws-filter">筛选消息</Label>
-              <Input
-                id="ws-filter"
-                value={filter}
-                onChange={(event) => setFilter(event.target.value)}
-                placeholder="按 kind、Topic、摘要或原始 JSON 过滤"
-              />
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => session.clear()}
-            >
-              清空
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              aria-pressed={paused}
-              onClick={() => setPaused((value) => !value)}
-            >
-              {paused ? "恢复自动滚动" : "暂停自动滚动"}
-            </Button>
-            <span className="text-[11px] text-faint-foreground">
-              自动滚动：{paused ? "已暂停" : "开启"}
-            </span>
-          </div>
-
-          <div
-            ref={scrollRef}
-            data-testid="ws-message-list"
-            className="mt-2 h-[420px] overflow-auto border border-border bg-card"
+        </div>
+        <div className="flex flex-col items-start gap-1 text-[11px] text-faint-foreground sm:items-end">
+          <StatusBadge
+            data-testid="ws-connection-state"
+            tone={connection.tone}
+            live
           >
-            <div
-              style={{
-                height: `${virtualizer.getTotalSize()}px`,
-                position: "relative",
-                width: "100%",
-              }}
-            >
-              {virtualizer.getVirtualItems().map((virtualItem) => {
-                const message = filtered[virtualItem.index];
-                if (!message) {
-                  return null;
-                }
-                return (
-                  <div
-                    key={virtualItem.key}
-                    data-testid="ws-message"
-                    style={{
-                      position: "absolute",
-                      top: 0,
-                      left: 0,
-                      width: "100%",
-                      transform: `translateY(${virtualItem.start}px)`,
-                    }}
-                    className="border-b border-border px-3 py-2"
-                  >
-                    <div className="flex flex-wrap items-center gap-2 text-[11px] text-faint-foreground">
-                      <time dateTime={message.receivedAt}>
-                        {formatClock(message.receivedAt)}
-                      </time>
-                      <span className="font-mono">{message.kind}</span>
-                      <span>接收段 {message.segment}</span>
-                      {message.topic ? (
-                        <span className="font-mono">{message.topic}</span>
-                      ) : null}
-                    </div>
-                    <div className="mt-0.5 text-xs text-foreground">
-                      {message.summary}
-                    </div>
-                    <details className="mt-1">
-                      <summary className="cursor-pointer text-[11px] text-muted-foreground">
-                        原始 JSON
-                      </summary>
-                      <pre
-                        data-testid="ws-message-detail"
-                        className="mt-1 whitespace-pre-wrap break-all font-mono text-[11px] text-muted-foreground"
-                      >
-                        {message.detailText}
-                      </pre>
-                    </details>
-                  </div>
-                );
-              })}
-            </div>
-            {filtered.length === 0 ? (
-              <EmptyState
-                title={snapshot.messages.length === 0 ? "暂无报文" : "没有匹配的报文"}
-                description="连接并订阅后才会收到未来事件；没有初始快照或历史回放。"
-              />
-            ) : null}
-          </div>
+            {connection.label}
+          </StatusBadge>
+          <span data-testid="ws-segment-state">接收段 {snapshot.segment}</span>
+          <span className="max-w-full break-all">
+            目标 {wsTarget.url ?? "不可用"}
+          </span>
+          <span>连接时间 {formatClock(snapshot.connectedAt)}</span>
+        </div>
+      </CardHeader>
 
-          {snapshot.segmentInterrupted ? (
-            <p className="mt-2 text-[11px] text-status-critical">
-              接收段 {snapshot.segment} 已中断；没有恢复位点，重连不会补齐缺失报文。
-            </p>
-          ) : null}
+      <CardContent className="pt-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            onClick={() => session.connect()}
+            disabled={
+              connectionBlockReason !== null ||
+              snapshot.connection === "open" ||
+              snapshot.connection === "connecting"
+            }
+            aria-describedby={
+              connectionBlockReason ? "ws-connection-reason" : undefined
+            }
+          >
+            连接
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => session.disconnect()}
+            disabled={!isOpen && snapshot.connection !== "connecting"}
+          >
+            断开
+          </Button>
+          <DisabledReason
+            id="ws-connection-reason"
+            reason={connectionBlockReason}
+          />
         </div>
 
-        <div className="flex flex-col gap-4">
-          <section className="border border-border p-3" aria-label="受控 Topic 表单">
-            <div className="text-sm font-semibold">受控 Topic 表单</div>
-            <p className="mt-0.5 text-[11px] text-faint-foreground">
-              Topic 是前缀匹配；订阅没有 ACK。replay.* 不在 Console 范围内。
-            </p>
+        {snapshot.segmentInterrupted ? (
+          <p
+            data-testid="ws-interruption"
+            role="alert"
+            className="mt-3 rounded-lg border border-status-critical bg-status-critical-bg px-3 py-2 text-xs font-medium text-status-critical-fg"
+          >
+            接收段 {snapshot.segment} 已中断。没有恢复位点，重连不会补齐缺失报文。
+          </p>
+        ) : null}
 
-            <div className="mt-2 flex flex-col gap-2">
-              <div className="flex flex-col gap-1">
-                <Label htmlFor="ws-scope">Topic 范围</Label>
-                <Select
-                  id="ws-scope"
-                  value={scope}
-                  disabled={subscribeBlockReason !== null}
-                  onChange={(event) =>
-                    setScope(event.target.value as TopicScope)
-                  }
+        {connectionFailure && snapshot.lastClose ? (
+          <div data-testid="ws-connection-error" className="mt-3">
+            <ErrorState
+              title="连接失败"
+              description={
+                <span
+                  data-raw-evidence="true"
+                  className="break-all font-mono"
                 >
-                  <option value="all">全部 Bar（market.bar.）</option>
-                  {BAR_INTERVALS.map((interval) => (
-                    <option key={interval} value={interval}>
-                      {interval}
-                    </option>
-                  ))}
-                </Select>
-              </div>
+                  code {snapshot.lastClose.code}{" "}
+                  {snapshot.lastClose.reason || "没有服务端原因"}
+                </span>
+              }
+              onRetry={
+                connectionBlockReason === null
+                  ? () => session.connect()
+                  : undefined
+              }
+            />
+          </div>
+        ) : null}
 
-              {scope !== "all" ? (
-                <div className="flex flex-col gap-1">
-                  <Label htmlFor="ws-instrument">InstrumentId（可选）</Label>
+        <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_390px]">
+          <Card
+            role="group"
+            aria-label="报文缓冲区"
+            className="min-w-0 bg-surface-sunken shadow-none"
+          >
+            <CardContent className="p-4">
+              <GroupTitleWithHelp
+                title="报文缓冲区"
+                helpLabel="报文缓冲区说明"
+                help={MESSAGE_BUFFER_HELP}
+              />
+              <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                <span data-testid="ws-retained">
+                  界面保留 {snapshot.messages.length} /{" "}
+                  {WS_DEBUG_MESSAGE_LIMIT.toLocaleString("en-US")}
+                </span>
+                <span data-testid="ws-local-dropped">
+                  界面丢弃数 {snapshot.localDropped}
+                </span>
+                <span data-testid="ws-server-lag">
+                  服务端丢弃（lag_notice） {snapshot.serverLagDropped}
+                </span>
+                <span>总接收 {snapshot.totalReceived}</span>
+                <span>
+                  筛选 {filtered.length} / 总计 {snapshot.messages.length}
+                </span>
+              </div>
+              <p className="mt-1 text-[11px] leading-relaxed text-faint-foreground">
+                最多保留 {WS_DEBUG_MESSAGE_LIMIT.toLocaleString("en-US")}{" "}
+                条，仅保存在内存，不持久化。界面丢弃与服务端 lag_notice
+                分开计数。
+              </p>
+
+              <div className="mt-2 flex flex-wrap items-end gap-2">
+                <div className="flex min-w-52 flex-1 flex-col gap-1">
+                  <Label htmlFor="ws-filter">筛选消息</Label>
                   <Input
-                    id="ws-instrument"
-                    value={instrument}
-                    disabled={subscribeBlockReason !== null}
-                    onChange={(event) => setInstrument(event.target.value)}
-                    placeholder="例如 binance:BTC/USDT；留空表示该 Interval 全部"
-                    autoComplete="off"
-                    spellCheck={false}
-                    aria-invalid={!topicValidation.valid}
+                    id="ws-filter"
+                    value={filter}
+                    onChange={(event) => setFilter(event.target.value)}
+                    placeholder="按 kind、Topic、摘要或原始 JSON 过滤"
                   />
                 </div>
-              ) : null}
-
-              <div className="text-[11px] text-muted-foreground">
-                将订阅：{" "}
-                <code data-testid="ws-topic-preview" className="font-mono">
-                  {topic}
-                </code>
-              </div>
-              {!topicValidation.valid ? (
-                <p className="text-[11px] text-status-critical">
-                  {topicValidation.error}
-                </p>
-              ) : null}
-
-              <div className="flex flex-wrap items-center gap-2">
                 <Button
                   size="sm"
-                  disabled={!canSendTopic}
-                  aria-describedby={
-                    subscribeBlockReason ? "ws-subscribe-reason" : undefined
-                  }
-                  onClick={() => handleTopicAction(false)}
+                  variant="outline"
+                  onClick={() => session.clear()}
                 >
-                  订阅
+                  清空
                 </Button>
                 <Button
                   size="sm"
                   variant="outline"
-                  disabled={!canSendTopic}
-                  onClick={() => handleTopicAction(true)}
+                  aria-pressed={paused}
+                  onClick={() => setPaused((value) => !value)}
                 >
-                  取消订阅
+                  {paused ? "恢复自动滚动" : "暂停自动滚动"}
                 </Button>
-                <DisabledReason
-                  id="ws-subscribe-reason"
-                  reason={subscribeBlockReason}
+                <StatusBadge
+                  data-testid="ws-autoscroll-state"
+                  tone={paused ? "warning" : "info"}
+                >
+                  {paused ? "自动滚动已暂停" : "自动滚动开启"}
+                </StatusBadge>
+              </div>
+
+              <div
+                ref={scrollRef}
+                data-testid="ws-message-list"
+                className="mt-3 h-[420px] overflow-auto rounded-lg border border-card-border bg-card"
+              >
+                <div
+                  style={{
+                    height: `${virtualizer.getTotalSize()}px`,
+                    position: "relative",
+                    width: "100%",
+                  }}
+                >
+                  {virtualizer.getVirtualItems().map((virtualItem) => {
+                    const message = filtered[virtualItem.index];
+                    if (!message) {
+                      return null;
+                    }
+                    return (
+                      <div
+                        key={virtualItem.key}
+                        data-testid="ws-message"
+                        style={{
+                          position: "absolute",
+                          top: 0,
+                          left: 0,
+                          width: "100%",
+                          transform: `translateY(${virtualItem.start}px)`,
+                        }}
+                        className="border-b border-card-border px-3 py-2"
+                      >
+                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-faint-foreground">
+                          <time dateTime={message.receivedAt}>
+                            {formatClock(message.receivedAt)}
+                          </time>
+                          <span className="font-mono">{message.kind}</span>
+                          <span>接收段 {message.segment}</span>
+                          {message.topic ? (
+                            <span className="break-all font-mono">
+                              {message.topic}
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="mt-0.5 text-xs text-foreground">
+                          {message.summary}
+                        </div>
+                        <details className="mt-1">
+                          <summary className="cursor-pointer text-[11px] text-muted-foreground">
+                            原始 JSON
+                          </summary>
+                          <pre
+                            data-testid="ws-message-detail"
+                            data-raw-evidence="true"
+                            className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap break-all rounded-md bg-surface-sunken p-2 font-mono text-[11px] text-muted-foreground"
+                          >
+                            {message.detailText}
+                          </pre>
+                        </details>
+                      </div>
+                    );
+                  })}
+                </div>
+                {messageListState}
+              </div>
+            </CardContent>
+          </Card>
+
+          <div className="flex min-w-0 flex-col gap-4">
+            <Card
+              role="group"
+              aria-label="WebSocket Session Subscription"
+              className="min-w-0 bg-surface-sunken shadow-none"
+            >
+              <CardContent className="p-4">
+                <GroupTitleWithHelp
+                  title="WebSocket Session Subscription"
+                  helpLabel="WebSocket Session Subscription 说明"
+                  help={SESSION_SUBSCRIPTION_HELP}
                 />
-              </div>
-              {topicError ? (
-                <p className="text-[11px] text-status-critical">{topicError}</p>
-              ) : null}
-              {protocolNotice ? (
-                <p className="text-[11px] text-muted-foreground">
-                  {protocolNotice}
+                <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                  只筛选当前调试会话的 Topic，不改变 Feed Subscription 的采集范围。
                 </p>
-              ) : null}
 
-              <ul className="flex flex-col gap-0.5 text-[11px] text-faint-foreground">
-                {TOPIC_PREFIX_HINTS.map((hint) => (
-                  <li key={hint.topic}>
-                    <code className="font-mono text-muted-foreground">
-                      {hint.topic}
-                    </code>{" "}
-                    · {hint.label}
-                  </li>
-                ))}
-              </ul>
+                <div className="mt-3 flex flex-col gap-2">
+                  <div className="flex flex-col gap-1">
+                    <Label htmlFor="ws-scope">Topic 范围</Label>
+                    <Select
+                      id="ws-scope"
+                      value={scope}
+                      disabled={subscribeBlockReason !== null}
+                      onChange={(event) =>
+                        setScope(event.target.value as TopicScope)
+                      }
+                    >
+                      <option value="all">全部 Bar（market.bar.）</option>
+                      {BAR_INTERVALS.map((interval) => (
+                        <option key={interval} value={interval}>
+                          {interval}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
 
-              <div className="text-[11px] text-muted-foreground">
-                当前会话 Topic 模式：
-                {snapshot.topicPatterns.length === 0
-                  ? "无"
-                  : snapshot.topicPatterns.join("、")}
-              </div>
-            </div>
-          </section>
+                  {scope !== "all" ? (
+                    <div className="flex flex-col gap-1">
+                      <Label htmlFor="ws-instrument">
+                        InstrumentId（可选）
+                      </Label>
+                      <Input
+                        id="ws-instrument"
+                        value={instrument}
+                        disabled={subscribeBlockReason !== null}
+                        onChange={(event) => setInstrument(event.target.value)}
+                        placeholder="例如 binance:BTC/USDT，留空表示该 Interval 全部"
+                        autoComplete="off"
+                        spellCheck={false}
+                        aria-invalid={!topicValidation.valid}
+                      />
+                    </div>
+                  ) : null}
 
-          <section className="border border-border p-3" aria-label="Ping 顺序屏障">
-            <div className="text-sm font-semibold">Ping / Pong 顺序屏障</div>
-            <p className="mt-0.5 text-[11px] text-faint-foreground">
-              pong 仅证明操作顺序，不是订阅 ACK。
-            </p>
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={!isOpen}
-                onClick={() => session.ping()}
-              >
-                Ping
-              </Button>
-              <span data-testid="ws-sync-state" className="text-xs">
-                {syncLabel(snapshot)}
-              </span>
-              <span className="text-[11px] text-faint-foreground">
-                最近 pong {formatClock(snapshot.lastPongAt)}
-              </span>
-            </div>
-          </section>
+                  <div className="flex flex-wrap items-baseline gap-x-1.5 text-[11px] text-muted-foreground">
+                    <span>将订阅</span>
+                    <code
+                      data-testid="ws-topic-preview"
+                      className="min-w-0 break-all font-mono"
+                    >
+                      {topic}
+                    </code>
+                  </div>
+                  {!topicValidation.valid ? (
+                    <p className="text-[11px] text-status-critical">
+                      {topicValidation.error}
+                    </p>
+                  ) : null}
 
-          <section className="border border-border p-3" aria-label="自由 JSON 调试">
-            <div className="text-sm font-semibold">自由 JSON 调试</div>
-            <p className="mt-0.5 text-[11px] text-faint-foreground">
-              白名单仅 subscribe / unsubscribe / ping；没有订阅 ACK。
-            </p>
-            <Textarea
-              aria-label="自由 JSON"
-              className="mt-2 font-mono"
-              value={freeformText}
-              disabled={freeformBlockReason !== null}
-              onChange={(event) => setFreeformText(event.target.value)}
-              placeholder='{"op":"subscribe","topics":["market.bar.1m.binance:BTC/USDT"]}'
-            />
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={freeformBlockReason !== null || !isOpen}
-                aria-describedby={
-                  freeformBlockReason ? "ws-freeform-reason" : undefined
-                }
-                onClick={handleFreeformSend}
-              >
-                校验并发送
-              </Button>
-              <DisabledReason
-                id="ws-freeform-reason"
-                reason={freeformBlockReason}
-              />
-            </div>
-            {freeformError ? (
-              <p className="mt-1 text-[11px] text-status-critical">
-                {freeformError}
-              </p>
-            ) : null}
-            {freeformNotice ? (
-              <p className="mt-1 text-[11px] text-muted-foreground">
-                {freeformNotice}
-              </p>
-            ) : null}
-          </section>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      size="sm"
+                      disabled={!canSendTopic}
+                      aria-describedby={
+                        subscribeBlockReason ? "ws-subscribe-reason" : undefined
+                      }
+                      onClick={() => handleTopicAction(false)}
+                    >
+                      订阅
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={!canSendTopic}
+                      onClick={() => handleTopicAction(true)}
+                    >
+                      取消订阅
+                    </Button>
+                    <DisabledReason
+                      id="ws-subscribe-reason"
+                      reason={subscribeBlockReason}
+                    />
+                  </div>
+                  {topicError ? (
+                    <p className="text-[11px] text-status-critical">
+                      {topicError}
+                    </p>
+                  ) : null}
+                  {protocolNotice ? (
+                    <p className="text-[11px] text-muted-foreground">
+                      {protocolNotice}
+                    </p>
+                  ) : null}
+
+                  <ul className="flex flex-col gap-1 text-[11px] text-faint-foreground">
+                    {TOPIC_PREFIX_HINTS.map((hint) => (
+                      <li
+                        key={hint.topic}
+                        className="flex min-w-0 flex-col gap-0.5"
+                      >
+                        <code className="break-all font-mono text-muted-foreground">
+                          {hint.topic}
+                        </code>
+                        <span>{hint.label}</span>
+                      </li>
+                    ))}
+                  </ul>
+
+                  <div className="flex flex-wrap items-baseline gap-x-1.5 text-[11px] text-muted-foreground">
+                    <span>当前会话 Topic 模式</span>
+                    <span
+                      data-testid="ws-topic-patterns"
+                      className="min-w-0 break-all font-mono"
+                    >
+                      {snapshot.topicPatterns.length === 0
+                        ? "无"
+                        : snapshot.topicPatterns.join("、")}
+                    </span>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card
+              role="group"
+              aria-label="Ping 顺序屏障"
+              className="min-w-0 bg-surface-sunken shadow-none"
+            >
+              <CardContent className="p-4">
+                <GroupTitleWithHelp
+                  title="Ping / Pong"
+                  helpLabel="Ping 顺序屏障说明"
+                  help={PING_HELP}
+                />
+                <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                  pong 仅证明操作顺序，不是订阅 ACK。
+                </p>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!isOpen}
+                    onClick={() => session.ping()}
+                  >
+                    Ping
+                  </Button>
+                  <StatusBadge data-testid="ws-sync-state" tone={sync.tone} live>
+                    {sync.label}
+                  </StatusBadge>
+                  <span className="text-[11px] text-faint-foreground">
+                    最近 pong {formatClock(snapshot.lastPongAt)}
+                  </span>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card
+              role="group"
+              aria-label="自由 JSON 调试"
+              className="min-w-0 bg-surface-sunken shadow-none"
+            >
+              <CardContent className="p-4">
+                <GroupTitleWithHelp
+                  title="自由 JSON"
+                  helpLabel="自由 JSON 调试说明"
+                  help={FREEFORM_HELP}
+                />
+                <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                  白名单仅 subscribe / unsubscribe / ping，没有订阅 ACK。
+                </p>
+                <Textarea
+                  aria-label="自由 JSON"
+                  className="mt-2 font-mono"
+                  value={freeformText}
+                  disabled={freeformBlockReason !== null}
+                  onChange={(event) => setFreeformText(event.target.value)}
+                  placeholder='{"op":"subscribe","topics":["market.bar.1m.binance:BTC/USDT"]}'
+                />
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={freeformBlockReason !== null || !isOpen}
+                    aria-describedby={
+                      freeformBlockReason ? "ws-freeform-reason" : undefined
+                    }
+                    onClick={handleFreeformSend}
+                  >
+                    校验并发送
+                  </Button>
+                  <DisabledReason
+                    id="ws-freeform-reason"
+                    reason={freeformBlockReason}
+                  />
+                </div>
+                {freeformError ? (
+                  <p className="mt-1 text-[11px] text-status-critical">
+                    {freeformError}
+                  </p>
+                ) : null}
+                {freeformNotice ? (
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {freeformNotice}
+                  </p>
+                ) : null}
+              </CardContent>
+            </Card>
+          </div>
         </div>
-      </div>
-    </Panel>
+      </CardContent>
+    </Card>
   );
 }

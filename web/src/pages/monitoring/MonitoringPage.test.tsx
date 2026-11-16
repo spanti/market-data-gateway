@@ -6,22 +6,20 @@ import type { CollectorHealth } from "@/api/endpoints/ops";
 import { MONITORING_QUERY_KEYS } from "@/pages/monitoring/use-monitoring-data";
 import { renderApp } from "@/test/render-app";
 import { server } from "@/test/server";
+import { installResizeObserverStub } from "@/test/tooltip-env";
+import { expectNoBannedUiSymbols } from "@/test/ui-copy";
+
+installResizeObserverStub();
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
-function kpiCell(label: string): HTMLElement {
-  const cell = document.querySelector<HTMLElement>(
-    `[data-slot="kpi-cell"][data-kpi-label="${label}"]`,
-  );
-  if (!cell) {
-    throw new Error(`KPI cell not found: ${label}`);
-  }
-  return cell;
+function metricCard(label: string): HTMLElement {
+  return screen.getByRole("group", { name: label });
 }
 
-async function expectKpiValue(label: string, value: string) {
+async function expectMetricValue(label: string, value: string) {
   await waitFor(() => {
-    expect(within(kpiCell(label)).getByText(value)).toBeInTheDocument();
+    expect(within(metricCard(label)).getByText(value)).toBeInTheDocument();
   });
 }
 
@@ -62,7 +60,7 @@ function apiStatus(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function collectorStatus(overrides: Record<string, unknown> = {}) {
+function collectorHealth(overrides: Partial<CollectorHealth> = {}): CollectorHealth {
   const health: CollectorHealth = {
     tracked: [
       {
@@ -88,8 +86,13 @@ function collectorStatus(overrides: Record<string, unknown> = {}) {
     stale: [],
     gap_unrecoverable: [],
     gap_unrecoverable_count: 0,
+    ...overrides,
   };
   health.stale = health.tracked.filter((entry) => entry.stale);
+  return health;
+}
+
+function collectorStatus(overrides: Record<string, unknown> = {}) {
   return {
     service: "collector",
     role: "collector",
@@ -136,7 +139,7 @@ function collectorStatus(overrides: Record<string, unknown> = {}) {
       records_by_reason_code: {},
       records_by_stage_and_reason: [],
     },
-    health,
+    health: collectorHealth(),
     ...overrides,
   };
 }
@@ -202,12 +205,13 @@ function instruments() {
 
 function prometheusMatrix(
   values: Array<[number, number | string]>,
+  metric: Record<string, string> = {},
 ) {
   return {
     status: "success",
     data: {
       resultType: "matrix",
-      result: [{ metric: {}, values }],
+      result: [{ metric, values }],
     },
   };
 }
@@ -285,7 +289,9 @@ function installSources(
       const url = new URL(request.url);
       overrides.onPrometheusRequest?.(url.toString());
       if (overrides.prometheusInstant) {
-        return HttpResponse.json(overrides.prometheusInstant(url.searchParams.get("query") ?? ""));
+        return HttpResponse.json(
+          overrides.prometheusInstant(url.searchParams.get("query") ?? ""),
+        );
       }
       return HttpResponse.json({
         status: "success",
@@ -299,79 +305,129 @@ function installSources(
 }
 
 describe("Monitoring dashboard", () => {
-  it("renders real status, freshness, dataset, venue and trend data", async () => {
+  it("renders the D monitoring overview from real status, freshness and trend data", async () => {
     installSources();
-    renderApp();
+    const { container } = renderApp();
 
     expect(
-      await screen.findByRole("heading", { name: "监控分析工作台" }),
+      await screen.findByRole("heading", { name: "监控总览", level: 1 }),
     ).toBeInTheDocument();
 
-    // QPS, Peak QPS and P99 KPI values come from Prometheus.
-    await expectKpiValue("Realtime QPS", "12.5");
-    expect(within(kpiCell("Peak QPS")).getByText("18.25")).toBeInTheDocument();
-    expect(within(kpiCell("HTTP P99")).getByText("500")).toBeInTheDocument();
-    expect(within(kpiCell("HTTP P99")).getByText("ms")).toBeInTheDocument();
-    expect(screen.getByText(/P95 250 ms · P50 20 ms/)).toBeInTheDocument();
-    expect(screen.getAllByText(/含完整响应流耗时/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/rate 5m/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/最近 1 小时/).length).toBeGreaterThan(0);
-
-    // Feed Freshness uses server age/threshold/stale with a countdown.
-    expect(screen.getByText(/剩余 100s/)).toBeInTheDocument();
-    expect(screen.getAllByText("失活").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("正常").length).toBeGreaterThan(0);
-
-    // Dataset Freshness is a separate visualization.
+    // Four KPI cards, with QPS, Peak QPS, P99 and an independent Dataset age.
+    for (const label of [
+      "Realtime QPS",
+      "Peak QPS",
+      "HTTP P99",
+      "Dataset Freshness",
+    ]) {
+      expect(metricCard(label)).toBeInTheDocument();
+    }
+    await expectMetricValue("Realtime QPS", "12.5");
+    expect(within(metricCard("Realtime QPS")).getByText("req/s")).toBeInTheDocument();
+    expect(within(metricCard("Realtime QPS")).getByText(/最近样本/)).toBeInTheDocument();
+    await expectMetricValue("Peak QPS", "18.25");
+    expect(within(metricCard("Peak QPS")).getByText(/最近 1 小时/)).toBeInTheDocument();
+    await expectMetricValue("HTTP P99", "500");
+    expect(within(metricCard("HTTP P99")).getByText("ms")).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { name: "Dataset Freshness" }),
+      within(metricCard("HTTP P99")).getByText(/P50 20 ms，P95 250 ms/),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/独立于 Feed Freshness/),
+      within(metricCard("HTTP P99")).getByText(/含完整响应流耗时/),
     ).toBeInTheDocument();
+    expect(
+      within(metricCard("Dataset Freshness")).getByText("前"),
+    ).toBeInTheDocument();
+    expect(
+      within(metricCard("Dataset Freshness")).getByText(/最近落盘/),
+    ).toBeInTheDocument();
+    expect(
+      within(metricCard("Dataset Freshness")).queryByText("未知"),
+    ).not.toBeInTheDocument();
 
-    // Service instances are only collector/api/replay.
-    const ledger = screen.getByRole("region", {
-      name: "Service Instance ledger",
+    // QPS and HTTP latency are separate trend cards with data tables.
+    for (const title of ["QPS 趋势", "HTTP 延迟趋势"]) {
+      const chart = screen.getByRole("region", { name: title });
+      expect(
+        within(chart).getByRole("heading", { name: title }),
+      ).toBeInTheDocument();
+      expect(
+        within(chart).getByText(/查看数据表（\d+ 个时间点）/),
+      ).toBeInTheDocument();
+    }
+
+    // Feed Freshness keeps server age/threshold/stale semantics.
+    const feed = screen.getByRole("region", { name: "Feed Freshness" });
+    expect(within(feed).getByText(/剩余 100s/)).toBeInTheDocument();
+    expect(within(feed).getAllByText("失活").length).toBeGreaterThan(0);
+    expect(within(feed).getByText("正常")).toBeInTheDocument();
+    expect(within(feed).queryByText("Collector /status 加载失败")).not.toBeInTheDocument();
+
+    // Dataset Freshness is a separate region and row source.
+    const dataset = screen.getByRole("region", { name: "Dataset Freshness" });
+    expect(within(dataset).getByText(/独立于 Feed Freshness/)).toBeInTheDocument();
+    expect(within(dataset).getByText("1m")).toBeInTheDocument();
+
+    // Service Role and Service Instance are not conflated: Current Contract
+    // exposes one process per Role, so the card names Service Roles.
+    const service = screen.getByRole("region", { name: "Service Role" });
+    expect(
+      within(service).getByRole("heading", { name: "Service Role" }),
+    ).toBeInTheDocument();
+    expect(within(service).getByText("3 个 Service Role")).toBeInTheDocument();
+    for (const role of ["collector", "api", "replay"] as const) {
+      const item = within(service).getByRole("group", {
+        name: `${role} Service Role`,
+      });
+      expect(item).toHaveTextContent(role);
+      expect(item).toHaveTextContent("Service Role");
+      expect(item).toHaveTextContent("Instance");
+    }
+    expect(service).not.toHaveTextContent(/master|worker|leader|failover/i);
+
+    // Venues come from real instruments; connection capabilities stay unknown.
+    const upstream = screen.getByRole("region", {
+      name: "上游能力与 Freshness",
     });
-    expect(ledger).toHaveTextContent("collector");
-    expect(ledger).toHaveTextContent("api");
-    expect(ledger).toHaveTextContent("replay");
-    expect(ledger).not.toHaveTextContent(/master|worker|leader|failover/i);
-
-    // Venues are derived from real instruments.
-    expect(screen.getByText("venue-a")).toBeInTheDocument();
-    expect(screen.getByText("venue-b")).toBeInTheDocument();
+    expect(within(upstream).getByText("venue-a")).toBeInTheDocument();
+    expect(within(upstream).getByText("venue-b")).toBeInTheDocument();
+    expect(within(upstream).getAllByText("连接 未暴露").length).toBeGreaterThan(0);
+    expect(within(upstream).getAllByText("心跳 未暴露").length).toBeGreaterThan(0);
+    expect(within(upstream).getAllByText("重连 未暴露").length).toBeGreaterThan(0);
+    expect(within(upstream).getAllByText("网络 未暴露").length).toBeGreaterThan(0);
+    expect(within(upstream).getByText(/不证明连接健康/)).toBeInTheDocument();
     expect(screen.queryByText(/binance|okx|fix/i)).not.toBeInTheDocument();
 
-    // Unsupported connection fields are explicit capability gaps.
-    expect(screen.getAllByText("未暴露").length).toBeGreaterThan(0);
-    expect(
-      screen.getByText(/不证明当前连接健康/),
-    ).toBeInTheDocument();
+    const upstreamDetail = screen.getByRole("region", { name: "上游状态" });
+    expect(within(upstreamDetail).getByText("venue-a")).toBeInTheDocument();
+    expect(within(upstreamDetail).getByText("venue-b")).toBeInTheDocument();
 
-    // Every chart has a data-table fallback.
+    // Alerts are derived from the real stale entry, never fabricated.
+    const alerts = screen.getByRole("region", { name: "页面内告警" });
+    expect(within(alerts).getByText("Feed Freshness 失活")).toBeInTheDocument();
     expect(
-      screen.getByText(/查看数据表（2 个时间点）/),
+      within(alerts).getByText("上游 venue-a 有 Feed 失活"),
     ).toBeInTheDocument();
 
     // Per-source metadata: source, window, last successful update.
+    const sourcesPanel = screen.getByRole("region", { name: "数据源与刷新" });
+    expect(within(sourcesPanel).getByText("Service /status")).toBeInTheDocument();
     expect(
-      screen.getAllByText(/数据源：Service \/status/).length,
-    ).toBeGreaterThan(0);
+      within(sourcesPanel).getByText("Dataset /api/v1/status"),
+    ).toBeInTheDocument();
     expect(
-      screen.getAllByText(/数据源：Dataset \/api\/v1\/status/).length,
-    ).toBeGreaterThan(0);
-    expect(
-      screen.getAllByText(/数据源：Prometheus（\/prometheus）/).length,
-    ).toBeGreaterThan(0);
+      within(sourcesPanel).getByText(/Prometheus（\/prometheus）/),
+    ).toBeInTheDocument();
     expect(screen.getAllByText(/最后成功/).length).toBeGreaterThanOrEqual(5);
+
+    // No banned separators in UI-generated copy.
+    expectNoBannedUiSymbols(container);
   });
 
   it("shows a stale entry as failed and never as healthy", async () => {
     installSources({
       collector: collectorStatus({
-        health: {
+        health: collectorHealth({
           tracked: [
             {
               feed: "testfeed",
@@ -383,11 +439,8 @@ describe("Monitoring dashboard", () => {
               stale: true,
             },
           ],
-          stale: [],
           stale_count: 1,
-          gap_unrecoverable: [],
-          gap_unrecoverable_count: 0,
-        },
+        }),
       }),
     });
     renderApp();
@@ -397,6 +450,8 @@ describe("Monitoring dashboard", () => {
       expect(within(feed).getByText("失活")).toBeInTheDocument();
       expect(within(feed).queryByText("正常")).not.toBeInTheDocument();
     });
+    const alerts = screen.getByRole("region", { name: "页面内告警" });
+    expect(within(alerts).getByText("严重")).toBeInTheDocument();
   });
 
   it("moves to unknown with the last success time when a source fails", async () => {
@@ -425,17 +480,21 @@ describe("Monitoring dashboard", () => {
     });
 
     expect(
-      await screen.findByText(/Collector \/status 加载失败/),
-    ).toBeInTheDocument();
+      (await screen.findAllByText(/Collector \/status 加载失败/)).length,
+    ).toBeGreaterThan(0);
     expect(screen.queryByText(/剩余 100s/)).not.toBeInTheDocument();
     expect(screen.getAllByText(/最后成功/).length).toBeGreaterThan(0);
 
-    const ledger = screen.getByRole("region", {
-      name: "Service Instance ledger",
-    });
-    expect(within(ledger).getByText(/状态未知/)).toBeInTheDocument();
+    const service = screen.getByRole("region", { name: "Service Role" });
+    expect(within(service).getAllByText(/状态未知/).length).toBeGreaterThan(0);
+    expect(within(service).getAllByText(/Uptime —/).length).toBeGreaterThan(0);
+
+    const alerts = screen.getByRole("region", { name: "页面内告警" });
     expect(
-      within(ledger).getAllByText(/Uptime —/).length,
+      within(alerts).getByText("Collector /status 加载失败"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByText("Ops endpoint returned HTTP 500").length,
     ).toBeGreaterThan(0);
   });
 
@@ -443,7 +502,7 @@ describe("Monitoring dashboard", () => {
     installSources();
     const { queryClient } = renderApp();
 
-    await expectKpiValue("Realtime QPS", "12.5");
+    await expectMetricValue("Realtime QPS", "12.5");
 
     server.use(
       http.get("*/prometheus/api/v1/query_range", () =>
@@ -457,21 +516,46 @@ describe("Monitoring dashboard", () => {
       queryKey: MONITORING_QUERY_KEYS.qpsTrend,
     });
 
-    expect((await screen.findAllByText("能力未知")).length).toBeGreaterThan(0);
-    expect(within(kpiCell("Realtime QPS")).queryByText("12.5")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        within(metricCard("Realtime QPS")).getByText("未知"),
+      ).toBeInTheDocument();
+      expect(
+        within(metricCard("Realtime QPS")).getByText("加载失败"),
+      ).toBeInTheDocument();
+      expect(
+        within(metricCard("Realtime QPS")).queryByText("12.5"),
+      ).not.toBeInTheDocument();
+    });
     expect(screen.getAllByText(/最后成功/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/查询失败/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("upstream down").length).toBeGreaterThan(0);
   });
 
-  it("shows explicit empty states without generating health records", async () => {
+  it("keeps cached last-success evidence without showing old KPIs as healthy", async () => {
+    installSources();
+    const { queryClient } = renderApp();
+    await expectMetricValue("Realtime QPS", "12.5");
+
+    server.use(
+      http.get("*/prometheus/api/v1/query_range", () => HttpResponse.json({ status: "error", error: "down" })),
+    );
+    await queryClient.refetchQueries({
+      queryKey: MONITORING_QUERY_KEYS.qpsTrend,
+    });
+
+    const card = metricCard("Realtime QPS");
+    await waitFor(() => {
+      expect(within(card).getByText("未知")).toBeInTheDocument();
+      expect(within(card).queryByText("12.5")).not.toBeInTheDocument();
+    });
+    expect(within(card).getByText(/最后成功/)).toBeInTheDocument();
+  });
+
+  it("shows explicit empty states without generating health or alert records", async () => {
     installSources({
       collector: collectorStatus({
-        health: {
-          tracked: [],
-          stale: [],
-          stale_count: 0,
-          gap_unrecoverable: [],
-          gap_unrecoverable_count: 0,
-        },
+        health: collectorHealth({ tracked: [], stale: [], stale_count: 0 }),
       }),
       dataset: datasetStatus({ intervals: {}, last_flushed_ts: null }),
       instrumentList: { instruments: [] },
@@ -479,7 +563,7 @@ describe("Monitoring dashboard", () => {
     renderApp();
 
     expect(
-      await screen.findByText("暂无 Feed Freshness 数据"),
+      await screen.findByText("暂无 Feed Freshness 跟踪项"),
     ).toBeInTheDocument();
     expect(
       screen.getByText("暂无 Dataset Freshness 数据"),
@@ -487,6 +571,13 @@ describe("Monitoring dashboard", () => {
     expect(
       screen.getByText("暂无 Instrument Reference 数据"),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText("当前没有页面内告警"),
+    ).toBeInTheDocument();
+    expect(
+      within(metricCard("Dataset Freshness")).getByText("尚无 flush 记录"),
+    ).toBeInTheDocument();
+    expectNoBannedUiSymbols();
   });
 
   it("drives every trend from one range control and labels the peak range", async () => {
@@ -501,9 +592,6 @@ describe("Monitoring dashboard", () => {
       name: "统一监控时间范围",
     });
     expect(
-      await screen.findByText(/默认最近 1 小时/),
-    ).toBeInTheDocument();
-    expect(
       screen.getByRole("radio", { name: "1 小时" }),
     ).toHaveAttribute("aria-checked", "true");
 
@@ -513,6 +601,11 @@ describe("Monitoring dashboard", () => {
       screen.getByRole("radio", { name: "6 小时" }),
     ).toHaveAttribute("aria-checked", "true");
     expect(group).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        within(metricCard("Peak QPS")).getByText(/最近 6 小时/),
+      ).toBeInTheDocument();
+    });
 
     await waitFor(() => {
       const qpsUrls = requestUrls.filter((url) =>
@@ -533,6 +626,69 @@ describe("Monitoring dashboard", () => {
         true,
       );
     });
+  });
+
+  it("keeps KPI selection stable when a series display label includes a path", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    installSources({
+      prometheusRange: (query) => {
+        if (query.includes("0.50")) {
+          return prometheusMatrix([[now - 30, "0.02"]], { path: "/api/v1/bars" });
+        }
+        if (query.includes("0.95")) {
+          return prometheusMatrix([[now - 30, "0.25"]], { path: "/api/v1/bars" });
+        }
+        if (query.includes("0.99")) {
+          return prometheusMatrix([[now - 30, "0.5"]], { path: "/api/v1/bars" });
+        }
+        return prometheusMatrix([[now, "12.5"]], { path: "/api/v1/bars" });
+      },
+    });
+    const { container } = renderApp();
+
+    await expectMetricValue("HTTP P99", "500");
+    expect(screen.getByText("P99 /api/v1/bars")).toBeInTheDocument();
+    expect(screen.getAllByText("P99 /api/v1/bars").length).toBeGreaterThan(0);
+    expectNoBannedUiSymbols(container);
+  });
+
+  it("keeps backend raw errors verbatim while UI copy stays clean", async () => {
+    const raw = "upstream · failed：timeout";
+    installSources();
+    const errorResponse = {
+      status: "error",
+      errorType: "internal",
+      error: raw,
+    };
+    server.use(
+      http.get("*/prometheus/api/v1/query_range", () =>
+        HttpResponse.json(errorResponse, { status: 500 }),
+      ),
+      http.get("*/prometheus/api/v1/query", () =>
+        HttpResponse.json(errorResponse, { status: 500 }),
+      ),
+    );
+    const { container } = renderApp();
+
+    await waitFor(() => {
+      expect(screen.getAllByText(raw).length).toBeGreaterThan(0);
+    });
+    expect(screen.getAllByText(/查询失败/).length).toBeGreaterThan(0);
+    expectNoBannedUiSymbols(container);
+  });
+
+  it("opens card help by hover and exposes a readable tooltip", async () => {
+    installSources();
+    const user = userEvent.setup();
+    renderApp();
+
+    const trigger = await screen.findByRole("button", {
+      name: "Realtime QPS 说明",
+    });
+    await user.hover(trigger);
+    const tip = await screen.findByRole("tooltip");
+    expect(tip).toHaveTextContent(/1 分钟滑动窗口的请求速率/);
+    expect(tip).toHaveTextContent(/统计窗口 最近 1 小时/);
   });
 });
 
@@ -626,12 +782,12 @@ describe("monitoring runtime-mode gating", () => {
     const capture = installAdmin("Operator");
     renderApp();
 
-    await expectKpiValue("Realtime QPS", "12.5");
-    expect(within(kpiCell("Peak QPS")).getByText("18.25")).toBeInTheDocument();
-    expect(within(kpiCell("HTTP P99")).getByText("500")).toBeInTheDocument();
-    expect(within(kpiCell("HTTP P99")).getByText("ms")).toBeInTheDocument();
+    await expectMetricValue("Realtime QPS", "12.5");
+    await expectMetricValue("Peak QPS", "18.25");
+    await expectMetricValue("HTTP P99", "500");
+    expect(within(metricCard("HTTP P99")).getByText("ms")).toBeInTheDocument();
     expect(
-      screen.getAllByText(/数据源：Admin API 监控代理/).length,
+      screen.getAllByText(/Admin API 监控代理/).length,
     ).toBeGreaterThan(0);
 
     expect(capture.prometheusCalls()).toBe(0);
@@ -661,7 +817,12 @@ describe("monitoring runtime-mode gating", () => {
       (await screen.findAllByText(/后端未实现/)).length,
     ).toBeGreaterThan(0);
     expect(screen.getAllByText("能力未知").length).toBeGreaterThan(0);
-    expect(within(kpiCell("Realtime QPS")).queryByText("12.5")).not.toBeInTheDocument();
+    expect(
+      within(metricCard("Realtime QPS")).queryByText("12.5"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(metricCard("Realtime QPS")).getByText("未知"),
+    ).toBeInTheDocument();
   });
 
   it("requires login instead of falling back to direct Prometheus when unauthenticated", async () => {
@@ -699,9 +860,9 @@ describe("monitoring runtime-mode gating", () => {
     renderApp();
 
     expect(
-      await screen.findByRole("heading", { name: "监控分析工作台" }),
+      await screen.findByRole("heading", { name: "监控总览" }),
     ).toBeInTheDocument();
-    await expectKpiValue("Realtime QPS", "12.5");
+    await expectMetricValue("Realtime QPS", "12.5");
   });
 
   it("never reads unauthenticated ops endpoints in Admin mode and shows explicit capability gaps", async () => {
@@ -726,15 +887,16 @@ describe("monitoring runtime-mode gating", () => {
     renderApp();
 
     expect(
-      await screen.findByRole("heading", { name: "监控分析工作台" }),
+      await screen.findByRole("heading", { name: "监控总览" }),
     ).toBeInTheDocument();
-    await expectKpiValue("Realtime QPS", "12.5");
+    await expectMetricValue("Realtime QPS", "12.5");
 
-    const serviceGap = await screen.findByTestId("service-instance-gap");
+    const serviceGap = screen.getByRole("region", { name: "Service Instance" });
     expect(serviceGap).toHaveTextContent(
       "需要 Admin API 服务实例接口（未实现）",
     );
-    expect(screen.getByTestId("feed-freshness-gap")).toHaveTextContent(
+    const feedGap = screen.getByRole("region", { name: "Feed Freshness" });
+    expect(feedGap).toHaveTextContent(
       "需要 Admin API 服务实例接口（未实现）",
     );
     expect(opsRequested).toBe(false);

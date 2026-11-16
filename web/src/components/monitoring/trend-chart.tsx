@@ -11,8 +11,13 @@ import {
   TooltipComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
+import type * as React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChartPanel, type ChartPanelState } from "@/components/chart-panel";
+import {
+  ChartPanel,
+  type ChartPanelHelp,
+  type ChartPanelState,
+} from "@/components/chart-panel";
 import { ChartDataTable } from "@/components/monitoring/chart-data-table";
 import {
   alignTrendPoints,
@@ -21,6 +26,7 @@ import {
   useChartPalette,
   type ChartPalette,
 } from "@/components/monitoring/chart-option";
+import { latestFiniteValue } from "@/components/monitoring/series-metrics";
 import type { UnknownCause } from "@/components/states";
 import type { TrendSeries } from "@/api/monitoring/types";
 import { formatNumber, formatUtcTime } from "@/lib/format";
@@ -37,29 +43,28 @@ registerEChartsModules([
 
 export interface TrendChartProps {
   title: string;
-  description?: string;
+  help?: ChartPanelHelp;
   unit: string;
   series: TrendSeries[];
   state?: ChartPanelState;
   unknownCause?: UnknownCause;
-  errorMessage?: string;
+  errorMessage?: React.ReactNode;
   onRetry?: () => void;
   palette?: ChartPalette;
   className?: string;
 }
 
-function lastFiniteValue(points: TrendSeries["points"]): number | null {
-  for (let index = points.length - 1; index >= 0; index -= 1) {
-    const value = points[index]?.value;
-    if (value !== null && value !== undefined && Number.isFinite(value)) {
-      return value;
-    }
-  }
-  return null;
-}
-
 function pointCount(series: TrendSeries[]): number {
   return alignTrendPoints(series).timestamps.length;
+}
+
+/**
+ * jsdom can provide a ResizeObserver stub but not a canvas context. Treat it
+ * as a non-rendering host so the accessible data table remains the only
+ * representation instead of logging ECharts canvas failures.
+ */
+function isNonRenderingDom(): boolean {
+  return typeof navigator !== "undefined" && /jsdom/i.test(navigator.userAgent);
 }
 
 /**
@@ -69,7 +74,7 @@ function pointCount(series: TrendSeries[]): number {
  */
 export function TrendChart({
   title,
-  description = "",
+  help,
   unit,
   series,
   state = "ready",
@@ -96,7 +101,7 @@ export function TrendChart({
     () =>
       buildTrendChartOption({
         title,
-        description,
+        description: "",
         unit,
         series: series.map((item, index) => ({
           name: item.name,
@@ -105,14 +110,14 @@ export function TrendChart({
         })),
         palette: resolvedPalette,
       }),
-    [title, description, unit, series, colors, resolvedPalette],
+    [title, unit, series, colors, resolvedPalette],
   );
 
   useEffect(() => {
     const element = hostRef.current;
-    // jsdom has no ResizeObserver/canvas; production browsers do. The table
-    // fallback keeps the chart data available either way.
-    if (!element || typeof ResizeObserver === "undefined") {
+    // jsdom has no canvas; production browsers do. The table fallback keeps
+    // the chart data available either way.
+    if (!element || typeof ResizeObserver === "undefined" || isNonRenderingDom()) {
       return;
     }
     let chart: ECharts | null = null;
@@ -148,21 +153,25 @@ export function TrendChart({
     chartRef.current?.dispatchAction({ type: "showTip", dataIndex: index });
   }, []);
 
-  const readout =
+  const readoutTime =
     aligned.timestamps.length > 0
-      ? [
-          formatUtcTime(aligned.timestamps[activeIndex] ?? null),
-          ...series.map((item, index) => {
-            const value = aligned.rows[activeIndex]?.values[index] ?? null;
-            return `${item.name} ${formatNumber(value, 3)}${unit ? ` ${unit}` : ""}`;
-          }),
-        ].join(" · ")
-      : "";
+      ? formatUtcTime(aligned.timestamps[activeIndex] ?? null)
+      : null;
+  const readoutValues =
+    aligned.timestamps.length > 0
+      ? series.map((item, index) => {
+          const value = aligned.rows[activeIndex]?.values[index] ?? null;
+          return {
+            name: item.name,
+            text: `${item.name} ${formatNumber(value, 3)}${unit ? ` ${unit}` : ""}`,
+          };
+        })
+      : [];
 
   const legend = series.map((item, index) => ({
     name: item.name,
     color: colors[index]?.color ?? resolvedPalette.series[0]!,
-    value: formatNumber(lastFiniteValue(item.points), 3),
+    value: formatNumber(latestFiniteValue(item), 3),
     unit,
   }));
 
@@ -171,7 +180,7 @@ export function TrendChart({
   return (
     <ChartPanel
       title={title}
-      description={description}
+      help={help}
       legend={legend}
       state={state}
       unknownCause={unknownCause}
@@ -225,13 +234,16 @@ export function TrendChart({
           </p>
         ) : null}
       </div>
-      {readout ? (
+      {readoutTime ? (
         <p
           role="status"
           aria-live="polite"
-          className="mt-2 text-[11px] tabular-nums text-muted-foreground"
+          className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] tabular-nums text-muted-foreground"
         >
-          {readout}
+          <span>{readoutTime}</span>
+          {readoutValues.map((item) => (
+            <span key={item.name}>{` ${item.text}`}</span>
+          ))}
         </p>
       ) : null}
     </ChartPanel>

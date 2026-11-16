@@ -124,5 +124,5 @@ export function peakRangeLabel(range: MonitoringRangeOption): string {
 }
 
 export function peakQueryDescription(range: MonitoringRangeOption): string {
-  return `${peakRangeLabel(range)} · ${range.peakRateWindow} rate · ${range.peakStepSeconds}s step`;
+  return `${peakRangeLabel(range)}，${range.peakRateWindow} rate，${range.peakStepSeconds}s step`;
 }

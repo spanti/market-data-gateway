@@ -1,137 +1,326 @@
-import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useForm } from "react-hook-form";
-import { z } from "zod";
-import type { CapabilityState } from "@/api/capabilities";
+import { AlertTriangle } from "lucide-react";
+import { useState, type ReactNode } from "react";
 import {
   deleteFeedSubscription,
   fetchFeedSubscriptions,
-  fetchFlowControl,
-  updateApiRateLimit,
   updateFeedSubscription,
-  updateWsSlowConsumer,
 } from "@/api/endpoints/admin-console";
-import type {
-  FeedSubscription,
-  FlowControlResponse,
-} from "@/api/endpoints/admin";
+import type { FeedSubscription } from "@/api/endpoints/admin";
 import { HttpError } from "@/api/http/types";
 import { ConfirmDialog } from "@/components/confirm-dialog";
-import { DisabledAction, DisabledReason } from "@/components/disabled-reason";
-import { EmptyState, ErrorState, LoadingState } from "@/components/states";
-import { StatusBadge } from "@/components/status-badge";
+import { DisabledReason } from "@/components/disabled-reason";
+import { HelpTrigger } from "@/components/help-trigger";
+import {
+  EmptyState,
+  LoadingState,
+  UnknownState,
+} from "@/components/states";
+import { StatusBadge, type StatusTone } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Panel,
-  PanelDescription,
-  PanelHeader,
-  PanelTitle,
-} from "@/components/ui/panel";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { formatUtcTimestamp } from "@/lib/format";
+import {
+  CardTitleWithHelp,
+  QueryFailure,
+  UnavailableActions,
+} from "@/pages/console/console-parts";
 import {
   buildManualMergeDraft,
   conflictFromError,
   describeFeedSubscription,
-  describeFlowControl,
   FEED_DELETION_HISTORY_NOTE,
   feedSubscriptionUpdateBody,
   type FeedConflictState,
+  type FeedSubscriptionView as FeedSubscriptionPresentation,
 } from "@/pages/console/feed-subscription";
 import {
-  adminCapabilityAvailability,
+  adminCapabilityReason,
   CAPABILITY_KEYS,
-  type CapabilityKey,
 } from "@/runtime/capability-gates";
+import {
+  capabilityModeKind,
+  capabilityModePresentation,
+} from "@/runtime/mode-presentation";
 import type { DisabledReason as DisabledReasonValue } from "@/runtime/permissions";
 import { useRuntimeMode } from "@/runtime/runtime-mode-context";
 import { useActionReason } from "@/runtime/use-permission";
 import { useRetryAfter } from "@/runtime/use-retry-after";
 
 /**
- * Feed Subscription + flow control console.
+ * Feed Subscription console.
  *
- * CONTRACT TARGET: these Admin API resources do not exist in the current
+ * CONTRACT TARGET: this Admin API resource does not exist in the current
  * backend. Current Contract renders a disabled area with visible reasons and
  * never a fabricated subscription table.
+ *
+ * Desired, Observed, Drift and Last Error stay separate groups in every state.
+ * A 409 stops the write and requires a manual merge from a refreshed version;
+ * nothing is ever overwritten automatically.
+ *
+ * Flow-control editing is a sibling resource and lives in
+ * `flow-control-section.tsx`.
  */
 
 const FEED_QUERY_KEY = ["console", "feed-subscriptions"] as const;
-const FLOW_QUERY_KEY = ["console", "flow-control"] as const;
 
-function adminCapabilityReason(
-  capability: CapabilityState | null,
-  key: CapabilityKey,
-): DisabledReasonValue | null {
-  const availability = adminCapabilityAvailability(capability, key);
-  return availability.kind === "disabled" ? availability.reason : null;
+const FEED_HELP =
+  "Feed Subscription 是采集配置。Desired 是已接受的目标，Observed 是 Collector 最近确认的状态，Drift 比较两者，Last Error 保留最近失败的原始 code、message、时间与 Request ID。遇到 409 必须刷新后人工合并，不会自动覆盖他人修改。删除只停止后续采集。";
+
+const GROUP_HELP = {
+  desired:
+    "Desired 是服务端已接受的配置目标与版本。修改需要 Admin API 与 Operator 或 SuperAdmin 角色。",
+  observed:
+    "Observed 是 Collector 最近应用的状态与版本。它可能落后于 Desired 的更新时间。",
+  drift:
+    "Drift 分开比较 Desired 与 Observed。存在漂移时以 Observed 为准，刷新后由 Operator 人工处理。",
+  lastError:
+    "Last Error 保留最近一次应用失败的原始 code、message、时间与 Request ID。message 原样展示。",
+} as const;
+
+function desiredTone(view: FeedSubscriptionPresentation): StatusTone {
+  if (view.desired.deleted) {
+    return "warning";
+  }
+  return view.desired.enabled ? "good" : "info";
 }
 
-function DisabledArea({
-  title,
-  description,
-  readReason,
-  writeReason,
+function observedTone(state: string): StatusTone {
+  switch (state) {
+    case "applied":
+      return "good";
+    case "pending":
+      return "warning";
+    case "applying":
+      return "info";
+    case "rejected":
+      return "critical";
+    default:
+      return "unknown";
+  }
+}
+
+function FeedGroup({
+  label,
+  help,
   children,
 }: {
-  title: string;
-  description: string;
-  readReason: DisabledReasonValue | null;
-  writeReason: DisabledReasonValue | null;
-  children?: ReactNode;
+  label: string;
+  help: ReactNode;
+  children: ReactNode;
 }) {
   return (
-    <Panel className="mt-6 p-5" aria-label={title}>
-      <PanelHeader>
-        <div>
-          <PanelTitle>{title}</PanelTitle>
-          <PanelDescription>{description}</PanelDescription>
-        </div>
-        <DisabledAction label="读取" reason={readReason} />
-      </PanelHeader>
-      <div className="mt-3 flex flex-wrap items-center gap-3">
-        <DisabledAction label="修改" reason={writeReason} />
+    <div
+      role="group"
+      aria-label={label}
+      data-slot="feed-group"
+      className="min-w-0 rounded-lg border border-card-border bg-surface-sunken p-3"
+    >
+      <div className="flex items-center gap-1.5">
+        <span className="text-[11px] font-medium uppercase tracking-wide text-faint-foreground">
+          {label}
+        </span>
+        <HelpTrigger label={`${label} 说明`} content={help} side="top" />
       </div>
-      {children}
-    </Panel>
+      <div className="mt-2 min-w-0">{children}</div>
+    </div>
+  );
+}
+
+function MetadataRow({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-1.5">
+      <dt className="text-faint-foreground">{label}</dt>
+      <dd className="min-w-0 break-words">{children}</dd>
+    </div>
+  );
+}
+
+function FeedSubscriptionCard({
+  view,
+  actionReason,
+  busy,
+  onToggle,
+  onDelete,
+}: {
+  view: FeedSubscriptionPresentation;
+  actionReason: DisabledReasonValue | null;
+  busy: boolean;
+  onToggle: () => void;
+  onDelete: () => void;
+}) {
+  const reasonId = `feed-${view.subscriptionId}-reason`;
+  return (
+    <Card
+      role="group"
+      aria-label={`${view.identity.instrumentId} Feed Subscription`}
+      data-testid={`feed-subscription-${view.subscriptionId}`}
+      className="bg-surface-sunken shadow-none"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2 p-4 pb-0">
+        <div className="min-w-0">
+          <div className="break-all font-mono text-sm font-medium text-foreground">
+            {view.identity.instrumentId}
+          </div>
+          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+            <span>
+              Feed <span className="font-mono">{view.identity.feed}</span>
+            </span>
+            <span>
+              Venue <span className="font-mono">{view.identity.venue}</span>
+            </span>
+            <span>
+              Bar Interval{" "}
+              <span className="font-mono">{view.identity.interval}</span>
+            </span>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={actionReason !== null || busy}
+            aria-describedby={actionReason ? reasonId : undefined}
+            onClick={onToggle}
+          >
+            {view.desired.enabled ? "停用" : "启用"}
+          </Button>
+          <Button
+            size="sm"
+            variant="destructive"
+            disabled={actionReason !== null || busy}
+            aria-describedby={actionReason ? reasonId : undefined}
+            onClick={onDelete}
+          >
+            删除
+          </Button>
+          <DisabledReason id={reasonId} reason={actionReason} />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
+        <FeedGroup label="Desired" help={GROUP_HELP.desired}>
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusBadge tone={desiredTone(view)}>
+              {view.desired.label}
+            </StatusBadge>
+            <span className="font-mono text-xs">v{view.desired.version}</span>
+          </div>
+          <dl className="mt-2 space-y-1 text-[11px] text-muted-foreground">
+            <MetadataRow label="更新于">
+              <span className="font-mono">
+                {formatUtcTimestamp(view.desired.updatedAt)}
+              </span>
+            </MetadataRow>
+            <MetadataRow label="更新者">
+              <span className="font-mono">{view.desired.updatedBy}</span>
+            </MetadataRow>
+          </dl>
+        </FeedGroup>
+
+        <FeedGroup label="Observed" help={GROUP_HELP.observed}>
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusBadge tone={observedTone(view.observed.state)}>
+              {view.observed.label}
+            </StatusBadge>
+            <span className="font-mono text-xs">v{view.observed.version}</span>
+          </div>
+          <dl className="mt-2 space-y-1 text-[11px] text-muted-foreground">
+            <MetadataRow label="观测于">
+              <span className="font-mono">
+                {formatUtcTimestamp(view.observed.observedAt)}
+              </span>
+            </MetadataRow>
+            <MetadataRow label="Collector Instance">
+              <span className="font-mono">
+                {view.observed.collectorInstanceId}
+              </span>
+            </MetadataRow>
+          </dl>
+        </FeedGroup>
+
+        <FeedGroup label="Drift" help={GROUP_HELP.drift}>
+          <StatusBadge tone={view.drift.inSync ? "good" : "warning"}>
+            {view.drift.label}
+          </StatusBadge>
+          <dl className="mt-2 space-y-1 text-[11px] text-muted-foreground">
+            {!view.drift.inSync ? (
+              <MetadataRow label="原因">
+                <span>{view.drift.reasonLabel}</span>
+              </MetadataRow>
+            ) : null}
+            <MetadataRow label="版本">
+              <span className="font-mono">
+                Desired v{view.drift.desiredVersion}
+              </span>
+              <span className="ml-2 font-mono">
+                Observed v{view.drift.observedVersion}
+              </span>
+            </MetadataRow>
+            <MetadataRow label="自">
+              <span className="font-mono">
+                {formatUtcTimestamp(view.drift.since)}
+              </span>
+            </MetadataRow>
+          </dl>
+        </FeedGroup>
+
+        <FeedGroup label="Last Error" help={GROUP_HELP.lastError}>
+          {view.lastError ? (
+            <>
+              <StatusBadge tone="critical">{view.lastError.code}</StatusBadge>
+              <p
+                data-raw-evidence="true"
+                className="mt-2 break-words text-[11px] leading-relaxed text-muted-foreground"
+              >
+                {view.lastError.message}
+              </p>
+              <dl className="mt-2 space-y-1 text-[11px] text-muted-foreground">
+                <MetadataRow label="发生于">
+                  <span className="font-mono">
+                    {formatUtcTimestamp(view.lastError.at)}
+                  </span>
+                </MetadataRow>
+                <MetadataRow label="Request ID">
+                  <span className="font-mono">{view.lastError.requestId}</span>
+                </MetadataRow>
+              </dl>
+            </>
+          ) : (
+            <p className="text-[11px] text-muted-foreground">无 Last Error</p>
+          )}
+        </FeedGroup>
+      </div>
+    </Card>
   );
 }
 
 export function FeedSubscriptionView() {
-  const { capability, session, writesStopped } = useRuntimeMode();
+  const { capability, session, role, writesStopped } = useRuntimeMode();
   const queryClient = useQueryClient();
   const retryAfter = useRetryAfter();
   const csrfToken = session?.csrfToken ?? null;
 
   const readReason = useActionReason("feed.subscription.view");
   const writeReason = useActionReason("feed.subscription.write");
-  const flowReadReason = useActionReason("flow.control.view");
-  const flowWriteReason = useActionReason("flow.control.write");
+
+  const modeKind = capabilityModeKind(capability);
+  const isAdmin = modeKind === "admin-api";
+  const discovering = modeKind === "discovering";
+  const capabilityUnknown = modeKind === "capabilities-unknown";
 
   const feedCapabilityReason = adminCapabilityReason(
     capability,
     CAPABILITY_KEYS.feedSubscription,
   );
-  const flowCapabilityReason = adminCapabilityReason(
-    capability,
-    CAPABILITY_KEYS.feedFlowControl,
-  );
-
-  const isAdmin = capability?.mode === "admin-api";
   const feedReadReason = readReason ?? feedCapabilityReason;
-  const flowReadBlockReason = flowReadReason ?? flowCapabilityReason;
   const canReadFeed = isAdmin && feedReadReason === null;
-  const canReadFlow = isAdmin && flowReadBlockReason === null;
   const stoppedWriteReason: DisabledReasonValue | null = writesStopped
     ? {
         code: "requires-login",
@@ -140,19 +329,12 @@ export function FeedSubscriptionView() {
     : null;
   const feedWriteBlockReason =
     stoppedWriteReason ?? writeReason ?? retryAfter.reason ?? feedCapabilityReason;
-  const flowWriteBlockReason =
-    stoppedWriteReason ?? flowWriteReason ?? retryAfter.reason ?? flowCapabilityReason;
+  const feedRoleReason = writeReason ?? feedCapabilityReason;
 
   const subscriptionsQuery = useQuery({
     queryKey: FEED_QUERY_KEY,
     queryFn: ({ signal }) => fetchFeedSubscriptions(signal),
     enabled: canReadFeed,
-  });
-
-  const flowQuery = useQuery({
-    queryKey: FLOW_QUERY_KEY,
-    queryFn: ({ signal }) => fetchFlowControl(signal),
-    enabled: canReadFlow,
   });
 
   const [conflict, setConflict] = useState<{
@@ -215,7 +397,7 @@ export function FeedSubscriptionView() {
     onSuccess: async () => {
       setDeleteTarget(null);
       setSubmittedInfo(
-        "删除请求已接受：仅停止后续采集，历史 Bars 不变；以 Observed 确认删除结果。",
+        "删除请求已接受。仅停止后续采集，历史 Bars 不变。以 Observed 确认删除结果。",
       );
       await queryClient.invalidateQueries({ queryKey: FEED_QUERY_KEY });
     },
@@ -267,363 +449,222 @@ export function FeedSubscriptionView() {
     );
   };
 
-  if (!canReadFeed && !canReadFlow) {
-    return (
-      <DisabledArea
-        title="Feed Subscription"
-        description="Feed Subscription 是 Admin API 契约目标；Current Contract 不伪造订阅表，Desired / Observed / Drift 必须来自真实服务端。"
-        readReason={feedReadReason}
-        writeReason={feedWriteBlockReason}
-      >
-        <div className="mt-4 border-t border-border pt-3">
-          <PanelTitle>流控（分开配置）</PanelTitle>
-          <PanelDescription>
-            API Rate Limit 与 WebSocket Slow Consumer 是两个分别版本化、分别审计的资源；没有通用阈值。
-          </PanelDescription>
-          <div className="mt-2 flex flex-wrap items-center gap-3">
-            <DisabledAction label="读取流控" reason={flowReadBlockReason} />
-            <DisabledAction label="修改流控" reason={flowWriteBlockReason} />
-          </div>
-        </div>
-      </DisabledArea>
-    );
-  }
+  const feedMode = capabilityModePresentation(capability, {
+    "current-contract": { label: "需要 Admin API", tone: "unknown" },
+    "admin-api": { label: "Admin API 契约目标", tone: "info" },
+    "capabilities-unknown": { label: "能力未知", tone: "warning" },
+  });
+  const feedStatusLabel = feedMode.label;
+  const feedStatusTone: StatusTone = feedMode.tone;
 
-  const flow = flowQuery.data ?? null;
-  const flowView = flow ? describeFlowControl(flow) : null;
+  const conflictPanel = conflict ? (
+    <Card
+      data-testid="feed-conflict"
+      role="alert"
+      className="mb-3 border-status-warning bg-status-warning-bg shadow-none"
+    >
+      <div className="flex items-start gap-2 p-3">
+        <AlertTriangle
+          className="mt-0.5 size-4 shrink-0 text-status-warning-fg"
+          aria-hidden="true"
+        />
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusBadge tone="warning">409 版本冲突</StatusBadge>
+            <span className="text-xs font-medium text-foreground">
+              已停止自动提交
+            </span>
+          </div>
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+            请刷新后人工合并，不会自动覆盖他人修改，也不会自动重试。
+          </p>
+          <dl className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
+            <MetadataRow label="提交版本">
+              <span className="font-mono">
+                {conflict.state.attemptedVersion}
+              </span>
+            </MetadataRow>
+            <MetadataRow label="当前版本">
+              <span className="font-mono">
+                {conflict.state.currentVersion ?? "未知"}
+              </span>
+            </MetadataRow>
+          </dl>
+          <Button
+            size="sm"
+            variant="outline"
+            className="mt-2"
+            onClick={() => void handleRefreshForMerge()}
+          >
+            刷新并人工合并
+          </Button>
+          {mergeInfo ? (
+            <p data-testid="feed-merge-info" role="status" className="mt-2 text-xs">
+              {mergeInfo}
+            </p>
+          ) : null}
+          {merge ? (
+            <div className="mt-2 flex flex-wrap items-center gap-3 rounded-lg bg-card p-2">
+              <span className="flex flex-wrap items-center gap-1.5 text-xs">
+                当前 Desired
+                <StatusBadge
+                  tone={merge.subscription.desired.enabled ? "good" : "info"}
+                >
+                  {merge.subscription.desired.enabled ? "启用" : "停用"}
+                </StatusBadge>
+                版本
+                <span className="font-mono">
+                  {merge.subscription.desired.version}
+                </span>
+              </span>
+              <label className="inline-flex items-center gap-1 text-xs">
+                <input
+                  type="checkbox"
+                  checked={merge.enabled}
+                  onChange={(event) =>
+                    setMerge({ ...merge, enabled: event.target.checked })
+                  }
+                />
+                合并后启用
+              </label>
+              <Button
+                size="sm"
+                onClick={() =>
+                  updateMutation.mutate({
+                    subscription: merge.subscription,
+                    enabled: merge.enabled,
+                    version: merge.subscription.desired.version,
+                  })
+                }
+                disabled={updateMutation.isPending || retryAfter.blocked}
+              >
+                应用合并
+              </Button>
+              {retryAfter.reason ? (
+                <span className="text-[11px] text-status-warning-fg">
+                  {retryAfter.reason.message}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </Card>
+  ) : null;
+
+  const feedDependencyCopy = isAdmin
+    ? "Admin API 已连接，但当前服务端能力或 Access Role 不允许读取该资源。Desired、Observed、Drift 与 Last Error 只来自真实服务端。"
+    : "依赖 Admin API feed_subscription 能力与对应的服务端 Access Role。Current Contract 不伪造订阅表，Desired、Observed、Drift 与 Last Error 必须来自真实服务端。";
+
+  const feedBody = !canReadFeed ? (
+    discovering ? (
+      <LoadingState label="正在发现运行时能力…" showSkeleton />
+    ) : (
+      <>
+        {capabilityUnknown ? (
+          <UnknownState
+            cause="failed"
+            reason="运行时能力发现失败，无法确认 Feed Subscription 的读写能力。"
+          />
+        ) : (
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {feedDependencyCopy}
+          </p>
+        )}
+        <UnavailableActions
+          label="Feed Subscription"
+          readReason={feedReadReason}
+          writeReason={feedWriteBlockReason}
+        />
+      </>
+    )
+  ) : subscriptionsQuery.isPending ? (
+    <LoadingState label="正在加载 Feed Subscription…" showSkeleton />
+  ) : subscriptionsQuery.isError ? (
+    <QueryFailure
+      error={subscriptionsQuery.error}
+      fallback="无法读取 Feed Subscription"
+      onRetry={() => void subscriptionsQuery.refetch()}
+    />
+  ) : (subscriptionsQuery.data?.items.length ?? 0) === 0 ? (
+    <EmptyState
+      title="暂无 Feed Subscription"
+      description="没有真实订阅记录时保持空白，不生成示例订阅。"
+    />
+  ) : (
+    <div className="flex flex-col gap-3">
+      {subscriptionsQuery.data?.items.map((subscription) => (
+        <FeedSubscriptionCard
+          key={subscription.subscription_id}
+          view={describeFeedSubscription(subscription)}
+          actionReason={feedWriteBlockReason}
+          busy={updateMutation.isPending || deleteMutation.isPending}
+          onToggle={() =>
+            updateMutation.mutate({
+              subscription,
+              enabled: !subscription.desired.enabled,
+              version: subscription.desired.version,
+            })
+          }
+          onDelete={() => setDeleteTarget(subscription)}
+        />
+      ))}
+    </div>
+  );
 
   return (
     <>
-      <Panel className="mt-6 p-5" aria-label="Feed Subscription">
-        <PanelHeader>
-          <div>
-            <PanelTitle>Feed Subscription</PanelTitle>
-            <PanelDescription>
-              Desired、Observed、Drift 与 Last Error 分开呈现；删除仅停止后续采集，历史 Bars 不受影响。
-            </PanelDescription>
-          </div>
-          <StatusBadge tone="unknown">Admin API 契约目标 · MSW 契约测试</StatusBadge>
-        </PanelHeader>
-
-        {!canReadFeed ? (
-          <div className="mt-3 flex flex-wrap items-center gap-3">
-            <DisabledAction
-              label="读取 Feed Subscription"
-              reason={feedReadReason}
+      <Card
+        role="region"
+        aria-label="Feed Subscription"
+        className="mt-5"
+      >
+        <CardHeader className="p-5 pb-0">
+          <div className="min-w-0">
+            <CardTitleWithHelp
+              title="Feed Subscription"
+              helpLabel="Feed Subscription 说明"
+              help={FEED_HELP}
             />
-            <DisabledAction
-              label="修改 Feed Subscription"
-              reason={feedWriteBlockReason}
-            />
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+              Desired、Observed、Drift 与 Last Error 分开展示。
+            </p>
           </div>
-        ) : (
-          <>
-            {conflict ? (
-          <div
-            data-testid="feed-conflict"
-            role="alert"
-            className="mt-3 border border-status-warning bg-surface-sunken p-3 text-xs"
-          >
-            <div className="font-medium text-status-critical">
-              409 版本冲突：已停止自动提交
-            </div>
-            <p className="mt-1 text-muted-foreground">
-              版本冲突：请刷新后人工合并，不会自动覆盖他人修改，也不会自动重试。
-            </p>
-            <p className="mt-1 font-mono text-[11px]">
-              提交版本 {conflict.state.attemptedVersion} · 当前版本{" "}
-              {conflict.state.currentVersion ?? "未知"}
-            </p>
-            <Button
-              size="sm"
-              variant="outline"
-              className="mt-2"
-              onClick={() => void handleRefreshForMerge()}
-            >
-              刷新并人工合并
-            </Button>
-            {mergeInfo ? (
-              <p data-testid="feed-merge-info" className="mt-2">
-                {mergeInfo}
-              </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusBadge tone={feedStatusTone}>{feedStatusLabel}</StatusBadge>
+            {isAdmin && role ? (
+              <StatusBadge tone="unknown">Access Role {role}</StatusBadge>
             ) : null}
-            {merge ? (
-              <div className="mt-2 flex flex-wrap items-center gap-3">
-                <span>
-                  当前 Desired：
-                  {merge.subscription.desired.enabled ? "启用" : "停用"} · v
-                  {merge.subscription.desired.version}
-                </span>
-                <label className="inline-flex items-center gap-1">
-                  <input
-                    type="checkbox"
-                    checked={merge.enabled}
-                    onChange={(event) =>
-                      setMerge({ ...merge, enabled: event.target.checked })
-                    }
-                  />
-                  合并后启用
-                </label>
-                <Button
-                  size="sm"
-                  onClick={() =>
-                    updateMutation.mutate({
-                      subscription: merge.subscription,
-                      enabled: merge.enabled,
-                      version: merge.subscription.desired.version,
-                    })
-                  }
-                  disabled={updateMutation.isPending || retryAfter.blocked}
-                >
-                  应用合并
-                </Button>
-                {retryAfter.reason ? (
-                  <span className="text-[11px] text-status-warning">
-                    {retryAfter.reason.message}
-                  </span>
-                ) : null}
-              </div>
+            {canReadFeed ? (
+              <StatusBadge tone={feedRoleReason ? "unknown" : "good"}>
+                {feedRoleReason ? "当前只读" : "当前可写"}
+              </StatusBadge>
+            ) : null}
+            {canReadFeed &&
+            subscriptionsQuery.isFetching &&
+            !subscriptionsQuery.isPending ? (
+              <StatusBadge tone="info" live>
+                正在刷新
+              </StatusBadge>
             ) : null}
           </div>
-        ) : null}
+        </CardHeader>
 
-        {submittedInfo ? (
-          <p role="status" className="mt-3 text-xs text-status-good">
-            {submittedInfo}
-          </p>
-        ) : null}
-
-        <div className="mt-3">
-          {subscriptionsQuery.isPending ? (
-            <LoadingState label="正在加载 Feed Subscription…" showSkeleton />
-          ) : subscriptionsQuery.isError ? (
-            <ErrorState
-              description={
-                subscriptionsQuery.error instanceof Error
-                  ? subscriptionsQuery.error.message
-                  : "无法读取 Feed Subscription"
-              }
-              requestId={
-                subscriptionsQuery.error instanceof HttpError
-                  ? subscriptionsQuery.error.requestId
-                  : null
-              }
-              onRetry={() => void subscriptionsQuery.refetch()}
-            />
-          ) : (subscriptionsQuery.data?.items.length ?? 0) === 0 ? (
-            <EmptyState
-              title="暂无 Feed Subscription"
-              description="没有真实订阅记录时保持空白，不生成示例订阅。"
-            />
-          ) : (
-            <Table>
-              <caption className="sr-only">
-                Feed Subscription，Desired、Observed、Drift 与 Last Error 分开展示
-              </caption>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Subscription</TableHead>
-                  <TableHead>Desired</TableHead>
-                  <TableHead>Observed</TableHead>
-                  <TableHead>Drift</TableHead>
-                  <TableHead>Last Error</TableHead>
-                  <TableHead>Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {subscriptionsQuery.data?.items.map((subscription) => {
-                  const view = describeFeedSubscription(subscription);
-                  const actionReason = feedWriteBlockReason;
-                  const busy =
-                    updateMutation.isPending || deleteMutation.isPending;
-                  return (
-                    <TableRow
-                      key={subscription.subscription_id}
-                      data-testid={`feed-subscription-${subscription.subscription_id}`}
-                    >
-                      <TableCell className="align-top">
-                        <div className="font-mono text-xs">
-                          {view.identity.instrumentId}
-                        </div>
-                        <div className="text-[11px] text-faint-foreground">
-                          {view.identity.feed} · {view.identity.venue} ·{" "}
-                          {view.identity.interval}
-                        </div>
-                      </TableCell>
-                      <TableCell className="align-top">
-                        <div>
-                          {view.desired.label} · v{view.desired.version}
-                        </div>
-                        <div className="text-[11px] text-faint-foreground">
-                          {formatUtcTimestamp(view.desired.updatedAt)} ·{" "}
-                          {view.desired.updatedBy}
-                        </div>
-                      </TableCell>
-                      <TableCell className="align-top">
-                        <div>
-                          {view.observed.label} · v{view.observed.version}
-                        </div>
-                        <div className="text-[11px] text-faint-foreground">
-                          {formatUtcTimestamp(view.observed.observedAt)} ·{" "}
-                          {view.observed.collectorInstanceId}
-                        </div>
-                      </TableCell>
-                      <TableCell className="align-top">
-                        <div
-                          className={
-                            view.drift.inSync
-                              ? "text-status-good"
-                              : "text-status-warning"
-                          }
-                        >
-                          {view.drift.label}
-                        </div>
-                        <div className="text-[11px] text-faint-foreground">
-                          desired v{view.drift.desiredVersion} / observed v
-                          {view.drift.observedVersion}
-                        </div>
-                      </TableCell>
-                      <TableCell className="align-top">
-                        {view.lastError ? (
-                          <>
-                            <div className="font-mono text-status-critical">
-                              {view.lastError.code}
-                            </div>
-                            <div className="text-[11px] text-muted-foreground">
-                              {view.lastError.message}
-                            </div>
-                            <div className="text-[11px] text-faint-foreground">
-                              {formatUtcTimestamp(view.lastError.at)} · Request ID{" "}
-                              {view.lastError.requestId}
-                            </div>
-                          </>
-                        ) : (
-                          <span className="text-faint-foreground">—</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="align-top">
-                        <div className="flex flex-col gap-1">
-                          <span className="inline-flex flex-wrap items-center gap-2">
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              disabled={actionReason !== null || busy}
-                              aria-describedby={
-                                actionReason
-                                  ? `feed-${subscription.subscription_id}-reason`
-                                  : undefined
-                              }
-                              onClick={() =>
-                                updateMutation.mutate({
-                                  subscription,
-                                  enabled: !subscription.desired.enabled,
-                                  version: subscription.desired.version,
-                                })
-                              }
-                            >
-                              {subscription.desired.enabled ? "停用" : "启用"}
-                            </Button>
-                            <DisabledReason
-                              id={`feed-${subscription.subscription_id}-reason`}
-                              reason={actionReason}
-                            />
-                          </span>
-                          <span className="inline-flex flex-wrap items-center gap-2">
-                            <Button
-                              size="sm"
-                              variant="destructive"
-                              disabled={actionReason !== null || busy}
-                              aria-describedby={
-                                actionReason
-                                  ? `feed-${subscription.subscription_id}-reason`
-                                  : undefined
-                              }
-                              onClick={() => setDeleteTarget(subscription)}
-                            >
-                              删除
-                            </Button>
-                          </span>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          )}
-        </div>
+        <CardContent className="pt-4">
+          {conflictPanel}
+          {submittedInfo ? (
+            <p role="status" className="mb-3 text-xs text-status-good-fg">
+              {submittedInfo}
+            </p>
+          ) : null}
+          {feedBody}
+          {canReadFeed ? (
             <p className="mt-2 text-[11px] text-faint-foreground">
               {FEED_DELETION_HISTORY_NOTE}
             </p>
-          </>
-        )}
-      </Panel>
-
-      <Panel className="mt-6 p-5" aria-label="Flow Control">
-        <PanelHeader>
-          <div>
-            <PanelTitle>流控（分开配置）</PanelTitle>
-            <PanelDescription>
-              API Rate Limit 与 WebSocket Slow Consumer
-              是两个分别版本化、分别审计的资源（flow_control.api_rate_limit.update /
-              flow_control.ws_slow_consumer.update）；没有通用阈值，也不控制
-              Venue、Collector 写队列或存储背压。
-            </PanelDescription>
-          </div>
-        </PanelHeader>
-
-        {!canReadFlow ? (
-          <div className="mt-3 flex flex-wrap items-center gap-3">
-            <DisabledAction label="读取流控" reason={flowReadBlockReason} />
-            <DisabledAction label="修改流控" reason={flowWriteBlockReason} />
-          </div>
-        ) : flowQuery.isPending ? (
-          <LoadingState label="正在加载流控配置…" />
-        ) : flowQuery.isError || !flowView || !flow ? (
-          <ErrorState
-            description={
-              flowQuery.error instanceof Error
-                ? flowQuery.error.message
-                : "无法读取流控配置"
-            }
-            requestId={
-              flowQuery.error instanceof HttpError
-                ? flowQuery.error.requestId
-                : null
-            }
-            onRetry={() => void flowQuery.refetch()}
-          />
-        ) : (
-          <div className="mt-3 grid grid-cols-1 gap-4 xl:grid-cols-2">
-            <FlowControlEditor
-              resource="api_rate_limit"
-              title="API Rate Limit"
-              version={flowView.apiRateLimit.version}
-              applyNote={flowView.apiRateLimit.applyNote}
-              observedVersion={flowView.apiRateLimit.observedVersion}
-              inSync={flowView.apiRateLimit.inSync}
-              writeReason={flowWriteBlockReason}
-              retryAfterReason={retryAfter.reason}
-              csrfToken={csrfToken}
-              initial={flow.api_rate_limit}
-              onSaved={() => void queryClient.invalidateQueries({ queryKey: FLOW_QUERY_KEY })}
-            />
-            <FlowControlEditor
-              resource="ws_slow_consumer"
-              title="WebSocket Slow Consumer"
-              version={flowView.wsSlowConsumer.version}
-              applyNote={flowView.wsSlowConsumer.applyNote}
-              observedVersion={flowView.wsSlowConsumer.observedVersion}
-              inSync={flowView.wsSlowConsumer.inSync}
-              writeReason={flowWriteBlockReason}
-              retryAfterReason={retryAfter.reason}
-              csrfToken={csrfToken}
-              initial={flow.ws_slow_consumer}
-              onSaved={() => void queryClient.invalidateQueries({ queryKey: FLOW_QUERY_KEY })}
-            />
-          </div>
-        )}
-      </Panel>
+          ) : null}
+        </CardContent>
+      </Card>
 
       <ConfirmDialog
         open={deleteTarget !== null}
@@ -647,390 +688,5 @@ export function FeedSubscriptionView() {
         }}
       />
     </>
-  );
-}
-
-const apiRateLimitSchema = z.object({
-  enabled: z.boolean(),
-  requests_per_second: z
-    .number({ invalid_type_error: "请输入数字" })
-    .positive("requests_per_second 必须大于 0"),
-  burst: z
-    .number({ invalid_type_error: "请输入数字" })
-    .int("burst 必须是整数")
-    .min(0, "burst 不能小于 0"),
-  max_ws_sessions_per_ip: z
-    .number({ invalid_type_error: "请输入数字" })
-    .int("max_ws_sessions_per_ip 必须是整数")
-    .min(1, "max_ws_sessions_per_ip 至少为 1"),
-});
-
-const wsSlowConsumerSchema = z.object({
-  enabled: z.boolean(),
-  queue_size: z
-    .number({ invalid_type_error: "请输入数字" })
-    .int("queue_size 必须是整数")
-    .min(1, "queue_size 至少为 1"),
-  lag_notice_interval_ms: z
-    .number({ invalid_type_error: "请输入数字" })
-    .int("lag_notice_interval_ms 必须是整数")
-    .min(1, "lag_notice_interval_ms 至少为 1"),
-});
-
-type ApiRateLimitForm = z.infer<typeof apiRateLimitSchema>;
-type WsSlowConsumerForm = z.infer<typeof wsSlowConsumerSchema>;
-
-function FieldError({
-  id,
-  message,
-}: {
-  id: string;
-  message: string | undefined;
-}) {
-  if (!message) {
-    return null;
-  }
-  return (
-    <p id={id} role="alert" className="text-[11px] text-status-critical">
-      {message}
-    </p>
-  );
-}
-
-function ApiRateLimitEditor({
-  version,
-  csrfToken,
-  initial,
-  readOnlyReason,
-  onSaved,
-}: {
-  version: number;
-  csrfToken: string | null;
-  initial: FlowControlResponse["api_rate_limit"];
-  readOnlyReason: DisabledReasonValue | null;
-  onSaved: () => void;
-}) {
-  const defaultValues = useMemo<ApiRateLimitForm>(
-    () => ({
-      enabled: initial.enabled,
-      requests_per_second: initial.requests_per_second,
-      burst: initial.burst,
-      max_ws_sessions_per_ip: initial.max_ws_sessions_per_ip,
-    }),
-    [initial],
-  );
-  const {
-    register,
-    handleSubmit,
-    reset,
-    formState: { errors },
-  } = useForm<ApiRateLimitForm>({
-    resolver: zodResolver(apiRateLimitSchema),
-    mode: "onSubmit",
-    defaultValues,
-  });
-
-  useEffect(() => {
-    reset(defaultValues);
-  }, [defaultValues, reset]);
-
-  const mutation = useMutation({
-    mutationFn: (form: ApiRateLimitForm) =>
-      updateApiRateLimit(form, version, csrfToken),
-    onSuccess: onSaved,
-  });
-  const readOnly = readOnlyReason !== null;
-  const saving = mutation.isPending;
-
-  return (
-    <form
-      onSubmit={handleSubmit((values) => {
-        if (!readOnly) {
-          mutation.mutate(values);
-        }
-      })}
-      noValidate
-    >
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        <label className="col-span-2 inline-flex items-center gap-2 text-xs">
-          <input
-            type="checkbox"
-            disabled={readOnly}
-            {...register("enabled")}
-          />
-          enabled
-        </label>
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="api-rps">requests_per_second</Label>
-          <Input
-            id="api-rps"
-            type="number"
-            step="any"
-            disabled={readOnly}
-            aria-invalid={Boolean(errors.requests_per_second)}
-            aria-describedby={
-              errors.requests_per_second ? "api-rps-error" : undefined
-            }
-            {...register("requests_per_second", { valueAsNumber: true })}
-          />
-          <FieldError
-            id="api-rps-error"
-            message={errors.requests_per_second?.message}
-          />
-        </div>
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="api-burst">burst</Label>
-          <Input
-            id="api-burst"
-            type="number"
-            step="1"
-            disabled={readOnly}
-            aria-invalid={Boolean(errors.burst)}
-            aria-describedby={errors.burst ? "api-burst-error" : undefined}
-            {...register("burst", { valueAsNumber: true })}
-          />
-          <FieldError id="api-burst-error" message={errors.burst?.message} />
-        </div>
-        <div className="col-span-2 flex flex-col gap-1">
-          <Label htmlFor="api-ws-sessions">max_ws_sessions_per_ip</Label>
-          <Input
-            id="api-ws-sessions"
-            type="number"
-            step="1"
-            disabled={readOnly}
-            aria-invalid={Boolean(errors.max_ws_sessions_per_ip)}
-            aria-describedby={
-              errors.max_ws_sessions_per_ip
-                ? "api-ws-sessions-error"
-                : undefined
-            }
-            {...register("max_ws_sessions_per_ip", { valueAsNumber: true })}
-          />
-          <FieldError
-            id="api-ws-sessions-error"
-            message={errors.max_ws_sessions_per_ip?.message}
-          />
-        </div>
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button
-          type="submit"
-          size="sm"
-          variant="outline"
-          disabled={readOnly || saving}
-          aria-describedby={
-            readOnlyReason ? "flow-api_rate_limit-reason" : undefined
-          }
-        >
-          保存 API Rate Limit
-        </Button>
-        <DisabledReason
-          id="flow-api_rate_limit-reason"
-          reason={readOnlyReason}
-        />
-        {mutation.isError ? (
-          <span className="text-xs text-status-critical">
-            保存失败，请查看错误与 Request ID。
-          </span>
-        ) : null}
-      </div>
-    </form>
-  );
-}
-
-function WsSlowConsumerEditor({
-  version,
-  csrfToken,
-  initial,
-  readOnlyReason,
-  onSaved,
-}: {
-  version: number;
-  csrfToken: string | null;
-  initial: FlowControlResponse["ws_slow_consumer"];
-  readOnlyReason: DisabledReasonValue | null;
-  onSaved: () => void;
-}) {
-  const defaultValues = useMemo<WsSlowConsumerForm>(
-    () => ({
-      enabled: initial.enabled,
-      queue_size: initial.queue_size,
-      lag_notice_interval_ms: initial.lag_notice_interval_ms,
-    }),
-    [initial],
-  );
-  const {
-    register,
-    handleSubmit,
-    reset,
-    formState: { errors },
-  } = useForm<WsSlowConsumerForm>({
-    resolver: zodResolver(wsSlowConsumerSchema),
-    mode: "onSubmit",
-    defaultValues,
-  });
-
-  useEffect(() => {
-    reset(defaultValues);
-  }, [defaultValues, reset]);
-
-  const mutation = useMutation({
-    mutationFn: (form: WsSlowConsumerForm) =>
-      updateWsSlowConsumer(form, version, csrfToken),
-    onSuccess: onSaved,
-  });
-  const readOnly = readOnlyReason !== null;
-  const saving = mutation.isPending;
-
-  return (
-    <form
-      onSubmit={handleSubmit((values) => {
-        if (!readOnly) {
-          mutation.mutate(values);
-        }
-      })}
-      noValidate
-    >
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        <label className="col-span-2 inline-flex items-center gap-2 text-xs">
-          <input
-            type="checkbox"
-            disabled={readOnly}
-            {...register("enabled")}
-          />
-          enabled
-        </label>
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="ws-queue-size">queue_size</Label>
-          <Input
-            id="ws-queue-size"
-            type="number"
-            step="1"
-            disabled={readOnly}
-            aria-invalid={Boolean(errors.queue_size)}
-            aria-describedby={
-              errors.queue_size ? "ws-queue-size-error" : undefined
-            }
-            {...register("queue_size", { valueAsNumber: true })}
-          />
-          <FieldError
-            id="ws-queue-size-error"
-            message={errors.queue_size?.message}
-          />
-        </div>
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="ws-lag-ms">lag_notice_interval_ms</Label>
-          <Input
-            id="ws-lag-ms"
-            type="number"
-            step="1"
-            disabled={readOnly}
-            aria-invalid={Boolean(errors.lag_notice_interval_ms)}
-            aria-describedby={
-              errors.lag_notice_interval_ms
-                ? "ws-lag-ms-error"
-                : undefined
-            }
-            {...register("lag_notice_interval_ms", { valueAsNumber: true })}
-          />
-          <FieldError
-            id="ws-lag-ms-error"
-            message={errors.lag_notice_interval_ms?.message}
-          />
-        </div>
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button
-          type="submit"
-          size="sm"
-          variant="outline"
-          disabled={readOnly || saving}
-          aria-describedby={
-            readOnlyReason ? "flow-ws_slow_consumer-reason" : undefined
-          }
-        >
-          保存 WebSocket Slow Consumer
-        </Button>
-        <DisabledReason
-          id="flow-ws_slow_consumer-reason"
-          reason={readOnlyReason}
-        />
-        {mutation.isError ? (
-          <span className="text-xs text-status-critical">
-            保存失败，请查看错误与 Request ID。
-          </span>
-        ) : null}
-      </div>
-    </form>
-  );
-}
-
-function FlowControlEditor({
-  resource,
-  title,
-  version,
-  applyNote,
-  observedVersion,
-  inSync,
-  writeReason,
-  retryAfterReason,
-  csrfToken,
-  initial,
-  onSaved,
-}: {
-  resource: "api_rate_limit" | "ws_slow_consumer";
-  title: string;
-  version: number;
-  applyNote: string;
-  observedVersion: number;
-  inSync: boolean;
-  writeReason: DisabledReasonValue | null;
-  retryAfterReason: DisabledReasonValue | null;
-  csrfToken: string | null;
-  initial: FlowControlResponse["api_rate_limit"] | FlowControlResponse["ws_slow_consumer"];
-  onSaved: () => void;
-}) {
-  const readOnlyReason = writeReason ?? retryAfterReason;
-
-  return (
-    <div
-      data-testid={`flow-${resource.replaceAll("_", "-")}`}
-      className="border border-border p-3"
-    >
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div>
-          <div className="text-sm font-semibold">{title}</div>
-          <div className="text-[11px] text-faint-foreground">
-            版本 {version} · Observed v{observedVersion} ·{" "}
-            {inSync ? "同步" : "存在漂移"}
-          </div>
-        </div>
-        <StatusBadge tone={inSync ? "good" : "warning"}>
-          {applyNote}
-        </StatusBadge>
-      </div>
-
-      {resource === "api_rate_limit" && "requests_per_second" in initial ? (
-        <ApiRateLimitEditor
-          version={version}
-          csrfToken={csrfToken}
-          initial={initial}
-          readOnlyReason={readOnlyReason}
-          onSaved={onSaved}
-        />
-      ) : null}
-
-      {resource === "ws_slow_consumer" && "queue_size" in initial ? (
-        <WsSlowConsumerEditor
-          version={version}
-          csrfToken={csrfToken}
-          initial={initial}
-          readOnlyReason={readOnlyReason}
-          onSaved={onSaved}
-        />
-      ) : null}
-    </div>
   );
 }

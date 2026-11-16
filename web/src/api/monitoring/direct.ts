@@ -9,35 +9,29 @@ import {
   buildQpsQuery,
   LATENCY_QUANTILES,
 } from "@/api/monitoring/promql";
+import { trendSeriesName } from "@/api/monitoring/series-display";
 import type { TrendSeries, TrendWindow } from "@/api/monitoring/types";
 
 function seconds(ms: number): number {
   return Math.floor(ms / 1000);
 }
 
-function seriesName(
-  labels: Record<string, string>,
-  fallback: string,
-  index: number,
-  count: number,
-): string {
-  if (labels.path) {
-    return `${fallback} · ${labels.path}`;
-  }
-  return count > 1 ? `${fallback} ${index + 1}` : fallback;
-}
-
 /**
  * Prometheus samples are seconds; the chart uses milliseconds. Non-finite
  * values (including the literal `NaN`) become null so the line has a gap.
  * Nothing is zero-filled.
+ *
+ * `identity` is the stable metric identity used by KPI selection. It is
+ * required: display labels may change without changing which metric is read.
  */
 export function prometheusResultToTrendSeries(
   result: PrometheusQueryResult,
   fallbackName: string,
+  identity: string,
 ): TrendSeries[] {
   return result.series.map((series, index) => ({
-    name: seriesName(series.labels, fallbackName, index, result.series.length),
+    id: identity,
+    name: trendSeriesName(series.labels, fallbackName, index, result.series.length),
     labels: series.labels,
     points: series.points.map((point) => ({
       ts: Math.round(point.ts * 1000),
@@ -75,7 +69,7 @@ export async function fetchQpsTrend(
     },
     signal,
   );
-  return prometheusResultToTrendSeries(result, "QPS");
+  return prometheusResultToTrendSeries(result, "QPS", "qps");
 }
 
 export async function fetchPeakQps(
@@ -120,10 +114,12 @@ export async function fetchLatencyTrends(
       ),
     ),
   );
-  return results.flatMap((result, index) =>
-    prometheusResultToTrendSeries(
+  return results.flatMap((result, index) => {
+    const quantile = LATENCY_QUANTILES[index];
+    return prometheusResultToTrendSeries(
       result,
-      LATENCY_QUANTILES[index]?.label ?? `P${index + 1}`,
+      quantile?.label ?? `P${index + 1}`,
+      quantile?.id ?? `p${index + 1}`,
     ).map((series) => ({
       ...series,
       // Histogram observations are seconds; the dashboard displays ms.
@@ -134,6 +130,6 @@ export async function fetchLatencyTrends(
             ? null
             : point.value * 1000,
       })),
-    })),
-  );
+    }));
+  });
 }

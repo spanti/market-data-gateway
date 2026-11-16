@@ -89,7 +89,7 @@ export function classifyExportRange(
     return {
       ...base,
       kind: "direct",
-      message: "≤31 个 UTC 天：使用小文件 CSV 直接下载（Blob）",
+      message: "≤31 个 UTC 天，使用小文件 CSV 直接下载（Blob）",
     };
   }
 
@@ -97,7 +97,7 @@ export function classifyExportRange(
     return {
       ...base,
       kind: "job",
-      message: "31–366 个 UTC 天：只创建 Admin Export Job，不使用超大 Blob",
+      message: "31–366 个 UTC 天，只创建 Admin Export Job，不使用超大 Blob",
     };
   }
 

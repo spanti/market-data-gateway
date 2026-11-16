@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   canQueryOperation,
   createLifecycleOperation,
+  LIFECYCLE_ACTION_LABELS,
+  LIFECYCLE_ACTIONS,
+  lifecycleActionConsequence,
+  lifecycleConfirmationRequirement,
   lifecyclePhaseLabel,
+  lifecyclePhaseTone,
   reduceLifecycleOperation,
   validateLifecycleConfirmation,
 } from "@/pages/console/lifecycle";
@@ -86,6 +91,73 @@ describe("lifecycle confirmation rules", () => {
   });
 });
 
+describe("lifecycle operation copy", () => {
+  it("names the three lifecycle actions explicitly", () => {
+    expect(LIFECYCLE_ACTIONS).toEqual(["start", "stop", "reload"]);
+    expect(LIFECYCLE_ACTION_LABELS).toEqual({
+      start: "Start",
+      stop: "Graceful Stop",
+      reload: "Reload",
+    });
+  });
+
+  it("states the real consequence of each action without banned separators", () => {
+    expect(lifecycleActionConsequence("start")).toContain("真实 Ready");
+    expect(lifecycleActionConsequence("start")).toContain(
+      "PID 存在不等于 Ready",
+    );
+
+    expect(lifecycleActionConsequence("stop")).toContain("停止接流量");
+    expect(lifecycleActionConsequence("stop")).toContain("排空");
+
+    // Reload is a graceful restart, never a hot reload or a zero-downtime claim.
+    expect(lifecycleActionConsequence("reload")).toContain("优雅重启");
+    expect(lifecycleActionConsequence("reload")).toContain("不是热加载");
+    expect(lifecycleActionConsequence("reload")).toContain("不承诺零停机");
+
+    for (const action of LIFECYCLE_ACTIONS) {
+      const copy = lifecycleActionConsequence(action);
+      expect(copy).not.toContain("·");
+      expect(copy).not.toContain("：");
+    }
+  });
+
+  it("requires the typed target Service Instance name only for Stop and Reload", () => {
+    expect(lifecycleConfirmationRequirement("start", "api-1")).not.toContain(
+      "输入目标 Service Instance 名",
+    );
+    for (const action of ["stop", "reload"] as const) {
+      expect(lifecycleConfirmationRequirement(action, "api-1")).toContain(
+        "输入目标 Service Instance 名 api-1",
+      );
+    }
+    expect(lifecycleConfirmationRequirement("stop", "api-1")).not.toContain(
+      "·",
+    );
+    expect(lifecycleConfirmationRequirement("stop", "api-1")).not.toContain(
+      "：",
+    );
+  });
+
+  it("keeps every lifecycle phase label and tone distinct", () => {
+    expect(
+      new Set([
+        lifecyclePhaseLabel("pending"),
+        lifecyclePhaseLabel("submitting"),
+        lifecyclePhaseLabel("accepted"),
+        lifecyclePhaseLabel("running"),
+        lifecyclePhaseLabel("succeeded"),
+        lifecyclePhaseLabel("failed"),
+        lifecyclePhaseLabel("unknown"),
+      ]).size,
+    ).toBe(7);
+    expect(lifecyclePhaseLabel("accepted")).not.toContain("成功");
+    expect(lifecyclePhaseTone("succeeded")).toBe("good");
+    expect(lifecyclePhaseTone("failed")).toBe("critical");
+    expect(lifecyclePhaseTone("unknown")).toBe("unknown");
+  });
+});
+
 describe("lifecycle operation state machine", () => {
   it("starts pending and locks the submit during submission", () => {
     let state = createLifecycleOperation("stop", "api");
@@ -164,6 +236,43 @@ describe("lifecycle operation state machine", () => {
 
     expect(state.phase).toBe("failed");
     expect(state.errorCode).toBe("forbidden");
+  });
+
+  it("keeps the submit rejection Request ID for inline support correlation", () => {
+    let state = createLifecycleOperation("stop", "api-1");
+    state = reduceLifecycleOperation(state, { type: "submit" });
+    state = reduceLifecycleOperation(state, {
+      type: "submit-failed",
+      errorCode: "forbidden",
+      errorMessage: "role denied",
+      requestId: "req-403",
+    });
+
+    expect(state.phase).toBe("failed");
+    expect(state.errorCode).toBe("forbidden");
+    expect(state.errorMessage).toBe("role denied");
+    expect(state.errorRequestId).toBe("req-403");
+  });
+
+  it("keeps the Request ID reported by a failed Operation query", () => {
+    let state = createLifecycleOperation("reload", "api-1");
+    state = reduceLifecycleOperation(state, { type: "submit" });
+    state = reduceLifecycleOperation(state, {
+      type: "accepted",
+      operationId: "op_1",
+      requestId: "req-write",
+    });
+    state = reduceLifecycleOperation(state, {
+      type: "operation",
+      status: "failed",
+      errorCode: "config_invalid",
+      errorMessage: "invalid config",
+      requestId: "req-operation",
+    });
+
+    expect(state.phase).toBe("failed");
+    expect(state.errorCode).toBe("config_invalid");
+    expect(state.requestId).toBe("req-operation");
   });
 
   it("resolves a disconnect after acceptance to unknown, not failure or success", () => {

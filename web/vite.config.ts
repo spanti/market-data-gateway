@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig, loadEnv } from "vite";
@@ -6,6 +7,25 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * A normal checkout keeps `node_modules` inside the project, so Vite's default
+ * dev-server allow list is sufficient. Linked worktrees expose it through a
+ * junction whose resolved path lies outside the root; only then is that real
+ * dependency path added, so fonts and other dependency assets are not rejected
+ * with HTTP 403.
+ */
+function linkedDependencyRoot(): string | null {
+  const declared = path.resolve(dirname, "node_modules");
+  try {
+    const resolved = fs.realpathSync(declared);
+    return resolved === declared ? null : resolved;
+  } catch {
+    return null;
+  }
+}
+
+const externalDependencyRoot = linkedDependencyRoot();
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, dirname, "");
@@ -27,6 +47,9 @@ export default defineConfig(({ mode }) => {
     server: {
       host: "127.0.0.1",
       port: 5173,
+      ...(externalDependencyRoot
+        ? { fs: { allow: [dirname, externalDependencyRoot] } }
+        : {}),
       proxy: {
         // Current Contract REST + WebSocket + ops endpoints (same origin).
         "/api": { target: apiTarget, changeOrigin: true },
@@ -76,12 +99,20 @@ export default defineConfig(({ mode }) => {
               "@tanstack/react-query",
             ],
             "vendor-radix": [
+              "radix-ui",
               "@radix-ui/react-dialog",
               "@radix-ui/react-label",
               "@radix-ui/react-slot",
               "@radix-ui/react-tabs",
               "@radix-ui/react-tooltip",
             ],
+            "vendor-forms": ["react-hook-form", "@hookform/resolvers"],
+            "vendor-icons": [
+              "lucide-react",
+              "@hugeicons/react",
+              "@hugeicons/core-free-icons",
+            ],
+            "vendor-virtual": ["@tanstack/react-virtual"],
             "vendor-http": ["axios"],
             "vendor-schema": ["zod"],
             "vendor-echarts": [

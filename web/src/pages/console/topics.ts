@@ -199,7 +199,7 @@ export function parseFreeformFrame(text: string): FreeformParseResult {
     if (!validation.valid) {
       return {
         ok: false,
-        error: `Topic 无效：${validation.error}`,
+        error: `Topic 无效（${validation.error}）`,
       };
     }
     normalized.push(validation.topic);

@@ -16,12 +16,12 @@ export type StatusTone =
   | "info";
 
 const TONE_CLASS: Record<StatusTone, string> = {
-  good: "text-status-good",
-  warning: "text-status-warning",
-  serious: "text-status-serious",
-  critical: "text-status-critical",
-  unknown: "text-faint-foreground",
-  info: "text-faint-foreground",
+  good: "bg-status-good-bg text-status-good-fg",
+  warning: "bg-status-warning-bg text-status-warning-fg",
+  serious: "bg-status-serious-bg text-status-serious-fg",
+  critical: "bg-status-critical-bg text-status-critical-fg",
+  unknown: "bg-status-unknown-bg text-status-unknown-fg",
+  info: "bg-status-info-bg text-status-info-fg",
 };
 
 function ToneIcon({ tone }: { tone: StatusTone }) {
@@ -33,7 +33,7 @@ function ToneIcon({ tone }: { tone: StatusTone }) {
         : tone === "unknown"
           ? CircleHelp
           : AlertTriangle;
-  return <Icon className="size-4 shrink-0" aria-hidden="true" />;
+  return <Icon className="size-3.5 shrink-0" aria-hidden="true" />;
 }
 
 export interface StatusBadgeProps extends React.ComponentProps<"span"> {
@@ -46,7 +46,8 @@ export interface StatusBadgeProps extends React.ComponentProps<"span"> {
 }
 
 /**
- * Status is always icon + text. Color is redundant, never the only encoding.
+ * Variant D status pill. Status is always icon + text + soft color; the color
+ * is redundant, never the only encoding.
  */
 export function StatusBadge({
   tone,
@@ -62,14 +63,14 @@ export function StatusBadge({
       role={live ? "status" : undefined}
       aria-live={live ? "polite" : undefined}
       className={cn(
-        "inline-flex items-center gap-1.5 whitespace-nowrap text-xs font-medium",
+        "inline-flex max-w-full items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium leading-none",
         TONE_CLASS[tone],
         className,
       )}
       {...props}
     >
       <ToneIcon tone={tone} />
-      {children}
+      <span className="min-w-0 break-words">{children}</span>
     </span>
   );
 }

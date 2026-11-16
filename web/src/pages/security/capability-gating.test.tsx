@@ -3,6 +3,7 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { renderApp } from "@/test/render-app";
 import { server } from "@/test/server";
+import { expectNoBannedUiSymbols } from "@/test/ui-copy";
 
 function capabilityDocument(overrides: Record<string, unknown> = {}) {
   return {
@@ -145,6 +146,8 @@ describe("capability gating for login and audit", () => {
     expect(
       screen.queryByRole("region", { name: "Operator Audit Event 查询" }),
     ).not.toBeInTheDocument();
+    // Honest unknown state, no fabricated audit UI, no banned separators.
+    expectNoBannedUiSymbols();
   });
 
   it("fails closed when the operator_audit capability key is absent", async () => {

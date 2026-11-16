@@ -207,7 +207,7 @@ describe("Admin session lifecycle", () => {
     expect(within(banner).getByText("Operator")).toBeInTheDocument();
     expect(within(banner).queryByRole("link", { name: "登录" })).not.toBeInTheDocument();
     expect(await screen.findByTestId("global-http-notice")).toHaveTextContent(
-      /缺少权限：需要 SuperAdmin 角色/,
+      /缺少权限，需要 SuperAdmin 角色/,
     );
     expect(screen.getByTestId("session-expiry-notice")).toBeInTheDocument();
   });

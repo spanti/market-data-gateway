@@ -108,7 +108,7 @@ describe("Feed Subscription presentation", () => {
       collectorInstanceId: "collector",
     });
     expect(view.drift).toMatchObject({
-      label: expect.stringContaining("漂移"),
+      label: "存在漂移",
       inSync: false,
       desiredVersion: 3,
       observedVersion: 2,
@@ -122,6 +122,19 @@ describe("Feed Subscription presentation", () => {
     // The four concepts must never collapse into one combined status value.
     const values = [view.desired.label, view.observed.label, view.drift.label];
     expect(new Set(values).size).toBeGreaterThan(1);
+
+    // UI-generated copy never uses the banned separators. The raw message
+    // remains available separately for verbatim rendering.
+    for (const copy of [
+      view.desired.label,
+      view.observed.label,
+      view.drift.label,
+      view.drift.reasonLabel,
+      FEED_DELETION_HISTORY_NOTE,
+    ]) {
+      expect(copy).not.toContain("·");
+      expect(copy).not.toContain("：");
+    }
   });
 
   it("marks a tombstoned desired state as pending deletion", () => {

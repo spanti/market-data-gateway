@@ -35,6 +35,21 @@ export interface FeedFreshnessSummary {
   tone: FreshnessTone;
 }
 
+/**
+ * One row shape shared by the Feed Freshness card, detail table and in-page
+ * alert derivation. `stale: null` means the server did not expose enough
+ * information to judge the entry.
+ */
+export interface FeedFreshnessRow {
+  instrumentId: string;
+  feed: string;
+  interval: string;
+  ageS: number | null;
+  thresholdS: number | null;
+  stale: boolean | null;
+  lastEventTs: string | null;
+}
+
 export interface DatasetFreshnessRow {
   interval: string;
   lastFlushedTs: string | null;
@@ -80,6 +95,20 @@ export function toFeedFreshnessView(
     stale: entry.stale,
     tone,
     statusLabel,
+  };
+}
+
+export function toFeedFreshnessRow(
+  view: FeedFreshnessView,
+): FeedFreshnessRow {
+  return {
+    instrumentId: view.instrumentId,
+    feed: view.feed,
+    interval: view.interval,
+    ageS: view.ageS,
+    thresholdS: view.thresholdS,
+    stale: view.tone === "unknown" ? null : view.stale,
+    lastEventTs: view.lastEventTs,
   };
 }
 

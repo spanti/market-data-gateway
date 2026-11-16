@@ -29,7 +29,7 @@ export function EmptyState({
     <div
       data-slot="empty-state"
       className={cn(
-        "flex flex-col items-center justify-center gap-2 px-4 py-8 text-center",
+        "flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-card-border bg-surface-sunken px-4 py-8 text-center",
         className,
       )}
     >
@@ -38,7 +38,9 @@ export function EmptyState({
       </span>
       <p className="text-sm font-medium text-foreground">{title}</p>
       {description ? (
-        <p className="max-w-xl text-xs text-muted-foreground">{description}</p>
+        <p className="max-w-xl text-xs leading-relaxed text-muted-foreground">
+          {description}
+        </p>
       ) : null}
       {action}
     </div>
@@ -67,11 +69,11 @@ export function ErrorState({
       data-slot="error-state"
       role="alert"
       className={cn(
-        "flex flex-col items-start gap-2 border border-border bg-card px-4 py-4",
+        "flex flex-col items-start gap-2 rounded-lg border border-card-border bg-status-critical-bg px-4 py-4",
         className,
       )}
     >
-      <div className="flex items-center gap-2 text-sm font-medium text-status-critical">
+      <div className="flex items-center gap-2 text-sm font-medium text-status-critical-fg">
         {forbidden ? (
           <ShieldAlert className="size-4" aria-hidden="true" />
         ) : (
@@ -79,7 +81,9 @@ export function ErrorState({
         )}
         {title ?? (forbidden ? "没有权限" : "加载失败")}
       </div>
-      <div className="text-xs text-muted-foreground">{description}</div>
+      <div className="break-words text-xs leading-relaxed text-muted-foreground">
+        {description}
+      </div>
       {requestId ? (
         <div className="font-mono text-[11px] text-faint-foreground">
           Request ID: {requestId}
@@ -110,7 +114,10 @@ export function LoadingState({
       data-slot="loading-state"
       role="status"
       aria-live="polite"
-      className={cn("flex flex-col gap-3 px-4 py-6", className)}
+      className={cn(
+        "flex flex-col gap-3 rounded-lg bg-surface-sunken px-4 py-6",
+        className,
+      )}
     >
       <span className="inline-flex items-center gap-2 text-xs text-muted-foreground">
         <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
@@ -164,7 +171,7 @@ export function UnknownState({ cause, reason, className }: UnknownStateProps) {
       data-slot="unknown-state"
       data-cause={cause}
       className={cn(
-        "flex items-start gap-2 px-4 py-3 text-xs text-muted-foreground",
+        "flex items-start gap-2 rounded-lg border border-card-border bg-surface-sunken px-4 py-3 text-xs text-muted-foreground",
         className,
       )}
     >
@@ -172,7 +179,7 @@ export function UnknownState({ cause, reason, className }: UnknownStateProps) {
         className="mt-0.5 size-4 shrink-0 text-faint-foreground"
         aria-hidden="true"
       />
-      <div>
+      <div className="min-w-0 break-words">
         <div className="font-medium text-foreground">{copy.title}</div>
         <div>{copy.description}</div>
         {reason ? <div className="mt-1">{reason}</div> : null}

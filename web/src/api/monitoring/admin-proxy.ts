@@ -7,6 +7,7 @@ import {
   requiresAdminApiReason,
 } from "@/runtime/capability-gates";
 import type { DisabledReason } from "@/runtime/permissions";
+import { trendSeriesName } from "@/api/monitoring/series-display";
 import type { TrendSeries } from "@/api/monitoring/types";
 
 /**
@@ -186,24 +187,14 @@ export function adminMonitoringAvailability(
   }
 }
 
-function seriesName(
-  labels: Record<string, string>,
-  fallback: string,
-  index: number,
-  count: number,
-): string {
-  if (labels.path) {
-    return `${fallback} · ${labels.path}`;
-  }
-  return count > 1 ? `${fallback} ${index + 1}` : fallback;
-}
-
 export function adminResponseToTrendSeries(
   response: Pick<AdminMonitoringQueryResponse, "series">,
   fallbackName: string,
+  identity: string,
 ): TrendSeries[] {
   return response.series.map((series, index) => ({
-    name: seriesName(
+    id: identity,
+    name: trendSeriesName(
       series.labels,
       fallbackName,
       index,

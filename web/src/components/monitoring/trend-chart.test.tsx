@@ -2,13 +2,18 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { TrendChart } from "@/components/monitoring/trend-chart";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import type { TrendSeries } from "@/api/monitoring/types";
+import { installResizeObserverStub } from "@/test/tooltip-env";
+
+installResizeObserverStub();
 
 const t0 = Date.parse("2026-11-09T11:00:00.000Z");
 const t1 = Date.parse("2026-11-09T11:00:30.000Z");
 
 const series: TrendSeries[] = [
   {
+    id: "p50",
     name: "P50",
     points: [
       { ts: t0, value: 10 },
@@ -16,6 +21,7 @@ const series: TrendSeries[] = [
     ],
   },
   {
+    id: "p95",
     name: "P95",
     points: [
       { ts: t0, value: 20 },
@@ -56,14 +62,17 @@ describe("TrendChart accessibility contract", () => {
     expect(chart).toHaveFocus();
 
     await user.keyboard("{ArrowLeft}");
-    expect(
-      screen.getByText(/11:00:00 UTC · P50 10 ms · P95 20 ms/),
-    ).toBeInTheDocument();
+    const readout = screen.getByRole("status");
+    expect(readout).toHaveTextContent(
+      /11:00:00 UTC\s+P50 10 ms\s+P95 20 ms/,
+    );
+    expect(readout.textContent).not.toContain("·");
+    expect(readout.textContent).not.toContain("：");
 
     await user.keyboard("{ArrowRight}");
-    expect(
-      screen.getByText(/11:00:30 UTC · P50 — ms · P95 25 ms/),
-    ).toBeInTheDocument();
+    expect(readout).toHaveTextContent(
+      /11:00:30 UTC\s+P50 — ms\s+P95 25 ms/,
+    );
   });
 
   it("hides the stale table and shows an error state on failure", () => {
@@ -105,5 +114,29 @@ describe("TrendChart accessibility contract", () => {
     expect(
       screen.getByText(/不会自动扩大时间范围/),
     ).toBeInTheDocument();
+  });
+
+  it("keeps chart definitions in optional help, not in required copy", async () => {
+    const user = userEvent.setup();
+    render(
+      <TooltipProvider>
+        <TrendChart
+          title="QPS 趋势"
+          unit="req/s"
+          series={series}
+          help={{
+            label: "QPS 趋势说明",
+            content: "统计窗口和 rate 窗口的补充说明。",
+          }}
+        />
+      </TooltipProvider>,
+    );
+
+    await user.hover(
+      screen.getByRole("button", { name: "QPS 趋势说明" }),
+    );
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "统计窗口和 rate 窗口的补充说明。",
+    );
   });
 });

@@ -1,4 +1,5 @@
 import type * as React from "react";
+import { HelpTrigger, type HelpTriggerSide } from "@/components/help-trigger";
 import {
   EmptyState,
   ErrorState,
@@ -6,11 +7,7 @@ import {
   UnknownState,
   type UnknownCause,
 } from "@/components/states";
-import {
-  PanelDescription,
-  PanelHeader,
-  PanelTitle,
-} from "@/components/ui/panel";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
 export interface ChartLegendItem {
@@ -23,9 +20,17 @@ export interface ChartLegendItem {
 
 export type ChartPanelState = "ready" | "loading" | "empty" | "unknown" | "error";
 
+export interface ChartPanelHelp {
+  /** Accessible name for the `?` trigger. */
+  label: string;
+  /** Supplementary definitions and source window facts. */
+  content: React.ReactNode;
+  side?: HelpTriggerSide;
+}
+
 export interface ChartPanelProps {
   title: string;
-  description?: React.ReactNode;
+  help?: ChartPanelHelp;
   legend?: ChartLegendItem[];
   state?: ChartPanelState;
   unknownCause?: UnknownCause;
@@ -41,12 +46,13 @@ export interface ChartPanelProps {
 
 /**
  * Chart contract: inline legend with current values, explicit states, and an
- * accessible `<details>` data-table fallback. The panel wrapper carries the
- * border and surface; the chart implementation only fills the body.
+ * accessible `<details>` data-table fallback. The panel wrapper carries the D
+ * card surface; the chart implementation only fills the body. Help carries
+ * definitions only, never required error or operation feedback.
  */
 export function ChartPanel({
   title,
-  description,
+  help,
   legend = [],
   state = "ready",
   unknownCause = "not-exposed",
@@ -58,29 +64,41 @@ export function ChartPanel({
   className,
 }: ChartPanelProps) {
   return (
-    <section
+    <Card
       data-slot="chart-panel"
+      role="region"
       data-state={state}
       aria-label={title}
-      className={cn("border border-border bg-card p-5", className)}
+      className={cn("p-5", className)}
     >
-      <PanelHeader>
-        <div>
-          <PanelTitle>{title}</PanelTitle>
-          {description ? (
-            <PanelDescription>{description}</PanelDescription>
-          ) : null}
+      <CardHeader className="p-0">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <CardTitle>{title}</CardTitle>
+            {help ? (
+              <HelpTrigger
+                label={help.label}
+                content={help.content}
+                side={help.side ?? "bottom"}
+              />
+            ) : null}
+          </div>
         </div>
         {legend.length > 0 ? (
           <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs">
             {legend.map((item) => (
-              <span key={item.name} className="inline-flex items-center gap-1.5">
+              <span
+                key={item.name}
+                className="inline-flex min-w-0 items-center gap-1.5"
+              >
                 <span
-                  className="h-0.5 w-4 rounded-full"
+                  className="h-0.5 w-4 shrink-0 rounded-full"
                   style={{ backgroundColor: item.color }}
                   aria-hidden="true"
                 />
-                <span className="text-muted-foreground">{item.name}</span>
+                <span className="break-words text-muted-foreground">
+                  {item.name}
+                </span>
                 <span className="font-semibold tabular-nums">
                   {item.value ?? "未知"}
                 </span>
@@ -91,9 +109,8 @@ export function ChartPanel({
             ))}
           </div>
         ) : null}
-      </PanelHeader>
-
-      <div className="mt-3">
+      </CardHeader>
+      <CardContent className="p-0 pt-3">
         {state === "loading" ? <LoadingState showSkeleton /> : null}
         {state === "empty" ? (
           <EmptyState
@@ -109,16 +126,16 @@ export function ChartPanel({
           />
         ) : null}
         {state === "ready" ? children : null}
-      </div>
 
-      {dataTable ? (
-        <details className="mt-4">
-          <summary className="cursor-pointer text-xs text-muted-foreground">
-            {dataTableSummary}
-          </summary>
-          <div className="mt-2 max-h-52 overflow-auto">{dataTable}</div>
-        </details>
-      ) : null}
-    </section>
+        {dataTable ? (
+          <details className="mt-4">
+            <summary className="cursor-pointer text-xs text-muted-foreground">
+              {dataTableSummary}
+            </summary>
+            <div className="mt-2 max-h-52 overflow-auto">{dataTable}</div>
+          </details>
+        ) : null}
+      </CardContent>
+    </Card>
   );
 }

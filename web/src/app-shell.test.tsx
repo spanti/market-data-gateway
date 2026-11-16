@@ -19,7 +19,7 @@ describe("Operator Console shell", () => {
     renderApp({ initialEntries: ["/"] });
 
     expect(
-      await screen.findByRole("heading", { name: "监控分析工作台" }),
+      await screen.findByRole("heading", { name: "监控总览" }),
     ).toBeInTheDocument();
     const banner = await screen.findByTestId("runtime-mode-banner");
     expect(banner).toHaveAttribute("data-mode", "current-contract");
@@ -33,7 +33,7 @@ describe("Operator Console shell", () => {
     const nav = screen.getByRole("navigation", { name: "一级模块导航" });
 
     const destinations = [
-      { label: "监控", heading: "监控分析工作台", path: "/monitoring" },
+      { label: "监控", heading: "监控总览", path: "/monitoring" },
       { label: "Bar 图与导出", heading: "Bar 图与导出", path: "/bars" },
       { label: "Gateway Console", heading: "Gateway Console", path: "/console" },
       {

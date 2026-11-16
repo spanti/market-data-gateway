@@ -53,7 +53,7 @@ const JOB_STATUS_PRESENTATION: Record<BackfillJobStatus, JobStatusPresentation> 
     running: {
       label: "running",
       tone: "info",
-      note: "进度不确定：契约未提供百分比",
+      note: "进度不确定，契约未提供百分比",
     },
     succeeded: { label: "succeeded", tone: "good" },
     partially_succeeded: {

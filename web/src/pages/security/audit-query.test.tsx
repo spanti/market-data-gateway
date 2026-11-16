@@ -4,6 +4,10 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { renderApp } from "@/test/render-app";
 import { server } from "@/test/server";
+import { installResizeObserverStub } from "@/test/tooltip-env";
+import { expectNoBannedUiSymbols } from "@/test/ui-copy";
+
+installResizeObserverStub();
 
 const capabilityDocument = {
   schema_version: 1,
@@ -280,7 +284,7 @@ describe("Operator Audit Event query", () => {
     const section = await openSecurity();
 
     expect(
-      await within(section).findByText(/缺少权限：需要 SuperAdmin 角色/),
+      await within(section).findByText(/缺少权限，需要 SuperAdmin 角色/),
     ).toBeInTheDocument();
     expect(within(section).getByText(/服务端授权才是安全边界/)).toBeInTheDocument();
     expect(within(section).getByText(/req-audit-403/)).toBeInTheDocument();
@@ -316,6 +320,71 @@ describe("Operator Audit Event query", () => {
       await screen.findByTestId("global-http-notice"),
     ).toHaveTextContent(/写操作已停止/);
     expect(within(banner).queryByText("Operator")).not.toBeInTheDocument();
+  });
+
+  it("keeps the query region UI copy free of banned separators", async () => {
+    server.use(
+      ...baseHandlers(),
+      http.get("*/api/v1/admin/audit-events", () =>
+        HttpResponse.json({
+          items: [eventPayload()],
+          page: { next_cursor: "cursor-2", has_more: true },
+        }),
+      ),
+    );
+
+    const section = await openSecurity();
+    await within(section).findByTestId("audit-event-table");
+    expectNoBannedUiSymbols(section);
+  });
+
+  it("renders a backend error message verbatim with its request id inline", async () => {
+    server.use(
+      ...baseHandlers(),
+      http.get("*/api/v1/admin/audit-events", () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: "internal_error",
+              message: "upstream · failed：timeout",
+              details: {},
+              request_id: "req-raw-500",
+            },
+          },
+          { status: 500, headers: { "X-Request-ID": "req-raw-500" } },
+        ),
+      ),
+    );
+
+    const section = await openSecurity();
+    const raw = await within(section).findByText("upstream · failed：timeout");
+    expect(raw).toHaveAttribute("data-raw-evidence", "true");
+    expect(raw.textContent).toBe("upstream · failed：timeout");
+    expect(within(section).getByText(/req-raw-500/)).toBeInTheDocument();
+    expectNoBannedUiSymbols(section);
+  });
+
+  it("moves query boundary explanations into accessible help", async () => {
+    const user = userEvent.setup();
+    server.use(
+      ...baseHandlers(),
+      http.get("*/api/v1/admin/audit-events", () =>
+        HttpResponse.json({
+          items: [],
+          page: { next_cursor: null, has_more: false },
+        }),
+      ),
+    );
+
+    const section = await openSecurity();
+    const trigger = within(section).getByRole("button", {
+      name: "审计查询说明",
+    });
+    await user.hover(trigger);
+
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      /from 为闭区间/,
+    );
   });
 
   it("exposes filter controls but still no role switcher in Admin mode", async () => {
