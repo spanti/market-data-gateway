@@ -28,6 +28,8 @@ const HELP_NAMES = [
   "最大 Revision Bar 图说明",
   "原始 Revision 表说明",
   "小文件 CSV 直接下载说明",
+  "Export Job 说明",
+  "Export Job 状态说明",
   "实时跟随说明",
 ] as const;
 
@@ -36,6 +38,7 @@ const MIGRATED_REGION_SELECTORS = [
   '[data-slot="chart-panel"]',
   '[role="region"][aria-label="原始 Revision 表"]',
   '[role="region"][aria-label="CSV 直接下载"]',
+  '[role="region"][aria-label="Export Job"]',
   '[role="region"][aria-label="实时跟随"]',
 ] as const;
 
@@ -128,9 +131,8 @@ test("chart data table renders exact server strings and keyboard readout works",
   }
 
   // Raw Revision JSON is raw evidence: expand it and verify it is marked and
-  // still readable, while UI-generated copy in the migrated regions stays free
-  // of `·` and `：`. The Export Job panel is ticket 03 scope and is excluded
-  // until its own migration lands.
+  // still readable, while UI-generated copy in the migrated regions (including
+  // the Export Job area) stays free of `·` and `：`.
   await page
     .locator('[role="region"][aria-label="原始 Revision 表"] summary', {
       hasText: "原始 JSON",

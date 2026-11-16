@@ -34,6 +34,17 @@ test("downloads the real small CSV with server bytes and filename", async ({
     '[role="region"][aria-label="CSV 直接下载"]',
   );
 
+  // The migrated Export Job area is present for the same query, stays
+  // disabled in Current Contract and keeps its copy separator-free.
+  const exportRegion = page.getByRole("region", { name: "Export Job" });
+  await expect(exportRegion).toBeVisible();
+  await expect(exportRegion).toContainText("不需要 Export Job");
+  await expect(helpTrigger(page, "Export Job 说明")).toBeVisible();
+  await expectNoBannedUiSymbols(
+    page,
+    '[role="region"][aria-label="Export Job"]',
+  );
+
   const downloadPromise = page.waitForEvent("download");
   await page
     .getByRole("button", { name: "直接下载 CSV（≤31 天）" })
