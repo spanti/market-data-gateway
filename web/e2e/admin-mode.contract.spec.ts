@@ -249,7 +249,9 @@ test.describe("CONTRACT-ONLY Admin API mode (backend absent)", () => {
     await expect(confirm).toBeEnabled();
     await confirm.click();
 
-    await expect(row.getByText("成功")).toBeVisible();
+    // Exact match avoids the static "已接受 ≠ 成功" explanation and waits
+    // for the actual succeeded lifecycle badge.
+    await expect(row.getByText("成功", { exact: true })).toBeVisible();
     expect(postCount).toBe(1);
     expect(captured.body).toMatchObject({
       reason: "drain before certificate rotation",
