@@ -34,7 +34,7 @@ export function SessionExpiryNotice() {
       data-testid="session-expiry-notice"
       role="status"
       aria-live="polite"
-      className="border-b border-border bg-surface-sunken"
+      className="bg-surface-sunken"
     >
       <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-3 px-5 py-2 text-xs lg:px-8">
         <StatusBadge tone="warning">会话即将过期</StatusBadge>

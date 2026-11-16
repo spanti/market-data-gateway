@@ -97,12 +97,20 @@ export default defineConfig(({ mode }) => {
               "@tanstack/react-query",
             ],
             "vendor-radix": [
+              "radix-ui",
               "@radix-ui/react-dialog",
               "@radix-ui/react-label",
               "@radix-ui/react-slot",
               "@radix-ui/react-tabs",
               "@radix-ui/react-tooltip",
             ],
+            "vendor-forms": ["react-hook-form", "@hookform/resolvers"],
+            "vendor-icons": [
+              "lucide-react",
+              "@hugeicons/react",
+              "@hugeicons/core-free-icons",
+            ],
+            "vendor-virtual": ["@tanstack/react-virtual"],
             "vendor-http": ["axios"],
             "vendor-schema": ["zod"],
             "vendor-echarts": [

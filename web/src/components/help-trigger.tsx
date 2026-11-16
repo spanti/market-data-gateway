@@ -4,7 +4,6 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
 
 export type HelpTriggerSide = "top" | "right" | "bottom" | "left";
 
@@ -14,8 +13,6 @@ export interface HelpTriggerProps {
   /** Readable help body. Required risk or error feedback must stay inline. */
   content: React.ReactNode;
   side?: HelpTriggerSide;
-  className?: string;
-  contentClassName?: string;
 }
 
 /**
@@ -31,8 +28,6 @@ export function HelpTrigger({
   label,
   content,
   side = "top",
-  className,
-  contentClassName,
 }: HelpTriggerProps) {
   const [open, setOpenState] = React.useState(false);
   const openRef = React.useRef(false);
@@ -95,10 +90,7 @@ export function HelpTrigger({
           data-slot="help-trigger"
           aria-label={label}
           aria-expanded={open}
-          className={cn(
-            "inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-card-border bg-card text-xs font-semibold leading-none text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
-            className,
-          )}
+          className="inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-card-border bg-card text-xs font-semibold leading-none text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           onPointerDownCapture={handlePointerDownCapture}
           onClickCapture={handleClick}
           onPointerCancel={handlePointerCancel}
@@ -110,7 +102,7 @@ export function HelpTrigger({
         side={side}
         sideOffset={8}
         collisionPadding={12}
-        className={cn("bg-popover text-left text-popover-foreground", contentClassName)}
+        className="bg-popover text-left text-popover-foreground"
       >
         <span
           data-help-content="true"

@@ -42,7 +42,6 @@ registerEChartsModules([
 
 export interface TrendChartProps {
   title: string;
-  description?: string;
   help?: ChartPanelHelp;
   unit: string;
   series: TrendSeries[];
@@ -84,7 +83,6 @@ function isNonRenderingDom(): boolean {
  */
 export function TrendChart({
   title,
-  description = "",
   help,
   unit,
   series,
@@ -112,7 +110,7 @@ export function TrendChart({
     () =>
       buildTrendChartOption({
         title,
-        description,
+        description: "",
         unit,
         series: series.map((item, index) => ({
           name: item.name,
@@ -121,7 +119,7 @@ export function TrendChart({
         })),
         palette: resolvedPalette,
       }),
-    [title, description, unit, series, colors, resolvedPalette],
+    [title, unit, series, colors, resolvedPalette],
   );
 
   useEffect(() => {
@@ -191,7 +189,6 @@ export function TrendChart({
   return (
     <ChartPanel
       title={title}
-      description={description}
       help={help}
       legend={legend}
       state={state}

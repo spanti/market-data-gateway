@@ -313,6 +313,7 @@ test.describe("CONTRACT-ONLY Export Job lifecycle (Admin API intercepted)", () =
     await expect(dialog).toBeVisible();
     await expect(dialog).toContainText("确认创建单独分段 Export Job");
     await expect(dialog).toContainText("不会合并为多 Instrument ZIP");
+    await expectNoBannedUiSymbols(page, '[data-slot="dialog-content"]');
 
     const confirmed = dialog.getByLabel(/我确认只创建所选分段/);
     await confirmed.focus();

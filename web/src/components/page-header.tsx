@@ -7,8 +7,6 @@ export interface PageHeaderProps {
   description?: React.ReactNode;
   /** Status summary shown directly under the title. */
   status?: React.ReactNode;
-  /** Right-aligned evidence such as source windows. */
-  meta?: React.ReactNode;
   actions?: React.ReactNode;
   /** Optional `?` help trigger next to the title. */
   help?: React.ReactNode;
@@ -24,7 +22,6 @@ export function PageHeader({
   title,
   description,
   status,
-  meta,
   actions,
   help,
   className,
@@ -53,11 +50,8 @@ export function PageHeader({
           </p>
         ) : null}
       </div>
-      {(meta ?? actions) ? (
-        <div className="flex flex-col items-end gap-2 text-right">
-          {meta}
-          {actions}
-        </div>
+      {actions ? (
+        <div className="flex flex-col items-end gap-2 text-right">{actions}</div>
       ) : null}
     </div>
   );
