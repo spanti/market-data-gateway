@@ -389,6 +389,24 @@ def test_mapping_row_uses_x_flag_and_decimals() -> None:
     assert bar.volume == Decimal("10")
 
 
+def test_timeframe_mapping_live_payload_is_flattened() -> None:
+    """ccxt 4.5 returns {timeframe: [row, ...]} for a watched symbol."""
+    exchange = FakeExchange()
+    handler = CcxtFeedHandler(config=_config(), exchange=exchange)
+    base = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+    try:
+        exchange.push_for_symbols(
+            {SYMBOL: {"1m": [_row(base, closed=True)]}}
+        )
+        bars = _collect(handler, 1)
+    finally:
+        handler.close()
+
+    (bar,) = bars
+    assert bar.open_ts == base
+    assert str(bar.close) == "100.5"
+
+
 def _minute_floor(value: datetime) -> datetime:
     return value.replace(second=0, microsecond=0)
 

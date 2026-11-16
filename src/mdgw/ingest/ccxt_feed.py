@@ -173,6 +173,15 @@ def _iter_raw_rows(rows) -> Iterable:
     if rows is None:
         return ()
     if isinstance(rows, Mapping):
+        # ccxt 4.5 returns `{timeframe: [row, ...]}` for a watched symbol
+        # instead of a bare row list. Flatten those lists; a genuine OHLCV
+        # row mapping has scalar values and is still treated as one row.
+        values = list(rows.values())
+        if values and all(
+            isinstance(value, Sequence) and not isinstance(value, (str, bytes))
+            for value in values
+        ):
+            return [row for value in values for row in value]
         return (rows,)
     if isinstance(rows, Sequence):
         if not rows:
