@@ -4,6 +4,7 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { renderApp } from "@/test/render-app";
 import { server } from "@/test/server";
+import { expectNoBannedUiSymbols } from "@/test/ui-copy";
 
 const capabilityDocument = {
   schema_version: 1,
@@ -150,12 +151,14 @@ describe("Operator Audit Event detail", () => {
       sequence: 1042,
       result: "requested",
       occurred_at: "2026-11-09T12:00:00.000000000Z",
+      reason: "left · right：value",
     });
     const terminal = baseEvent({
       event_id: "evt_terminal",
       sequence: 1043,
       result: "succeeded",
       occurred_at: "2026-11-09T12:00:05.000000000Z",
+      reason: "upstream · failed：timeout",
     });
 
     let phase: "requested" | "both" = "requested";
@@ -216,6 +219,63 @@ describe("Operator Audit Event detail", () => {
     expect(items[0]).toHaveTextContent("1042");
     expect(items[1]).toHaveTextContent("1043");
     expect(items[0]).toHaveTextContent('"version": 2');
+
+    // Timeline reasons are raw evidence and keep their exact bytes; the
+    // timeline's own copy stays inside the banned-symbol boundary.
+    const requestedReason = within(items[0]!).getByText(
+      "left · right：value",
+    );
+    expect(requestedReason).toHaveAttribute("data-raw-evidence", "true");
+    expect(requestedReason.textContent).toBe("left · right：value");
+    const terminalReason = within(items[1]!).getByText(
+      "upstream · failed：timeout",
+    );
+    expect(terminalReason).toHaveAttribute("data-raw-evidence", "true");
+    expect(terminalReason.textContent).toBe("upstream · failed：timeout");
+    expectNoBannedUiSymbols(timeline);
+  });
+
+  it("preserves raw reason, failure reason and diff bytes while keeping copy clean", async () => {
+    const rawNote = "a·b：c";
+    const event = baseEvent({
+      operation_id: null,
+      reason: "left · right：value",
+      failure_reason: "upstream · failed：timeout",
+      diff: {
+        before: { note: rawNote },
+        after: { note: "d·e：f" },
+        redacted_paths: ["/secret·path：x"],
+      },
+    });
+    server.use(
+      ...listHandlers(event),
+      http.get("*/api/v1/admin/audit-events/:eventId", () =>
+        HttpResponse.json(event),
+      ),
+    );
+
+    await openDetail(event);
+
+    const detail = await screen.findByRole("region", { name: "事件详情" });
+    const reason = await within(detail).findByText("left · right：value");
+    expect(reason).toHaveAttribute("data-raw-evidence", "true");
+    expect(reason.textContent).toBe("left · right：value");
+
+    const failure = within(detail).getByText("upstream · failed：timeout");
+    expect(failure).toHaveAttribute("data-raw-evidence", "true");
+    expect(failure.textContent).toBe("upstream · failed：timeout");
+
+    const before = within(detail).getByTestId("audit-diff-before");
+    expect(before).toHaveAttribute("data-raw-evidence", "true");
+    expect(before.textContent).toBe(JSON.stringify({ note: rawNote }, null, 2));
+
+    expect(within(detail).getByText("/secret·path：x")).toHaveAttribute(
+      "data-raw-evidence",
+      "true",
+    );
+    // The Access Role is an audit identity field, never a Service Role.
+    expect(within(detail).getByText("Access Role")).toBeInTheDocument();
+    expectNoBannedUiSymbols(detail);
   });
 
   it("fails closed on a malformed event detail payload", async () => {

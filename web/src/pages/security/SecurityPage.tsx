@@ -1,3 +1,4 @@
+import { HelpTrigger } from "@/components/help-trigger";
 import { ForbiddenState, PermissionGate } from "@/components/permission-gate";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
@@ -23,7 +24,13 @@ export function SecurityPage() {
     <>
       <PageHeader
         title="Security & Audit"
-        description="当前身份与 Operator Audit Event 查询；首版不做 IAM 管理，前端禁用只是界面约束，服务端授权才是安全边界。"
+        help={
+          <HelpTrigger
+            label="Security & Audit 说明"
+            content="当前身份与 Operator Audit Event 查询。首版不做 IAM 管理，前端禁用只是界面约束，服务端授权才是安全边界。"
+            side="bottom"
+          />
+        }
         status={
           role ? (
             <StatusBadge tone="good">{role}</StatusBadge>

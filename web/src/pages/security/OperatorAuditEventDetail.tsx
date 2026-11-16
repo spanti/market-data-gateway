@@ -1,16 +1,13 @@
+import { ShieldCheck } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { fetchOperatorAuditEvent } from "@/api/endpoints/operator-audit";
 import { HttpError } from "@/api/http/types";
+import { HelpTrigger } from "@/components/help-trigger";
 import { ErrorState, LoadingState } from "@/components/states";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
-import {
-  Panel,
-  PanelDescription,
-  PanelHeader,
-  PanelTitle,
-} from "@/components/ui/panel";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { AuditDiff } from "@/pages/security/AuditDiff";
 import { AuditOperationTimeline } from "@/pages/security/AuditOperationTimeline";
 import {
@@ -85,7 +82,9 @@ function DetailError({
   return (
     <ErrorState
       title="事件详情加载失败"
-      description={error.message}
+      description={
+        <span data-raw-evidence="true">{error.message}</span>
+      }
       requestId={error.requestId}
       onRetry={onRetry}
     />
@@ -109,20 +108,33 @@ export function OperatorAuditEventDetail({
   });
 
   return (
-    <Panel className="mt-4 p-5" aria-label="事件详情">
-      <PanelHeader>
-        <div>
-          <PanelTitle>事件详情</PanelTitle>
-          <PanelDescription>
-            不可变审计事件快照；脱敏值固定为 [REDACTED]，前端不重建隐藏值。
-          </PanelDescription>
+    <Card
+      role="region"
+      aria-label="事件详情"
+      className="mt-4"
+    >
+      <CardHeader className="p-5 pb-0">
+        <div className="flex min-w-0 items-start gap-2.5">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent-strong">
+            <ShieldCheck className="size-4" aria-hidden="true" />
+          </span>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <CardTitle>事件详情</CardTitle>
+              <HelpTrigger
+                label="事件详情说明"
+                content="不可变审计事件快照。脱敏值固定为 [REDACTED]，前端不重建隐藏值。哈希链仅作为元数据展示，不宣称不可篡改存储；首版不提供哈希校验 UI。"
+                side="bottom"
+              />
+            </div>
+          </div>
         </div>
         <Button size="sm" variant="outline" onClick={onClose}>
           关闭详情
         </Button>
-      </PanelHeader>
+      </CardHeader>
 
-      <div className="mt-4">
+      <CardContent className="p-5 pt-4">
         {query.isPending ? (
           <LoadingState label="正在加载事件详情…" />
         ) : query.isError ? (
@@ -155,10 +167,10 @@ export function OperatorAuditEventDetail({
                 {query.data.actor.access_role ?? "—"}
               </Field>
               <Field label="动作">
-                <code className="font-mono">{query.data.action}</code>
+                <code className="font-mono break-all">{query.data.action}</code>
               </Field>
               <Field label="对象">
-                <div className="font-mono text-[11px]">
+                <div className="font-mono text-[11px] break-all">
                   {query.data.target.type}:{query.data.target.id}
                 </div>
                 <div className="text-faint-foreground">
@@ -166,35 +178,58 @@ export function OperatorAuditEventDetail({
                 </div>
               </Field>
               <Field label="原因">
-                {query.data.reason ?? "—"}
+                {query.data.reason === null ? (
+                  "—"
+                ) : (
+                  <span
+                    data-raw-evidence="true"
+                    className="break-words"
+                  >
+                    {query.data.reason}
+                  </span>
+                )}
               </Field>
               <Field label="失败原因">
-                {query.data.failure_reason ?? "—"}
+                {query.data.failure_reason === null ? (
+                  "—"
+                ) : (
+                  <span
+                    data-raw-evidence="true"
+                    className="break-words"
+                  >
+                    {query.data.failure_reason}
+                  </span>
+                )}
               </Field>
               <Field label="Request ID">
-                <span className="font-mono text-[11px]">
+                <span className="font-mono text-[11px] break-all">
                   {query.data.request_id}
                 </span>
               </Field>
               <Field label="Operation ID">
-                <span className="font-mono text-[11px]">
+                <span className="font-mono text-[11px] break-all">
                   {query.data.operation_id ?? "—"}
                 </span>
               </Field>
               <Field label="Job ID">
-                <span className="font-mono text-[11px]">
+                <span className="font-mono text-[11px] break-all">
                   {query.data.job_id ?? "—"}
                 </span>
               </Field>
               <Field label="Instance ID">
-                <span className="font-mono text-[11px]">
+                <span className="font-mono text-[11px] break-all">
                   {query.data.instance_id ?? "—"}
                 </span>
               </Field>
             </dl>
 
-            <section className="mt-4 border-t border-border pt-3" aria-label="哈希链元数据">
-              <h3 className="text-xs font-semibold">哈希链元数据</h3>
+            <section
+              className="mt-5 rounded-lg bg-surface-sunken p-3"
+              aria-label="哈希链元数据"
+            >
+              <h3 className="text-xs font-semibold text-foreground">
+                哈希链元数据
+              </h3>
               <dl className="mt-2 grid grid-cols-1 gap-x-6 gap-y-2 text-[11px] sm:grid-cols-3">
                 <Field label="算法">
                   <span className="font-mono">
@@ -218,8 +253,13 @@ export function OperatorAuditEventDetail({
               </p>
             </section>
 
-            <section className="mt-4 border-t border-border pt-3" aria-label="变更 Diff">
-              <h3 className="text-xs font-semibold">变更 Diff</h3>
+            <section
+              className="mt-4 rounded-lg bg-surface-sunken p-3"
+              aria-label="变更 Diff"
+            >
+              <h3 className="text-xs font-semibold text-foreground">
+                变更 Diff
+              </h3>
               <AuditDiff
                 before={query.data.diff.before}
                 after={query.data.diff.after}
@@ -232,7 +272,7 @@ export function OperatorAuditEventDetail({
             ) : null}
           </>
         )}
-      </div>
-    </Panel>
+      </CardContent>
+    </Card>
   );
 }
