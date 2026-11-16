@@ -121,6 +121,36 @@ test.describe("narrow desktop layout 1024px", () => {
     await expectNoHorizontalOverflow(page);
   });
 
+  test("console tabs stay usable without page-level horizontal overflow", async ({
+    page,
+  }) => {
+    await page.goto("/console");
+    await expect(
+      page.getByRole("heading", { name: "Gateway Console" }),
+    ).toBeVisible();
+
+    await page.getByRole("tab", { name: "Feed Subscription" }).click();
+    await expect(
+      page.getByRole("region", { name: "Feed Subscription" }),
+    ).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+
+    await page.getByRole("tab", { name: "Service Instance" }).click();
+    await expect(page.getByTestId("service-instance-collector")).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+
+    await page.getByRole("tab", { name: "WebSocket Debug" }).click();
+    await expect(
+      page.getByRole("heading", { name: "WebSocket Debug" }),
+    ).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+
+    // Back on Feed, every UI-generated string must avoid the banned
+    // separators. Raw backend error text stays exempt via data-raw-evidence.
+    await page.getByRole("tab", { name: "Feed Subscription" }).click();
+    await expectNoBannedUiSymbols(page, "#main-content");
+  });
+
   test("quality shows the real Collector snapshot and disabled Admin areas without overflow", async ({
     page,
   }) => {
@@ -230,6 +260,13 @@ for (const width of [1280, 1440] as const) {
       ).toBeVisible();
       await expectNoHorizontalOverflow(page);
 
+      await page.getByRole("tab", { name: "Feed Subscription" }).click();
+      await expect(
+        page.getByRole("region", { name: "Feed Subscription" }),
+      ).toBeVisible();
+      await expectNoBannedUiSymbols(page, "#main-content");
+      await expectNoHorizontalOverflow(page);
+
       // The migrated Bars query, chart and data regions stay usable and do
       // not overflow at this desktop width.
       await page.goto(barsQueryUrl());
@@ -320,6 +357,29 @@ for (const width of [1280, 1440] as const) {
   });
 }
 
+test.describe("console feed help", () => {
+  test.use({ viewport: { width: 1280, height: 900 } });
+
+  test("Feed Subscription help opens by hover and keyboard focus and closes with Escape", async ({
+    page,
+  }) => {
+    await page.goto("/console");
+    await expect(
+      page.getByRole("region", { name: "Feed Subscription" }),
+    ).toBeVisible();
+
+    const hovered = await openHelpByHover(page, "Feed Subscription 说明");
+    await expect(hovered.tooltip).toContainText("Desired");
+    await expectTooltipUsable(page);
+    await closeHelpWithEscape(page);
+
+    const focused = await openHelpByKeyboard(page, "Feed Subscription 说明");
+    await expect(focused.tooltip).toContainText("409");
+    await expectTooltipUsable(page);
+    await closeHelpWithEscape(page);
+  });
+});
+
 test.describe("quality help with a touch context", () => {
   test.use({ viewport: { width: 1280, height: 900 }, hasTouch: true });
 
@@ -371,6 +431,19 @@ test.describe("security help interactions", () => {
     );
     await expectTooltipUsable(page);
     await closeHelpWithEscape(page);
+  });
+});
+
+test.describe("console feed touch help", () => {
+  test.use({ viewport: { width: 1024, height: 900 }, hasTouch: true });
+
+  test("Feed Subscription help toggles on touch tap", async ({ page }) => {
+    await page.goto("/console");
+    await expect(
+      page.getByRole("region", { name: "Feed Subscription" }),
+    ).toBeVisible();
+    await toggleHelpByTouch(page, "Feed Subscription 说明");
+    await expectNoHorizontalOverflow(page);
   });
 });
 

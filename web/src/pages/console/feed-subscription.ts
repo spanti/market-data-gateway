@@ -113,9 +113,7 @@ export function describeFeedSubscription(
       collectorInstanceId: subscription.observed.collector_instance_id,
     },
     drift: {
-      label: subscription.drift.in_sync
-        ? "同步"
-        : `漂移：${reasonLabel}`,
+      label: subscription.drift.in_sync ? "同步" : "存在漂移",
       inSync: subscription.drift.in_sync,
       desiredVersion: subscription.drift.desired_version,
       observedVersion: subscription.drift.observed_version,

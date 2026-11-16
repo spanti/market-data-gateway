@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { renderApp } from "@/test/render-app";
@@ -53,14 +53,35 @@ function futureSession() {
   };
 }
 
-describe("Console mode banner", () => {
+function consoleHeader() {
+  const heading = screen.getByRole("heading", {
+    name: "Gateway Console",
+    level: 1,
+  });
+  const header = heading.closest('[data-slot="page-header"]');
+  if (!(header instanceof HTMLElement)) {
+    throw new Error("Console page header not found");
+  }
+  return within(header);
+}
+
+async function findConsoleHeader() {
+  await screen.findByRole("heading", { name: "Gateway Console", level: 1 });
+  return consoleHeader();
+}
+
+describe("Console shell mode status", () => {
   it("describes Current Contract real status and the public /ws", async () => {
     renderApp({ initialEntries: ["/console"] });
 
+    const header = await findConsoleHeader();
+    expect(await header.findByText("Current Contract")).toBeInTheDocument();
     expect(
-      await screen.findByText(
-        /Current Contract：真实状态 \+ 公开 \/ws；管理写为 Admin API 契约目标/,
-      ),
+      header.getByText(/真实状态与公开 \/ws 可用/),
+    ).toBeInTheDocument();
+    expect(header.getByText(/管理写需要 Admin API/)).toBeInTheDocument();
+    expect(
+      header.getByRole("button", { name: "Gateway Console 说明" }),
     ).toBeInTheDocument();
   });
 
@@ -76,14 +97,11 @@ describe("Console mode banner", () => {
 
     renderApp({ initialEntries: ["/console"] });
 
-    expect(
-      await screen.findByText(
-        /Admin API：service-instance 接缝 \+ 仅 Admin WS（\/api\/v1\/admin\/ws）/,
-      ),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText(/Current Contract：真实状态/),
-    ).not.toBeInTheDocument();
+    const header = await findConsoleHeader();
+    expect(await header.findByText("Admin API")).toBeInTheDocument();
+    expect(header.getByText(/service-instance 接缝/)).toBeInTheDocument();
+    expect(header.getByText(/仅使用 \/api\/v1\/admin\/ws/)).toBeInTheDocument();
+    expect(header.queryByText("Current Contract")).not.toBeInTheDocument();
   });
 
   it("says unknown and no connection when capabilities are unknown", async () => {
@@ -105,13 +123,11 @@ describe("Console mode banner", () => {
 
     renderApp({ initialEntries: ["/console"] });
 
+    const header = await findConsoleHeader();
+    expect(await header.findByText("能力未知")).toBeInTheDocument();
     expect(
-      await screen.findByText(
-        /能力未知：不连接任何 WebSocket，管理写保持禁用/,
-      ),
+      header.getByText(/不连接任何 WebSocket，管理写保持禁用/),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByText(/Current Contract：真实状态/),
-    ).not.toBeInTheDocument();
+    expect(header.queryByText("Current Contract")).not.toBeInTheDocument();
   });
 });
